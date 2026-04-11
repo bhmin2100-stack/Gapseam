@@ -1,7 +1,0 @@
-pyproject.toml
-src/gapsim/__init__.py
-src/gapsim.egg-info/PKG-INFO
-src/gapsim.egg-info/SOURCES.txt
-src/gapsim.egg-info/dependency_links.txt
-src/gapsim.egg-info/requires.txt
-src/gapsim.egg-info/top_level.txt

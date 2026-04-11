@@ -1,17 +1,23 @@
-﻿# Python virtual environment
+# Python virtual environment
 .venv/
 
 # Python cache
 __pycache__/
 *.pyc
 
+# Build/package artifacts
+build/
+dist/
+*.egg-info/
+
 # Run/output folders
 runs/
 exports/
 
-# Build artifacts
-build/
-dist/
+# Archive / backup / dump
+archive/
+*.bak
+sources_dump.txt
 
 # OS files
 .DS_Store
