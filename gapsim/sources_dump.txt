@@ -1,0 +1,2364 @@
+
+==========================================================================================
+FILE: src\gapsim\__init__.py
+==========================================================================================
+
+__all__ = ["__version__"]
+__version__ = "0.1.0"
+
+==========================================================================================
+FILE: src\gapsim\domain\recipe.py
+==========================================================================================
+
+from __future__ import annotations
+from dataclasses import dataclass
+from typing import Any, Dict, List, Tuple, Optional
+from gapsim.domain.units import LengthUnit
+
+Point = Tuple[float, float]
+SCHEMA_VERSION = 1
+
+@dataclass
+class GeometrySpec:
+    points: List[Point]
+    unit: LengthUnit = LengthUnit.ANGSTROM
+    bottom_closed: bool = True
+    top_open: bool = True
+    side_walls_infinite: bool = True
+
+@dataclass
+class SmoothingSpec:
+    segment_n: int = 200
+    iterations: int = 5
+
+@dataclass
+class Recipe:
+    schema_version: int
+    geometry: GeometrySpec
+    smoothing: SmoothingSpec
+    steps: List[Dict[str, Any]]       # engine steps (future)
+    addons: List[Dict[str, Any]]      # analysis addons (future)
+    meta: Optional[Dict[str, Any]] = None
+
+==========================================================================================
+FILE: src\gapsim\domain\units.py
+==========================================================================================
+
+from __future__ import annotations
+from dataclasses import dataclass
+from enum import Enum
+
+class LengthUnit(str, Enum):
+    ANGSTROM = "A"
+    NM = "nm"
+
+@dataclass(frozen=True)
+class Length:
+    value: float
+    unit: LengthUnit = LengthUnit.ANGSTROM
+
+def to_angstrom(x: float, unit: LengthUnit) -> float:
+    if unit == LengthUnit.ANGSTROM:
+        return x
+    if unit == LengthUnit.NM:
+        return x * 10.0
+    raise ValueError(f"Unsupported unit: {unit}")
+
+def from_angstrom(a: float, unit: LengthUnit) -> float:
+    if unit == LengthUnit.ANGSTROM:
+        return a
+    if unit == LengthUnit.NM:
+        return a / 10.0
+    raise ValueError(f"Unsupported unit: {unit}")
+
+==========================================================================================
+FILE: src\gapsim\engine\run_logger.py
+==========================================================================================
+
+from __future__ import annotations
+import json
+import platform
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict
+
+def create_run_dir(runs_root: Path, case_name: str) -> Path:
+    runs_root.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    safe = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in (case_name or "case"))
+    base_name = f"{ts}_{safe}"
+    for i in range(0, 1000):
+        suffix = "" if i == 0 else f"_{i:03d}"
+        run_dir = runs_root / f"{base_name}{suffix}"
+        try:
+            run_dir.mkdir(parents=True, exist_ok=False)
+            return run_dir
+        except FileExistsError:
+            continue
+    raise RuntimeError("Failed to allocate unique run directory name")
+
+def write_json(path: Path, data: Any) -> None:
+    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+def make_meta(engine_version: str, recipe_meta: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "engine_version": engine_version,
+        "created_at_local": datetime.now().isoformat(timespec="seconds"),
+        "python": platform.python_version(),
+        "platform": platform.platform(),
+        "recipe_meta": recipe_meta,
+    }
+
+==========================================================================================
+FILE: src\gapsim\engine\runner.py
+==========================================================================================
+
+from __future__ import annotations
+
+import csv
+from pathlib import Path
+from typing import Dict, Any, List, Optional, Callable
+
+from gapsim.domain.recipe import Recipe
+from gapsim.io.recipe_io import load_recipe
+from gapsim.engine.run_logger import create_run_dir, write_json, make_meta
+from gapsim.engine.types import EngineState, RunContext
+from gapsim.engine.viz import render_snapshot
+from gapsim.engine.steps.conformal_growth import ConformalGrowthStep
+
+_STEP_TABLE = {
+    "conformal_growth": ConformalGrowthStep(),
+}
+
+class EngineRunner:
+    def __init__(self, runs_root: Path | str = "runs") -> None:
+        self.runs_root = Path(runs_root)
+
+    def run(
+        self,
+        recipe_path: Path | str,
+        *,
+        cancel_check: Optional[Callable[[], bool]] = None,
+        progress_cb: Optional[Callable[[int, int], None]] = None,
+        snapshot_cb: Optional[Callable[[Path], None]] = None,
+        message_cb: Optional[Callable[[str], None]] = None,
+    ) -> Path:
+        rp = Path(recipe_path)
+        recipe: Recipe = load_recipe(rp)
+
+        meta = recipe.meta or {}
+        case_name = str(meta.get("case_name") or "case")
+        snap_int = int(meta.get("snapshot_interval") or 10)
+        snap_int = max(1, snap_int)
+
+        run_dir = create_run_dir(self.runs_root, case_name)
+        ctx = RunContext(run_dir=str(run_dir))
+
+        def canceled() -> bool:
+            return bool(cancel_check()) if cancel_check else False
+
+        def emit_progress(k: int, total: int) -> None:
+            if progress_cb is not None:
+                progress_cb(k, total)
+
+        def emit_snapshot(path: Path) -> None:
+            if snapshot_cb is not None:
+                snapshot_cb(path)
+
+        def say(msg: str) -> None:
+            if message_cb is not None:
+                message_cb(msg)
+
+        total_steps = 0
+        for step_spec in recipe.steps:
+            if not isinstance(step_spec, dict):
+                continue
+            step_id = str(step_spec.get("id") or "")
+            params = step_spec.get("params", {}) or {}
+            if _STEP_TABLE.get(step_id) is None:
+                continue
+            total_steps += max(1, int(params.get("cycles", 1)))
+        total_steps = max(total_steps, 1)
+
+        # dump recipe + meta
+        (run_dir / "recipe.json").write_text(rp.read_text(encoding="utf-8"), encoding="utf-8")
+        write_json(run_dir / "meta.json", make_meta("0.0.1-step", meta))
+        write_json(run_dir / "events.json", [])
+
+        # initial state from geometry
+        state = EngineState(points=list(recipe.geometry.points))
+
+        # metrics
+        metrics_path = run_dir / "metrics.csv"
+        with metrics_path.open("w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(["k", "step_id", "dt", "base_rate"])
+
+            # snapshot 0
+            snapshot0 = run_dir / "snapshot_000.png"
+            render_snapshot(state.points, snapshot0, title="k=0")
+            emit_snapshot(snapshot0)
+            k = 0
+            emit_progress(k, total_steps)
+
+            # execute steps
+            canceled_run = False
+            for step_spec in recipe.steps:
+                if canceled():
+                    say("Canceled.")
+                    canceled_run = True
+                    break
+
+                if not isinstance(step_spec, dict):
+                    continue
+                step_id = str(step_spec.get("id") or "")
+                params = step_spec.get("params", {}) or {}
+                step = _STEP_TABLE.get(step_id)
+                if step is None:
+                    continue
+
+                cycles = int(params.get("cycles", 1))
+                cycles = max(1, cycles)
+
+                for i in range(cycles):
+                    if canceled():
+                        say("Canceled.")
+                        canceled_run = True
+                        break
+
+                    state = step.apply(state, ctx, params)
+                    k += 1
+
+                    dt = float(params.get("dt", 1.0))
+                    base_rate = float(params.get("base_rate", 1.0))
+                    w.writerow([k, step_id, f"{dt:.6f}", f"{base_rate:.6f}"])
+
+                    if (k % snap_int) == 0:
+                        out_png = run_dir / f"snapshot_{k:03d}.png"
+                        render_snapshot(state.points, out_png, title=f"k={k}")
+                        emit_snapshot(out_png)
+                    emit_progress(k, total_steps)
+
+                if canceled_run:
+                    break
+
+            # final snapshot (if not already)
+            final_snapshot = run_dir / f"snapshot_{k:03d}.png"
+            if (not canceled_run) and (final_snapshot.exists() is False):
+                render_snapshot(state.points, final_snapshot, title=f"k={k}")
+                emit_snapshot(final_snapshot)
+
+            if canceled_run:
+                say("Run canceled.")
+            else:
+                emit_progress(total_steps, total_steps)
+                say("Run complete.")
+
+        return run_dir
+
+==========================================================================================
+FILE: src\gapsim\engine\steps\base.py
+==========================================================================================
+
+from __future__ import annotations
+from abc import ABC, abstractmethod
+from typing import Any
+from gapsim.engine.types import EngineState, RunContext
+
+class Step(ABC):
+    step_id: str
+
+    @abstractmethod
+    def apply(self, state: EngineState, ctx: RunContext, params: dict) -> EngineState:
+        raise NotImplementedError
+
+==========================================================================================
+FILE: src\gapsim\engine\steps\conformal_growth.py
+==========================================================================================
+
+from __future__ import annotations
+import math
+from typing import List, Tuple
+from gapsim.engine.steps.base import Step
+from gapsim.engine.types import EngineState, RunContext, Point
+
+def _unit(vx: float, vy: float) -> Tuple[float, float]:
+    n = math.hypot(vx, vy)
+    if n <= 1e-12:
+        return 0.0, 0.0
+    return vx / n, vy / n
+
+def _point_in_poly(x: float, y: float, poly: List[Point]) -> bool:
+    inside = False
+    n = len(poly)
+    if n < 3:
+        return False
+    j = n - 1
+    for i in range(n):
+        xi, yi = poly[i]
+        xj, yj = poly[j]
+        intersect = ((yi > y) != (yj > y)) and (x < (xj - xi) * (y - yi) / ((yj - yi) if abs(yj - yi) > 1e-12 else 1e-12) + xi)
+        if intersect:
+            inside = not inside
+        j = i
+    return inside
+
+def _compute_air_normals(points: List[Point]) -> List[Tuple[float, float]]:
+    if len(points) < 2:
+        return [(0.0, 0.0) for _ in points]
+
+    ys = [p[1] for p in points]
+    y_floor = min(ys) - max((max(ys) - min(ys)) * 0.5, 200.0)
+
+    # Si polygon = boundary + floor closure
+    poly = list(points) + [(points[-1][0], y_floor), (points[0][0], y_floor)]
+
+    normals: List[Tuple[float, float]] = []
+    eps = 1e-2
+
+    n = len(points)
+    for i in range(n):
+        if i == 0:
+            x0, y0 = points[i]
+            x1, y1 = points[i + 1]
+            tx, ty = _unit(x1 - x0, y1 - y0)
+        elif i == n - 1:
+            x0, y0 = points[i - 1]
+            x1, y1 = points[i]
+            tx, ty = _unit(x1 - x0, y1 - y0)
+        else:
+            xa, ya = points[i - 1]
+            xb, yb = points[i]
+            xc, yc = points[i + 1]
+            t1x, t1y = _unit(xb - xa, yb - ya)
+            t2x, t2y = _unit(xc - xb, yc - yb)
+            tx, ty = _unit(t1x + t2x, t1y + t2y)
+
+        # candidate normals
+        n1x, n1y = -ty, tx
+        n2x, n2y = ty, -tx
+
+        px, py = points[i]
+        p1_in = _point_in_poly(px + eps * n1x, py + eps * n1y, poly)
+        p2_in = _point_in_poly(px + eps * n2x, py + eps * n2y, poly)
+
+        if p1_in and not p2_in:
+            nx, ny = n2x, n2y
+        elif p2_in and not p1_in:
+            nx, ny = n1x, n1y
+        else:
+            nx, ny = (n1x, n1y) if n1y >= n2y else (n2x, n2y)
+
+        normals.append(_unit(nx, ny))
+
+    return normals
+
+class ConformalGrowthStep(Step):
+    step_id = "conformal_growth"
+
+    def apply(self, state: EngineState, ctx: RunContext, params: dict) -> EngineState:
+        pts = list(state.points)
+        if len(pts) < 3:
+            return state
+
+        dt = max(0.0, float(params.get("dt", 1.0)))
+        base_rate = max(0.0, float(params.get("base_rate", 1.0)))
+        epsilon = max(0.0, float(params.get("epsilon", 0.0)))
+
+        sealed = params.get("sealed_mode", {})
+        if not isinstance(sealed, dict):
+            sealed = {}
+        sealed_opt = str(sealed.get("option", "A"))
+        decay_k = max(0.0, float(sealed.get("decay_k", 0.0)))
+
+        xs = [p[0] for p in pts]
+        opening = float(max(xs) - min(xs)) if xs else 0.0
+
+        rate = base_rate
+        if opening <= epsilon:
+            if sealed_opt == "A":
+                rate = 0.0
+            elif sealed_opt == "B":
+                rate = base_rate * math.exp(-decay_k * max(epsilon - opening, 0.0))
+
+        dr = rate * dt
+
+        if dr <= 0.0:
+            return state
+
+        normals = _compute_air_normals(pts)
+
+        new_pts: List[Point] = []
+        for i, (p, (nx, ny)) in enumerate(zip(pts, normals)):
+            x, y = p
+            if i == 0 or i == len(pts) - 1:
+                new_pts.append((x, y))
+            else:
+                new_pts.append((x + dr * nx, y + dr * ny))
+
+        return EngineState(points=new_pts)
+
+==========================================================================================
+FILE: src\gapsim\engine\types.py
+==========================================================================================
+
+from __future__ import annotations
+from dataclasses import dataclass
+from typing import List, Tuple
+
+Point = Tuple[float, float]  # (x, y_user) depth is negative
+
+@dataclass(frozen=True)
+class EngineState:
+    points: List[Point]       # current boundary polyline
+
+@dataclass(frozen=True)
+class RunContext:
+    run_dir: str
+
+==========================================================================================
+FILE: src\gapsim\engine\viz.py
+==========================================================================================
+
+from __future__ import annotations
+from pathlib import Path
+from typing import List, Tuple, Optional
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+Point = Tuple[float, float]
+
+def render_snapshot(
+    pts: List[Point],
+    out_png: Path,
+    *,
+    title: str = "",
+) -> None:
+    fig = plt.figure()
+    ax = fig.add_subplot(111)
+
+    if len(pts) >= 2:
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        ax.plot(xs, ys, linewidth=1.5)
+
+        # fill Si below boundary
+        y_min = min(ys)
+        y_pad = max((max(ys) - y_min) * 0.2, 50.0)
+        floor_y = y_min - y_pad * 2
+        ax.fill(xs + [xs[-1], xs[0]], ys + [floor_y, floor_y], alpha=0.2)
+
+        ax.set_aspect("equal", adjustable="box")
+        ax.grid(True, linestyle=":", linewidth=0.7)
+
+    if title:
+        ax.set_title(title)
+
+    fig.savefig(out_png, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+==========================================================================================
+FILE: src\gapsim\io\recipe_io.py
+==========================================================================================
+
+from __future__ import annotations
+import json
+from pathlib import Path
+from typing import Any, Dict
+from gapsim.domain.recipe import Recipe, GeometrySpec, SmoothingSpec, SCHEMA_VERSION
+from gapsim.domain.units import LengthUnit
+
+def save_recipe(path: str | Path, recipe: Recipe) -> None:
+    p = Path(path)
+    data: Dict[str, Any] = {
+        "schema_version": recipe.schema_version,
+        "geometry": {
+            "points": recipe.geometry.points,
+            "unit": recipe.geometry.unit.value,
+            "bottom_closed": recipe.geometry.bottom_closed,
+            "top_open": recipe.geometry.top_open,
+            "side_walls_infinite": recipe.geometry.side_walls_infinite,
+        },
+        "smoothing": {
+            "segment_n": recipe.smoothing.segment_n,
+            "iterations": recipe.smoothing.iterations,
+        },
+        "steps": recipe.steps,
+        "addons": recipe.addons,
+        "meta": recipe.meta or {},
+    }
+    p.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+def load_recipe(path: str | Path) -> Recipe:
+    p = Path(path)
+    data = json.loads(p.read_text(encoding="utf-8"))
+
+    if int(data.get("schema_version", -1)) != SCHEMA_VERSION:
+        raise ValueError("Unsupported schema_version")
+
+    g = data["geometry"]
+    s = data.get("smoothing", {}) or {}
+
+    geom = GeometrySpec(
+        points=[tuple(x) for x in g["points"]],
+        unit=LengthUnit(g.get("unit", "A")),
+        bottom_closed=bool(g.get("bottom_closed", True)),
+        top_open=bool(g.get("top_open", True)),
+        side_walls_infinite=bool(g.get("side_walls_infinite", True)),
+    )
+    sm = SmoothingSpec(
+        segment_n=int(s.get("segment_n", 200)),
+        iterations=int(s.get("iterations", 5)),
+    )
+
+    return Recipe(
+        schema_version=SCHEMA_VERSION,
+        geometry=geom,
+        smoothing=sm,
+        steps=list(data.get("steps", [])),
+        addons=list(data.get("addons", [])),
+        meta=dict(data.get("meta", {})),
+    )
+
+==========================================================================================
+FILE: src\gapsim\ui_qt\controllers\smoothing_ctrl.py
+==========================================================================================
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import List, Tuple, Optional
+import math
+
+from PySide6.QtCore import QObject
+
+from gapsim.ui_qt.views.structure_view import StructureView
+
+Point = Tuple[float, float]  # (x, y_user)  y_user: depth is negative
+
+
+def _resample_polyline_equal_arc(pts: List[Point], n_segments: int) -> List[Point]:
+    """
+    Resample polyline into n_segments equal arc-length segments.
+    Output points count = n_segments + 1 (including endpoints).
+    """
+    if n_segments <= 0 or len(pts) < 2:
+        return list(pts)
+
+    seg_lens = []
+    cum = [0.0]
+    for i in range(len(pts) - 1):
+        x0, y0 = pts[i]
+        x1, y1 = pts[i + 1]
+        L = math.hypot(x1 - x0, y1 - y0)
+        seg_lens.append(L)
+        cum.append(cum[-1] + L)
+
+    total = cum[-1]
+    if total <= 1e-12:
+        return [pts[0]] * (n_segments + 1)
+
+    step = total / n_segments
+    out: List[Point] = []
+
+    j = 0
+    for k in range(n_segments + 1):
+        target = min(k * step, total)
+
+        while j < len(seg_lens) - 1 and cum[j + 1] < target - 1e-12:
+            j += 1
+
+        x0, y0 = pts[j]
+        x1, y1 = pts[j + 1]
+        L = seg_lens[j]
+        if L <= 1e-12:
+            t = 0.0
+        else:
+            t = (target - cum[j]) / L
+            t = max(0.0, min(1.0, t))
+
+        out.append((x0 + t * (x1 - x0), y0 + t * (y1 - y0)))
+
+    out[0] = pts[0]
+    out[-1] = pts[-1]
+    return out
+
+
+def _laplacian_smooth_midpoint(pts: List[Point], iters: int) -> List[Point]:
+    """
+    Each iteration: internal point i -> midpoint of (i-1, i+1).
+    Endpoints fixed.
+    """
+    if iters <= 0 or len(pts) < 3:
+        return list(pts)
+
+    cur = list(pts)
+    for _ in range(iters):
+        nxt = list(cur)
+        for i in range(1, len(cur) - 1):
+            x_prev, y_prev = cur[i - 1]
+            x_next, y_next = cur[i + 1]
+            nxt[i] = ((x_prev + x_next) / 2.0, (y_prev + y_next) / 2.0)
+        cur = nxt
+    return cur
+
+
+@dataclass
+class SmoothingState:
+    base_points: List[Point]
+    segments: int = 200
+    iterations: int = 5
+    last_result: Optional[List[Point]] = None
+
+
+class SmoothingController(QObject):
+    """
+    - base_points: points at the time entering smoothing (stored)
+    - run(): resample -> smooth -> update view
+    - revert(): restore view to base_points
+    """
+    def __init__(self, view: StructureView):
+        super().__init__()
+        self.view = view
+        self.state = SmoothingState(base_points=[])
+
+    def set_base_points(self, pts: List[Point]) -> None:
+        self.state.base_points = list(pts)
+        self.state.last_result = None
+
+    def set_params(self, segments: int, iterations: int) -> None:
+        self.state.segments = max(1, int(segments))
+        self.state.iterations = max(0, int(iterations))
+
+    def run(self) -> List[Point]:
+        base = self.state.base_points
+        if len(base) < 2:
+            self.state.last_result = list(base)
+            self.view.set_points_xy(base)
+            return list(base)
+
+        seg = max(1, self.state.segments)
+        it = max(0, self.state.iterations)
+
+        resampled = _resample_polyline_equal_arc(base, seg)
+        smoothed = _laplacian_smooth_midpoint(resampled, it)
+
+        self.state.last_result = smoothed
+        self.view.set_points_xy(smoothed)
+        return smoothed
+
+    def revert(self) -> None:
+        self.view.set_points_xy(self.state.base_points)
+
+    def get_saved_payload(self) -> dict:
+        """
+        Payload for recipe/meta:
+        - base_points: pre-smoothing points
+        - segments/iterations: smoothing params
+        """
+        return {
+            "base_points": list(self.state.base_points),
+            "segments": int(self.state.segments),
+            "iterations": int(self.state.iterations),
+        }
+
+==========================================================================================
+FILE: src\gapsim\ui_qt\controllers\structure_ctrl.py
+==========================================================================================
+
+from __future__ import annotations
+
+from typing import List, Tuple, Optional
+
+from PySide6.QtCore import QObject, QModelIndex
+
+from gapsim.ui_qt.models.points_table import PointsTableModel
+from gapsim.ui_qt.views.structure_view import StructureView
+
+Point = Tuple[float, float]
+
+
+class StructureController(QObject):
+    """
+    Glue between:
+      - StructureView (left graphics)
+      - PointsTableModel (right table)
+    Includes:
+      - 1-step undo
+      - insert/delete sync both directions
+    """
+
+    def __init__(self, view: StructureView, model: PointsTableModel):
+        super().__init__()
+        self.view = view
+        self.model = model
+
+        self._undo_snapshot: Optional[List[Point]] = None
+
+        # when we mutate model because of view actions, don't "rebuild view"
+        self._model_change_from_view = False
+
+        # snapshot for undo (view-driven)
+        self.view.editBegan.connect(self._on_edit_began)
+
+        # View -> Model
+        self.view.pointMoved.connect(self._on_view_point_moved)
+        self.view.pointInserted.connect(self._on_view_point_inserted)
+        self.view.pointDeleted.connect(self._on_view_point_deleted)
+
+        # Model -> View (cell edit)
+        self.model.pointEdited.connect(self._on_model_point_edited)
+
+        # Model structural changes (table-driven insert/delete) -> rebuild view
+        self.model.rowsAboutToBeRemoved.connect(self._on_model_rows_about_to_be_removed)
+        self.model.rowsInserted.connect(self._on_model_rows_inserted)
+        self.model.rowsRemoved.connect(self._on_model_rows_removed)
+
+    def set_points(self, pts: List[Point]) -> None:
+        self.model.set_points(pts)
+        self.view.set_points_xy(pts)
+
+    def undo(self) -> None:
+        if not self._undo_snapshot:
+            return
+        pts = self._undo_snapshot
+        self._undo_snapshot = None
+        self.set_points(pts)
+
+    # ---- view-driven undo snapshot ----
+    def _on_edit_began(self, pts_before: List[Point]) -> None:
+        self._undo_snapshot = list(pts_before)
+
+    # ---- view -> model ----
+    def _on_view_point_moved(self, idx: int, x: float, y: float) -> None:
+        self.model.set_point(idx, x, y)
+
+    def _on_view_point_inserted(self, insert_idx: int, x: float, y: float) -> None:
+        self._model_change_from_view = True
+        try:
+            self.model.insertRows(insert_idx, 1)
+            self.model.set_point(insert_idx, x, y)
+        finally:
+            self._model_change_from_view = False
+
+    def _on_view_point_deleted(self, deleted_idx: int) -> None:
+        self._model_change_from_view = True
+        try:
+            self.model.removeRows(deleted_idx, 1)
+        finally:
+            self._model_change_from_view = False
+
+    # ---- model -> view (cell edits) ----
+    def _on_model_point_edited(self, idx: int, x: float, y: float) -> None:
+        ax, ay = self.view.try_set_point_xy(idx, x, y)
+        if (ax != x) or (ay != y):
+            self.model.set_point(idx, ax, ay)
+
+    # ---- model structural changes (table-driven) ----
+    def _on_model_rows_about_to_be_removed(self, parent: QModelIndex, first: int, last: int) -> None:
+        if self._model_change_from_view:
+            return
+        # table-driven delete should be undoable too
+        self._undo_snapshot = self.model.get_points()
+
+    def _on_model_rows_inserted(self, parent: QModelIndex, first: int, last: int) -> None:
+        if self._model_change_from_view:
+            return
+        # table-driven insert: rebuild view to have matching number of points
+        self.view.set_points_xy(self.model.get_points())
+
+    def _on_model_rows_removed(self, parent: QModelIndex, first: int, last: int) -> None:
+        if self._model_change_from_view:
+            return
+        # table-driven delete: rebuild view
+        self.view.set_points_xy(self.model.get_points())
+
+==========================================================================================
+FILE: src\gapsim\ui_qt\engine_worker.py
+==========================================================================================
+
+from __future__ import annotations
+
+import traceback
+from pathlib import Path
+
+from PySide6.QtCore import QObject, Signal, Slot
+
+from gapsim.engine.runner import EngineRunner
+
+
+class EngineWorker(QObject):
+    progress = Signal(int, int)        # k, total
+    message = Signal(str)
+    snapshot_saved = Signal(str)       # png path
+    finished = Signal(str)             # run_dir
+    error = Signal(str)
+
+    def __init__(self, recipe_path: Path, runs_root: Path | str = "runs") -> None:
+        super().__init__()
+        self.recipe_path = Path(recipe_path)
+        self.runs_root = Path(runs_root)
+        self._cancel = False
+
+    def request_cancel(self) -> None:
+        self._cancel = True
+
+    def _canceled(self) -> bool:
+        return self._cancel
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            runner = EngineRunner(self.runs_root)
+
+            def progress_cb(k: int, total: int) -> None:
+                self.progress.emit(k, total)
+
+            def snapshot_cb(p: Path) -> None:
+                self.snapshot_saved.emit(str(p))
+
+            def message_cb(msg: str) -> None:
+                self.message.emit(msg)
+
+            run_dir = runner.run(
+                self.recipe_path,
+                cancel_check=self._canceled,
+                progress_cb=progress_cb,
+                snapshot_cb=snapshot_cb,
+                message_cb=message_cb,
+            )
+
+            self.finished.emit(str(run_dir))
+
+        except Exception as e:
+            tb = traceback.format_exc()
+            self.error.emit(f"{e}\n\n{tb}")
+
+==========================================================================================
+FILE: src\gapsim\ui_qt\main_window.py
+==========================================================================================
+
+from __future__ import annotations
+
+import sys
+import tempfile
+from pathlib import Path
+from typing import Optional, List, Tuple
+
+from PySide6.QtWidgets import (
+    QApplication,
+    QMainWindow,
+    QWidget,
+    QSplitter,
+    QVBoxLayout,
+    QLabel,
+    QStackedWidget,
+    QToolBar,
+    QSpinBox,
+    QPushButton,
+    QHBoxLayout,
+    QFrame,
+    QFileDialog,
+    QLineEdit,
+    QDoubleSpinBox,
+    QComboBox,
+    QMessageBox,
+)
+from PySide6.QtGui import QAction, QKeySequence, QPixmap, QDesktopServices
+from PySide6.QtCore import Qt, QThread, QUrl
+
+from gapsim.ui_qt.views.structure_view import StructureView
+from gapsim.ui_qt.controllers.structure_ctrl import StructureController
+from gapsim.ui_qt.controllers.smoothing_ctrl import SmoothingController
+from gapsim.ui_qt.models.points_table import PointsTableModel
+from gapsim.ui_qt.models.points_table_view import PointsTableView
+
+from gapsim.domain.recipe import Recipe, GeometrySpec, SmoothingSpec, SCHEMA_VERSION
+from gapsim.domain.units import LengthUnit
+from gapsim.io.recipe_io import save_recipe as save_recipe_file, load_recipe as load_recipe_file
+
+from gapsim.ui_qt.engine_worker import EngineWorker
+
+Point = Tuple[float, float]  # (x, y_user)
+
+
+class MainWindow(QMainWindow):
+    def __init__(self) -> None:
+        super().__init__()
+        self.setWindowTitle("GapSim")
+        self.resize(1280, 820)
+
+        self._current_path: Optional[Path] = None
+
+        # engine run state
+        self._engine_thread: Optional[QThread] = None
+        self._engine_worker: Optional[EngineWorker] = None
+        self._last_run_dir: Optional[Path] = None
+
+        # ---------------- Top bar ----------------
+        tb = QToolBar("Top")
+        self.addToolBar(tb)
+
+        act_open = QAction("Open", self)
+        act_save = QAction("Save", self)
+        act_save_as = QAction("Save As", self)
+
+        act_structure = QAction("Structure", self)
+        act_smoothing = QAction("Smoothing", self)
+        act_run = QAction("Run", self)
+        act_results = QAction("Results", self)
+
+        act_undo = QAction("Undo", self)
+        act_undo.setShortcut(QKeySequence.Undo)  # Ctrl+Z
+
+        tb.addAction(act_open)
+        tb.addAction(act_save)
+        tb.addAction(act_save_as)
+        tb.addSeparator()
+        tb.addAction(act_structure)
+        tb.addAction(act_smoothing)
+        tb.addAction(act_run)
+        tb.addAction(act_results)
+        tb.addSeparator()
+        tb.addAction(act_undo)
+
+        # ---------------- Main layout ----------------
+        splitter = QSplitter(Qt.Horizontal)
+
+        self.view = StructureView()
+        splitter.addWidget(self.view)
+
+        self.right_stack = QStackedWidget()
+        splitter.addWidget(self.right_stack)
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 2)
+
+        # =========================
+        # Panel 1) Structure Define
+        # =========================
+        self.structure_panel = QWidget()
+        sp = QVBoxLayout(self.structure_panel)
+        sp.addWidget(QLabel("Structure Define (X/Y) ? Ctrl+V paste / Ctrl+C copy / Del rows"))
+
+        self.points_model = PointsTableModel()
+        self.points_table = PointsTableView()
+        self.points_table.setModel(self.points_model)
+        sp.addWidget(self.points_table)
+
+        # ==================
+        # Panel 2) Smoothing
+        # ==================
+        self.smoothing_panel = QWidget()
+        smp = QVBoxLayout(self.smoothing_panel)
+        smp.addWidget(QLabel("Smoothing"))
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Segments"))
+        self.spin_segments = QSpinBox()
+        self.spin_segments.setRange(1, 1_000_000)
+        self.spin_segments.setValue(200)
+        row.addWidget(self.spin_segments)
+
+        row.addSpacing(12)
+
+        row.addWidget(QLabel("Iterations"))
+        self.spin_iters = QSpinBox()
+        self.spin_iters.setRange(0, 1_000_000)
+        self.spin_iters.setValue(5)
+        row.addWidget(self.spin_iters)
+
+        row.addSpacing(12)
+
+        self.btn_run_smooth = QPushButton("Run")
+        self.btn_revert = QPushButton("Revert")
+        self.btn_save_params = QPushButton("Save Params")
+        row.addWidget(self.btn_run_smooth)
+        row.addWidget(self.btn_revert)
+        row.addWidget(self.btn_save_params)
+
+        row.addStretch(1)
+        smp.addLayout(row)
+
+        line = QFrame()
+        line.setFrameShape(QFrame.HLine)
+        line.setFrameShadow(QFrame.Sunken)
+        smp.addWidget(line)
+
+        smp.addWidget(QLabel("Smoothing Result (read-only; Ctrl+C copy)"))
+
+        self.smooth_model = PointsTableModel()
+        self.smooth_table = PointsTableView()
+        self.smooth_table.setModel(self.smooth_model)
+        self.smooth_table.setEditTriggers(PointsTableView.NoEditTriggers)
+        smp.addWidget(self.smooth_table)
+
+        # =================
+        # Panel 3) Run (Engine)
+        # =================
+        self.run_panel = QWidget()
+        rp = QVBoxLayout(self.run_panel)
+        rp.addWidget(QLabel("Run (Engine) ? Step-based runner (snapshots in runs/)"))
+
+        # row: case name
+        r1 = QHBoxLayout()
+        r1.addWidget(QLabel("Case name"))
+        self.edit_case = QLineEdit("case")
+        r1.addWidget(self.edit_case)
+        rp.addLayout(r1)
+
+        # row: cycles/dt/snapshot interval
+        r2 = QHBoxLayout()
+        r2.addWidget(QLabel("Cycles"))
+        self.spin_cycles = QSpinBox()
+        self.spin_cycles.setRange(1, 10_000_000)
+        self.spin_cycles.setValue(200)
+        r2.addWidget(self.spin_cycles)
+
+        r2.addSpacing(10)
+        r2.addWidget(QLabel("dt"))
+        self.spin_dt = QDoubleSpinBox()
+        self.spin_dt.setDecimals(6)
+        self.spin_dt.setRange(1e-9, 1e9)
+        self.spin_dt.setValue(1.0)
+        r2.addWidget(self.spin_dt)
+
+        r2.addSpacing(10)
+        r2.addWidget(QLabel("snapshot interval"))
+        self.spin_snap_int = QSpinBox()
+        self.spin_snap_int.setRange(1, 1_000_000)
+        self.spin_snap_int.setValue(10)
+        r2.addWidget(self.spin_snap_int)
+
+        r2.addStretch(1)
+        rp.addLayout(r2)
+
+        # row: base_rate/epsilon
+        r3 = QHBoxLayout()
+        r3.addWidget(QLabel("base_rate"))
+        self.spin_base_rate = QDoubleSpinBox()
+        self.spin_base_rate.setDecimals(6)
+        self.spin_base_rate.setRange(0.0, 1e12)
+        self.spin_base_rate.setValue(1.0)
+        r3.addWidget(self.spin_base_rate)
+
+        r3.addSpacing(10)
+        r3.addWidget(QLabel("epsilon"))
+        self.spin_epsilon = QDoubleSpinBox()
+        self.spin_epsilon.setDecimals(6)
+        self.spin_epsilon.setRange(0.0, 1e12)
+        self.spin_epsilon.setValue(10.0)
+        r3.addWidget(self.spin_epsilon)
+
+        r3.addStretch(1)
+        rp.addLayout(r3)
+
+        # row: sealed mode
+        r4 = QHBoxLayout()
+        r4.addWidget(QLabel("Sealed mode"))
+        self.combo_sealed = QComboBox()
+        self.combo_sealed.addItem("A: flux=0", "A")
+        self.combo_sealed.addItem("B: decay¡æ0", "B")
+        r4.addWidget(self.combo_sealed)
+
+        r4.addSpacing(10)
+        r4.addWidget(QLabel("decay_k"))
+        self.spin_decay_k = QDoubleSpinBox()
+        self.spin_decay_k.setDecimals(8)
+        self.spin_decay_k.setRange(0.0, 1e9)
+        self.spin_decay_k.setValue(0.01)
+        self.spin_decay_k.setEnabled(False)
+        r4.addWidget(self.spin_decay_k)
+
+        r4.addStretch(1)
+        rp.addLayout(r4)
+
+        # run buttons
+        r5 = QHBoxLayout()
+        self.btn_engine_run = QPushButton("Run")
+        self.btn_engine_stop = QPushButton("Stop")
+        self.btn_engine_stop.setEnabled(False)
+        r5.addWidget(self.btn_engine_run)
+        r5.addWidget(self.btn_engine_stop)
+
+        self.lbl_engine_status = QLabel("Idle")
+        r5.addSpacing(10)
+        r5.addWidget(self.lbl_engine_status)
+        r5.addStretch(1)
+        rp.addLayout(r5)
+
+        # =====================
+        # Panel 4) Results (minimal)
+        # =====================
+        self.results_panel = QWidget()
+        res = QVBoxLayout(self.results_panel)
+        res.addWidget(QLabel("Results (minimal)"))
+
+        self.lbl_run_dir = QLabel("Run dir: -")
+        self.btn_open_run_dir = QPushButton("Open Run Folder")
+        self.btn_open_run_dir.setEnabled(False)
+
+        rr0 = QHBoxLayout()
+        rr0.addWidget(self.lbl_run_dir)
+        rr0.addStretch(1)
+        rr0.addWidget(self.btn_open_run_dir)
+        res.addLayout(rr0)
+
+        self.lbl_snapshot = QLabel("snapshot preview")
+        self.lbl_snapshot.setAlignment(Qt.AlignCenter)
+        self.lbl_snapshot.setMinimumHeight(320)
+        self.lbl_snapshot.setStyleSheet("border: 1px solid #999;")
+        res.addWidget(self.lbl_snapshot)
+
+        # ---------------- add panels to stack ----------------
+        self.right_stack.addWidget(self.structure_panel)  # index 0
+        self.right_stack.addWidget(self.smoothing_panel)  # index 1
+        self.right_stack.addWidget(self.run_panel)        # index 2
+        self.right_stack.addWidget(self.results_panel)    # index 3
+
+        # ---------------- Controllers ----------------
+        self.structure_ctrl = StructureController(self.view, self.points_model)
+        self.smoothing_ctrl = SmoothingController(self.view)
+
+        # initial default points
+        self.structure_ctrl.set_points([
+            (200.0, 0.0),
+            (100.0, 0.0),
+            (50.0, -400.0),
+            (-50.0, -400.0),
+            (-100.0, 0.0),
+            (-200.0, 0.0),
+        ])
+
+        # ---------------- Wiring ----------------
+        act_structure.triggered.connect(self.on_structure)
+        act_smoothing.triggered.connect(self.on_smoothing)
+        act_run.triggered.connect(self.on_run_panel)
+        act_results.triggered.connect(self.on_results_panel)
+        act_undo.triggered.connect(self.structure_ctrl.undo)
+
+        act_open.triggered.connect(self.on_open)
+        act_save.triggered.connect(self.on_save)
+        act_save_as.triggered.connect(self.on_save_as)
+
+        self.btn_run_smooth.clicked.connect(self.on_smoothing_run)
+        self.btn_revert.clicked.connect(self.on_smoothing_revert)
+        self.btn_save_params.clicked.connect(self.on_smoothing_save_params)
+
+        self.combo_sealed.currentIndexChanged.connect(self._on_sealed_changed)
+        self.btn_engine_run.clicked.connect(self.on_engine_run)
+        self.btn_engine_stop.clicked.connect(self.on_engine_stop)
+
+        self.btn_open_run_dir.clicked.connect(self.on_open_run_dir)
+
+        # start in structure
+        self.right_stack.setCurrentWidget(self.structure_panel)
+        self.view.set_point_radius_px(4)
+
+        root2 = QWidget()
+        layout2 = QVBoxLayout(root2)
+        layout2.addWidget(splitter)
+        self.setCentralWidget(root2)
+
+        self.statusBar().showMessage("Ready", 2000)
+
+    # ---------- smoothing input selection ----------
+    def _active_profile_points(self) -> List[Point]:
+        structure_pts = list(self.points_model.get_points())
+        last = getattr(self.smoothing_ctrl.state, "last_result", None)
+        base = getattr(self.smoothing_ctrl.state, "base_points", [])
+        if last and len(last) >= 2 and base and list(base) == structure_pts:
+            return list(last)
+        return structure_pts
+
+    # ---------- recipe (SSOT) ----------
+    def _ui_to_domain_recipe(self) -> Recipe:
+        structure_pts = list(self.points_model.get_points())
+
+        steps = [
+            {
+                "id": "conformal_growth",
+                "params": {
+                    "cycles": int(self.spin_cycles.value()),
+                    "dt": float(self.spin_dt.value()),
+                    "base_rate": float(self.spin_base_rate.value()),
+                    "epsilon": float(self.spin_epsilon.value()),
+                    "sealed_mode": {
+                        "option": str(self.combo_sealed.currentData()),
+                        "decay_k": float(self.spin_decay_k.value()),
+                    },
+                },
+            }
+        ]
+
+        meta = {
+            "case_name": self.edit_case.text().strip() or "case",
+            "snapshot_interval": int(self.spin_snap_int.value()),
+            "smoothing_payload": self.smoothing_ctrl.get_saved_payload(),
+        }
+
+        return Recipe(
+            schema_version=SCHEMA_VERSION,
+            geometry=GeometrySpec(
+                points=structure_pts,
+                unit=LengthUnit.ANGSTROM,
+                bottom_closed=True,
+                top_open=True,
+                side_walls_infinite=True,
+            ),
+            smoothing=SmoothingSpec(
+                segment_n=int(self.spin_segments.value()),
+                iterations=int(self.spin_iters.value()),
+            ),
+            steps=steps,
+            addons=[],
+            meta=meta,
+        )
+
+    def _apply_domain_recipe_to_ui(self, r: Recipe) -> None:
+        pts = list(r.geometry.points)
+        if len(pts) < 2:
+            self.statusBar().showMessage("Open failed: geometry.points < 2", 5000)
+            return
+
+        # structure
+        self.points_model.set_points(pts)
+        self.view.set_points_xy(pts)
+
+        # smoothing
+        self.spin_segments.setValue(max(1, int(r.smoothing.segment_n or 1)))
+        self.spin_iters.setValue(max(0, int(r.smoothing.iterations or 0)))
+        self.smoothing_ctrl.set_base_points(pts)
+        self.smoothing_ctrl.set_params(self.spin_segments.value(), self.spin_iters.value())
+        self.smooth_model.set_points([])
+
+        # meta
+        meta = r.meta or {}
+        self.edit_case.setText(str(meta.get("case_name") or "case"))
+        if "snapshot_interval" in meta:
+            self.spin_snap_int.setValue(max(1, int(meta.get("snapshot_interval"))))
+
+        # steps[0]
+        if r.steps and isinstance(r.steps[0], dict):
+            s0 = r.steps[0]
+            params = s0.get("params", {}) or {}
+
+            if "cycles" in params:
+                self.spin_cycles.setValue(max(1, int(params.get("cycles"))))
+            if "dt" in params:
+                self.spin_dt.setValue(float(params.get("dt")))
+            if "base_rate" in params:
+                self.spin_base_rate.setValue(float(params.get("base_rate")))
+            if "epsilon" in params:
+                self.spin_epsilon.setValue(float(params.get("epsilon")))
+
+            sealed = params.get("sealed_mode", {}) if isinstance(params.get("sealed_mode", {}), dict) else {}
+            opt = str(sealed.get("option", "A"))
+            self.combo_sealed.setCurrentIndex(0 if opt == "A" else 1)
+            if "decay_k" in sealed:
+                self.spin_decay_k.setValue(float(sealed.get("decay_k")))
+
+        self.on_structure()
+        self.statusBar().showMessage("Loaded", 3000)
+
+    # ---------- save/load ----------
+    def on_open(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open GapSim Recipe", "", "GapSim Recipe (*.json);;All Files (*)"
+        )
+        if not path:
+            return
+        p = Path(path)
+        try:
+            r = load_recipe_file(p)
+        except Exception as e:
+            self.statusBar().showMessage(f"Open failed: {e}", 6000)
+            return
+        self._current_path = p
+        self._apply_domain_recipe_to_ui(r)
+
+    def on_save(self) -> None:
+        if self._current_path is None:
+            self.on_save_as()
+            return
+        r = self._ui_to_domain_recipe()
+        try:
+            save_recipe_file(self._current_path, r)
+        except Exception as e:
+            self.statusBar().showMessage(f"Save failed: {e}", 6000)
+            return
+        self.statusBar().showMessage(f"Saved: {self._current_path.name}", 3000)
+
+    def on_save_as(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save GapSim Recipe", "", "GapSim Recipe (*.json);;All Files (*)"
+        )
+        if not path:
+            return
+        p = Path(path)
+        if p.suffix.lower() != ".json":
+            p = p.with_suffix(".json")
+        self._current_path = p
+        self.on_save()
+
+    # ---------- panel switch ----------
+    def on_structure(self) -> None:
+        self.view.set_point_radius_px(4)
+        base = self.points_model.get_points()
+        self.view.set_points_xy(base)
+        self.right_stack.setCurrentWidget(self.structure_panel)
+
+    def on_smoothing(self) -> None:
+        self.view.set_point_radius_px(1)
+        base = self.points_model.get_points()
+        self.smoothing_ctrl.set_base_points(base)
+        self.view.set_points_xy(base)
+        self.smoothing_ctrl.set_params(self.spin_segments.value(), self.spin_iters.value())
+        self.smooth_model.set_points([])
+        self.right_stack.setCurrentWidget(self.smoothing_panel)
+
+    def on_run_panel(self) -> None:
+        pts = self._active_profile_points()
+        self.view.set_points_xy(pts)
+        self.view.set_point_radius_px(1 if len(pts) > 200 else 4)
+        self.right_stack.setCurrentWidget(self.run_panel)
+
+    def on_results_panel(self) -> None:
+        self.right_stack.setCurrentWidget(self.results_panel)
+
+    # ---------- smoothing ops ----------
+    def on_smoothing_run(self) -> None:
+        self.smoothing_ctrl.set_params(self.spin_segments.value(), self.spin_iters.value())
+        result = self.smoothing_ctrl.run()
+        self.smooth_model.set_points(result)
+
+    def on_smoothing_revert(self) -> None:
+        self.smoothing_ctrl.revert()
+        self.smooth_model.set_points([])
+
+    def on_smoothing_save_params(self) -> None:
+        self.smoothing_ctrl.set_params(self.spin_segments.value(), self.spin_iters.value())
+        _ = self.smoothing_ctrl.get_saved_payload()
+        self.statusBar().showMessage("Smoothing params captured (in-memory/meta)", 3000)
+
+    # ---------- sealed UI ----------
+    def _on_sealed_changed(self) -> None:
+        opt = str(self.combo_sealed.currentData())
+        self.spin_decay_k.setEnabled(opt == "B")
+
+    # ---------- engine run ----------
+    def _write_temp_recipe(self, r: Recipe) -> Path:
+        import os
+        fd, tmp_path = tempfile.mkstemp(prefix="gapsim_recipe_", suffix=".json")
+        try:
+            save_recipe_file(tmp_path, r)
+        finally:
+            try:
+                os.close(fd)
+            except Exception:
+                pass
+        return Path(tmp_path)
+
+    def on_engine_run(self) -> None:
+        if self._engine_thread is not None and self._engine_thread.isRunning():
+            QMessageBox.warning(self, "Engine", "Engine already running.")
+            return
+
+        # build Recipe and save to temp json (runner reads recipe json)
+        r = self._ui_to_domain_recipe()
+        run_pts = self._active_profile_points()
+        if len(run_pts) >= 2:
+            r.geometry.points = list(run_pts)
+        recipe_path = self._write_temp_recipe(r)
+
+        self.lbl_engine_status.setText("Running...")
+        self.btn_engine_run.setEnabled(False)
+        self.btn_engine_stop.setEnabled(True)
+        self._last_run_dir = None
+        self.lbl_run_dir.setText("Run dir: -")
+        self.btn_open_run_dir.setEnabled(False)
+
+        th = QThread()
+        worker = EngineWorker(recipe_path=recipe_path, runs_root="runs")
+        worker.moveToThread(th)
+
+        th.started.connect(worker.run)
+
+        worker.progress.connect(self._on_engine_progress)
+        worker.message.connect(self._on_engine_message)
+        worker.snapshot_saved.connect(self._on_engine_snapshot_saved)
+        worker.finished.connect(self._on_engine_finished)
+        worker.error.connect(self._on_engine_error)
+
+        # shutdown
+        worker.finished.connect(th.quit)
+        worker.error.connect(th.quit)
+
+        th.finished.connect(worker.deleteLater)
+        th.finished.connect(th.deleteLater)
+        th.finished.connect(self._on_engine_thread_finished)
+
+        self._engine_thread = th
+        self._engine_worker = worker
+        th.start()
+
+    def on_engine_stop(self) -> None:
+        if self._engine_worker is not None:
+            self._engine_worker.request_cancel()
+            self.lbl_engine_status.setText("Cancel requested...")
+
+    def _on_engine_progress(self, k: int, total: int) -> None:
+        self.lbl_engine_status.setText(f"Running... {k}/{total}")
+
+    def _on_engine_message(self, msg: str) -> None:
+        self.statusBar().showMessage(msg, 3000)
+
+    def _on_engine_snapshot_saved(self, png_path: str) -> None:
+        snap = Path(png_path)
+        if self._last_run_dir is None:
+            self._last_run_dir = snap.parent
+            self.lbl_run_dir.setText(f"Run dir: {self._last_run_dir}")
+            self.btn_open_run_dir.setEnabled(True)
+        if self._last_run_dir == snap.parent and self.right_stack.currentWidget() is self.results_panel:
+            self._refresh_snapshot_preview(self._last_run_dir)
+
+    def _on_engine_finished(self, run_dir_str: str) -> None:
+        self.btn_engine_run.setEnabled(True)
+        self.btn_engine_stop.setEnabled(False)
+        self.lbl_engine_status.setText("Idle")
+
+        if not run_dir_str:
+            self.statusBar().showMessage("Engine finished (no run dir).", 4000)
+            return
+
+        run_dir = Path(run_dir_str)
+        self._last_run_dir = run_dir
+
+        self.lbl_run_dir.setText(f"Run dir: {run_dir}")
+        self.btn_open_run_dir.setEnabled(True)
+
+        self._refresh_snapshot_preview(run_dir)
+        self.right_stack.setCurrentWidget(self.results_panel)
+        self.statusBar().showMessage("Run complete.", 5000)
+
+    def _on_engine_error(self, msg: str) -> None:
+        self.btn_engine_run.setEnabled(True)
+        self.btn_engine_stop.setEnabled(False)
+        self.lbl_engine_status.setText("Idle")
+        QMessageBox.critical(self, "Engine Error", msg)
+
+    def _on_engine_thread_finished(self) -> None:
+        self._engine_thread = None
+        self._engine_worker = None
+
+    # ---------- results ----------
+    def _refresh_snapshot_preview(self, run_dir: Path) -> None:
+        # pick snapshot_000.png if exists else last snapshot_*.png
+        snap0 = run_dir / "snapshot_000.png"
+        snap = snap0 if snap0.exists() else None
+
+        if snap is None:
+            snaps = sorted(run_dir.glob("snapshot_*.png"))
+            if snaps:
+                snap = snaps[-1]
+
+        if snap is None or not snap.exists():
+            self.lbl_snapshot.setText("snapshot not found")
+            self.lbl_snapshot.setPixmap(QPixmap())
+            return
+
+        px = QPixmap(str(snap))
+        if px.isNull():
+            self.lbl_snapshot.setText("snapshot (failed to load)")
+            self.lbl_snapshot.setPixmap(QPixmap())
+            return
+
+        self.lbl_snapshot.setPixmap(
+            px.scaled(self.lbl_snapshot.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        )
+
+    def on_open_run_dir(self) -> None:
+        if self._last_run_dir and self._last_run_dir.exists():
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._last_run_dir)))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._last_run_dir:
+            self._refresh_snapshot_preview(self._last_run_dir)
+
+    def closeEvent(self, event):
+        if self._engine_thread is not None and self._engine_thread.isRunning():
+            try:
+                if self._engine_worker is not None:
+                    self._engine_worker.request_cancel()
+                self._engine_thread.quit()
+                self._engine_thread.wait(2000)
+            except Exception:
+                pass
+        super().closeEvent(event)
+
+
+def main() -> int:
+    app = QApplication(sys.argv)
+    w = MainWindow()
+    w.show()
+    return app.exec()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+==========================================================================================
+FILE: src\gapsim\ui_qt\models\points_table.py
+==========================================================================================
+
+from __future__ import annotations
+
+from typing import List, Tuple
+
+from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, Signal
+
+Point = Tuple[float, float]  # (x, y_user)
+
+
+class PointsTableModel(QAbstractTableModel):
+    """
+    2-column (X, Y) editable table model.
+    - pointEdited signal is emitted on user edit so controller can update the view.
+    """
+    pointEdited = Signal(int, float, float)  # idx, x, y
+
+    def __init__(self, points: List[Point] | None = None):
+        super().__init__()
+        self._points: List[Point] = list(points) if points else []
+
+    def rowCount(self, parent=QModelIndex()) -> int:
+        return len(self._points)
+
+    def columnCount(self, parent=QModelIndex()) -> int:
+        return 2
+
+    def headerData(self, section: int, orientation: Qt.Orientation, role: int):
+        if role != Qt.DisplayRole:
+            return None
+        if orientation == Qt.Horizontal:
+            return "X" if section == 0 else "Y"
+        return str(section + 1)
+
+    def flags(self, index: QModelIndex):
+        if not index.isValid():
+            return Qt.ItemIsEnabled
+        return Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsEditable
+
+    def data(self, index: QModelIndex, role: int):
+        if not index.isValid():
+            return None
+
+        x, y = self._points[index.row()]
+        v = x if index.column() == 0 else y
+
+        if role == Qt.DisplayRole:
+            return f"{v:.3f}"
+        if role == Qt.EditRole:
+            return v
+        return None
+
+    def setData(self, index: QModelIndex, value, role: int = Qt.EditRole) -> bool:
+        if role != Qt.EditRole or not index.isValid():
+            return False
+
+        row, col = index.row(), index.column()
+        try:
+            v = float(value)
+        except Exception:
+            return False
+
+        x, y = self._points[row]
+        if col == 0:
+            x = v
+        else:
+            y = v
+
+        self._points[row] = (x, y)
+        self.dataChanged.emit(index, index, [Qt.DisplayRole, Qt.EditRole])
+        self.pointEdited.emit(row, x, y)
+        return True
+
+    # ----- helpers (controller/view sync) -----
+    def set_points(self, pts: List[Point]) -> None:
+        self.beginResetModel()
+        self._points = list(pts)
+        self.endResetModel()
+
+    def get_points(self) -> List[Point]:
+        return list(self._points)
+
+    def set_point(self, idx: int, x: float, y: float) -> None:
+        if idx < 0 or idx >= len(self._points):
+            return
+        self._points[idx] = (x, y)
+        left = self.index(idx, 0)
+        right = self.index(idx, 1)
+        self.dataChanged.emit(left, right, [Qt.DisplayRole, Qt.EditRole])
+
+    def insertRows(self, row: int, count: int, parent=QModelIndex()) -> bool:
+        row = max(0, min(row, len(self._points)))
+        self.beginInsertRows(QModelIndex(), row, row + count - 1)
+        for _ in range(count):
+            self._points.insert(row, (0.0, 0.0))
+        self.endInsertRows()
+        return True
+
+    def removeRows(self, row: int, count: int, parent=QModelIndex()) -> bool:
+        if row < 0 or row >= len(self._points):
+            return False
+        end = min(row + count - 1, len(self._points) - 1)
+        self.beginRemoveRows(QModelIndex(), row, end)
+        del self._points[row : end + 1]
+        self.endRemoveRows()
+        return True
+
+==========================================================================================
+FILE: src\gapsim\ui_qt\models\points_table_view.py
+==========================================================================================
+
+from __future__ import annotations
+
+import re
+from typing import List, Tuple
+
+from PySide6.QtWidgets import QTableView, QApplication
+from PySide6.QtGui import QKeySequence
+from PySide6.QtCore import Qt
+
+from gapsim.ui_qt.models.points_table import PointsTableModel
+
+
+def _parse_clipboard(text: str) -> List[Tuple[float, float]]:
+    rows: List[Tuple[float, float]] = []
+    for line in text.strip().splitlines():
+        parts = re.split(r"[\t, ]+", line.strip())
+        if len(parts) < 2:
+            continue
+        try:
+            x = float(parts[0])
+            y = float(parts[1])
+        except Exception:
+            continue
+        rows.append((x, y))
+    return rows
+
+
+class PointsTableView(QTableView):
+    def __init__(self):
+        super().__init__()
+        self.setAlternatingRowColors(True)
+        self.setSelectionBehavior(QTableView.SelectItems)
+        self.setSelectionMode(QTableView.ExtendedSelection)
+
+    def keyPressEvent(self, event):
+        if event.matches(QKeySequence.Paste):
+            self._paste_xy()
+            return
+        if event.matches(QKeySequence.Copy):
+            self._copy_selection()
+            return
+
+        # Delete/Backspace: delete selected rows (except endpoints)
+        if event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
+            self._delete_selected_rows()
+            return
+
+        super().keyPressEvent(event)
+
+    def _paste_xy(self) -> None:
+        model = self.model()
+        if not isinstance(model, PointsTableModel):
+            return
+
+        text = QApplication.clipboard().text()
+        pts = _parse_clipboard(text)
+        if not pts:
+            return
+
+        idx = self.currentIndex()
+        start_row = idx.row() if idx.isValid() else 0
+
+        need = start_row + len(pts) - model.rowCount()
+        if need > 0:
+            model.insertRows(model.rowCount(), need)
+
+        for i, (x, y) in enumerate(pts):
+            r = start_row + i
+            model.setData(model.index(r, 0), x, Qt.EditRole)
+            model.setData(model.index(r, 1), y, Qt.EditRole)
+
+    def _copy_selection(self) -> None:
+        model = self.model()
+        if not isinstance(model, PointsTableModel):
+            return
+
+        sel = self.selectionModel().selectedIndexes()
+        if not sel:
+            return
+
+        rows = [i.row() for i in sel]
+        cols = [i.column() for i in sel]
+        r0, r1 = min(rows), max(rows)
+        c0, c1 = min(cols), max(cols)
+
+        out_lines = []
+        for r in range(r0, r1 + 1):
+            line = []
+            for c in range(c0, c1 + 1):
+                v = model.data(model.index(r, c), Qt.EditRole)
+                line.append("" if v is None else str(v))
+            out_lines.append("\t".join(line))
+
+        QApplication.clipboard().setText("\n".join(out_lines))
+
+    def _delete_selected_rows(self) -> None:
+        model = self.model()
+        if not isinstance(model, PointsTableModel):
+            return
+
+        sel = self.selectionModel().selectedIndexes()
+        if not sel:
+            return
+
+        rows = sorted({i.row() for i in sel}, reverse=True)
+        if not rows:
+            return
+
+        # delete in reverse order, protect endpoints dynamically
+        for r in rows:
+            last = model.rowCount() - 1
+            if r <= 0 or r >= last:
+                continue  # endpoints protected
+            model.removeRows(r, 1)
+
+==========================================================================================
+FILE: src\gapsim\ui_qt\views\structure_view.py
+==========================================================================================
+
+from __future__ import annotations
+
+import math
+from typing import List, Tuple, Optional
+
+from PySide6.QtWidgets import (
+    QGraphicsView,
+    QGraphicsScene,
+    QGraphicsEllipseItem,
+    QGraphicsLineItem,
+    QGraphicsSimpleTextItem,
+    QGraphicsItem,
+)
+from PySide6.QtGui import QPen, QBrush, QPainter, QColor, QPainterPath
+from PySide6.QtCore import Qt, QPointF, QRectF, Signal, QPoint
+
+
+# ---------------- Geometry utils (self-intersection check) ----------------
+_EPS = 1e-9
+
+
+def _orient(a: QPointF, b: QPointF, c: QPointF) -> float:
+    return (b.x() - a.x()) * (c.y() - a.y()) - (b.y() - a.y()) * (c.x() - a.x())
+
+
+def _on_segment(a: QPointF, b: QPointF, p: QPointF) -> bool:
+    return (
+        min(a.x(), b.x()) - _EPS <= p.x() <= max(a.x(), b.x()) + _EPS
+        and min(a.y(), b.y()) - _EPS <= p.y() <= max(a.y(), b.y()) + _EPS
+        and abs(_orient(a, b, p)) <= _EPS
+    )
+
+
+def _segments_intersect(a1: QPointF, a2: QPointF, b1: QPointF, b2: QPointF) -> bool:
+    o1 = _orient(a1, a2, b1)
+    o2 = _orient(a1, a2, b2)
+    o3 = _orient(b1, b2, a1)
+    o4 = _orient(b1, b2, a2)
+
+    if (o1 > _EPS and o2 < -_EPS) or (o1 < -_EPS and o2 > _EPS):
+        if (o3 > _EPS and o4 < -_EPS) or (o3 < -_EPS and o4 > _EPS):
+            return True
+
+    if abs(o1) <= _EPS and _on_segment(a1, a2, b1):
+        return True
+    if abs(o2) <= _EPS and _on_segment(a1, a2, b2):
+        return True
+    if abs(o3) <= _EPS and _on_segment(b1, b2, a1):
+        return True
+    if abs(o4) <= _EPS and _on_segment(b1, b2, a2):
+        return True
+
+    return False
+
+
+def _has_self_intersection(points: List[QPointF]) -> bool:
+    """
+    Rule:
+    - adjacent segments sharing endpoints are allowed.
+    - everything else (cross/touch/overlap) is forbidden.
+    """
+    n = len(points)
+    if n < 4:
+        return False
+    for i in range(n - 1):
+        a1, a2 = points[i], points[i + 1]
+        for j in range(i + 1, n - 1):
+            if abs(i - j) <= 1:
+                continue
+            b1, b2 = points[j], points[j + 1]
+            if _segments_intersect(a1, a2, b1, b2):
+                return True
+    return False
+
+
+# ---------------- Draggable point item ----------------
+class _PointItem(QGraphicsEllipseItem):
+    def __init__(self, idx: int, center: QPointF, radius_px: float, view: "StructureView"):
+        super().__init__(-radius_px, -radius_px, 2 * radius_px, 2 * radius_px)
+        self._idx = idx
+        self._view = view
+        self.setPos(center)
+
+        self.setZValue(10)
+        self.setPen(QPen(Qt.blue, 0))
+        self.setBrush(QBrush(Qt.blue))
+
+        # keep size constant in screen pixels when zooming
+        self.setFlag(QGraphicsItem.ItemIgnoresTransformations, True)
+
+        self.setFlag(QGraphicsItem.ItemIsMovable, True)
+        self.setFlag(QGraphicsItem.ItemSendsGeometryChanges, True)
+        self.setAcceptedMouseButtons(Qt.LeftButton)
+
+    @property
+    def idx(self) -> int:
+        return self._idx
+
+    def set_radius_px(self, r: float) -> None:
+        self.setRect(-r, -r, 2 * r, 2 * r)
+
+    def itemChange(self, change, value):
+        if change == QGraphicsItem.ItemPositionChange:
+            new_pos: QPointF = value
+            return self._view._propose_point_pos(self._idx, new_pos, self.pos())
+        if change == QGraphicsItem.ItemPositionHasChanged:
+            self._view._on_point_moved(self._idx, self.pos())
+        return super().itemChange(change, value)
+
+    def mousePressEvent(self, event):
+        if event.modifiers() & Qt.ControlModifier:
+            event.ignore()
+            return
+        self._view._begin_user_edit()
+        self._view._show_coord_label(self.pos())
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if event.modifiers() & Qt.ControlModifier:
+            event.ignore()
+            return
+        self._view._update_coord_label(self.pos())
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.modifiers() & Qt.ControlModifier:
+            event.ignore()
+            return
+        self._view._hide_coord_label()
+        self._view._end_user_edit()
+        super().mouseReleaseEvent(event)
+
+
+# ---------------- Main View ----------------
+class StructureView(QGraphicsView):
+    """
+    External coords rule:
+    - USER coords: (x, y_user) where depth is negative.
+    - Scene coords: (x, y_scene) where down is positive -> y_scene = -y_user
+
+    UX:
+    - Drag points (snap + intersection guard)
+    - Insert: left click on a segment (not on point)
+    - Delete: right click on internal point, or Delete key handled in table view
+    - Pan: Ctrl + left drag
+    - Zoom: Ctrl + wheel
+    """
+    editBegan = Signal(object)                 # List[(x,y_user)]
+    pointMoved = Signal(int, float, float)     # idx, x, y_user
+    pointInserted = Signal(int, float, float)  # insert_idx, x, y_user
+    pointDeleted = Signal(int)                 # deleted_idx
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.scene = QGraphicsScene(self)
+        self.setScene(self.scene)
+
+        self.setRenderHint(QPainter.Antialiasing)
+        self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
+        self.setResizeAnchor(QGraphicsView.AnchorUnderMouse)
+
+        # display unit
+        self._unit_name = "A"
+        self._unit_scale = 1.0
+
+        # point radius (screen px)
+        self._point_radius_px = 4
+
+        # panning (Ctrl + left drag)
+        self._panning = False
+        self._pan_start_view_pos = None
+        self._pan_start_center_scene = None
+
+        # grid density
+        self._minor_grid_target_lines = 20
+
+        # snap: minor grid / divisor
+        self._snap_divisor = 5
+
+        # suppress emit for programmatic updates
+        self._suppress_emit = False
+
+        # undo snapshot guard
+        self._edit_active = False
+
+        # insertion drag state
+        self._inserting_idx: Optional[int] = None
+
+        # geometry items (scene coords)
+        self._points: List[QPointF] = []
+        self._point_items: List[_PointItem] = []
+        self._line_items: List[QGraphicsLineItem] = []
+
+        # "walls" (scene coords) - computed dynamically (view-only wall)
+        self._wall_x_left: Optional[float] = None
+        self._wall_x_right: Optional[float] = None
+
+        # coord bubble (pixel-size fixed)
+        self._coord_label = QGraphicsSimpleTextItem()
+        self._coord_label.setZValue(100)
+        self._coord_label.setBrush(QBrush(Qt.black))
+        self._coord_label.setFlag(QGraphicsItem.ItemIgnoresTransformations, True)
+        self._coord_label.hide()
+        self.scene.addItem(self._coord_label)
+
+        # default points
+        self.set_points_xy([
+            (200.0, 0.0),
+            (100.0, 0.0),
+            (50.0, -400.0),
+            (-50.0, -400.0),
+            (-100.0, 0.0),
+            (-200.0, 0.0),
+        ])
+        self._ensure_scene_margin()
+
+    # ---------- public: point size ----------
+    def set_point_radius_px(self, px: int) -> None:
+        px = max(1, int(px))
+        self._point_radius_px = px
+        for it in self._point_items:
+            it.set_radius_px(px)
+        self.viewport().update()
+
+    # ---------- public: walls info ----------
+    def get_walls_x(self) -> Tuple[Optional[float], Optional[float]]:
+        """
+        wall x positions in USER coords(=scene x), None if no points.
+        """
+        return self._wall_x_left, self._wall_x_right
+
+    def get_virtual_boundary_points_xy(self) -> Optional[Tuple[Tuple[float, float], Tuple[float, float]]]:
+        """
+        Optional helper:
+        Virtual endpoints that connect to walls (USER coords).
+        - right wall point: (wall_x_right, y_first)
+        - left wall point : (wall_x_left, y_last)
+        """
+        if not self._points or self._wall_x_left is None or self._wall_x_right is None:
+            return None
+        y_first = -self._points[0].y()
+        y_last = -self._points[-1].y()
+        return (self._wall_x_right, y_first), (self._wall_x_left, y_last)
+
+    # ---------- External API (USER coords) ----------
+    def set_points_xy(self, pts: List[Tuple[float, float]]) -> None:
+        qpts = [QPointF(x, -y) for x, y in pts]
+        self._set_points(qpts)
+
+    def try_set_point_xy(self, idx: int, x: float, y: float) -> Tuple[float, float]:
+        if idx < 0 or idx >= len(self._point_items):
+            return x, y
+
+        self._suppress_emit = True
+        self._point_items[idx].setPos(QPointF(x, -y))
+        self._suppress_emit = False
+
+        pos = self._point_items[idx].pos()
+        self._apply_point_pos(idx, pos, emit=False)
+        return pos.x(), -pos.y()
+
+    def get_points_xy(self) -> List[Tuple[float, float]]:
+        return [(p.x(), -p.y()) for p in self._points]
+
+    # ---------- Undo snapshot helpers ----------
+    def _begin_user_edit(self) -> None:
+        if not self._edit_active:
+            self.editBegan.emit(self.get_points_xy())
+            self._edit_active = True
+
+    def _end_user_edit(self) -> None:
+        self._edit_active = False
+
+    # ---------- Core drawing ----------
+    def _set_points(self, qpts: List[QPointF]) -> None:
+        self._suppress_emit = True
+
+        for it in self._line_items:
+            self.scene.removeItem(it)
+        for it in self._point_items:
+            self.scene.removeItem(it)
+
+        self._points = [QPointF(p) for p in qpts]
+        self._point_items = []
+        self._line_items = []
+
+        pen_line = QPen(Qt.black, 0)
+        pen_line.setStyle(Qt.SolidLine)
+
+        for i in range(len(self._points) - 1):
+            a, b = self._points[i], self._points[i + 1]
+            li = self.scene.addLine(a.x(), a.y(), b.x(), b.y(), pen_line)
+            li.setZValue(5)
+            self._line_items.append(li)
+
+        for i, p in enumerate(self._points):
+            pi = _PointItem(i, p, self._point_radius_px, self)
+            self.scene.addItem(pi)
+            self._point_items.append(pi)
+
+        self._ensure_scene_margin()
+        self.viewport().update()
+        self._suppress_emit = False
+
+    # ---------- Grid ----------
+    def _choose_grid_steps(self, visible_rect: QRectF) -> tuple[float, float]:
+        span = max(visible_rect.width(), visible_rect.height())
+        if span <= 0:
+            return 10.0, 20.0
+        target_minor = span / float(self._minor_grid_target_lines)
+        k = math.floor(math.log10(max(target_minor, 1e-12) / 5.0))
+        cand1 = 5.0 * (10.0**k)
+        cand2 = 5.0 * (10.0 ** (k + 1))
+        minor = cand1 if abs(cand1 - target_minor) <= abs(cand2 - target_minor) else cand2
+        minor = max(minor, 1e-9)
+        return minor, minor * 2.0
+
+    def _update_walls_from_points(self, minor_step: float) -> None:
+        if len(self._points) < 2:
+            self._wall_x_left = None
+            self._wall_x_right = None
+            return
+        xs = [p.x() for p in self._points]
+        x_min = min(xs)
+        x_max = max(xs)
+        offset = max(minor_step * 2.0, minor_step)
+        self._wall_x_left = x_min - offset
+        self._wall_x_right = x_max + offset
+
+    def drawBackground(self, painter: QPainter, rect: QRectF) -> None:
+        super().drawBackground(painter, rect)
+
+        visible = self.mapToScene(self.viewport().rect()).boundingRect()
+        minor_step, major_step = self._choose_grid_steps(visible)
+
+        left, right = visible.left(), visible.right()
+        top, bottom = visible.top(), visible.bottom()
+
+        painter.save()
+
+        # Si fill below boundary
+        if len(self._points) >= 2:
+            max_y = max(p.y() for p in self._points)
+            pad = visible.height() * 0.5 + 200
+            y_floor = max(bottom, max_y) + pad
+
+            path = QPainterPath()
+            path.moveTo(self._points[0])
+            for p in self._points[1:]:
+                path.lineTo(p)
+            path.lineTo(self._points[-1].x(), y_floor)
+            path.lineTo(self._points[0].x(), y_floor)
+            path.closeSubpath()
+
+            painter.fillPath(path, QBrush(QColor(220, 220, 220)))
+
+        # view-only walls
+        self._update_walls_from_points(minor_step)
+        if self._wall_x_left is not None and self._wall_x_right is not None:
+            pen_wall = QPen(QColor(80, 80, 80), 0, Qt.SolidLine)
+            painter.setPen(pen_wall)
+            painter.drawLine(self._wall_x_left, top, self._wall_x_left, bottom)
+            painter.drawLine(self._wall_x_right, top, self._wall_x_right, bottom)
+
+        # grid
+        pen_minor = QPen(Qt.lightGray, 0, Qt.DotLine)
+        pen_major = QPen(Qt.gray, 0, Qt.DotLine)
+
+        def align_start(v: float, step: float) -> float:
+            return math.floor(v / step) * step
+
+        x0 = align_start(left, minor_step)
+        y0 = align_start(top, minor_step)
+
+        x = x0
+        while x <= right:
+            painter.setPen(pen_major if abs((x / major_step) - round(x / major_step)) < 1e-9 else pen_minor)
+            painter.drawLine(x, top, x, bottom)
+            x += minor_step
+
+        y = y0
+        while y <= bottom:
+            painter.setPen(pen_major if abs((y / major_step) - round(y / major_step)) < 1e-9 else pen_minor)
+            painter.drawLine(left, y, right, y)
+            y += minor_step
+
+        painter.restore()
+
+    # ---------- Scene margin ----------
+    def _ensure_scene_margin(self) -> None:
+        items_rect = self.scene.itemsBoundingRect()
+        if items_rect.isNull():
+            items_rect = QRectF(0, 0, 100, 100)
+
+        vp = self.viewport().rect()
+        tl = self.mapToScene(vp.topLeft())
+        br = self.mapToScene(vp.bottomRight())
+        vp_w = abs(br.x() - tl.x())
+        vp_h = abs(br.y() - tl.y())
+
+        w = max(items_rect.width(), vp_w)
+        h = max(items_rect.height(), vp_h)
+
+        margin = max(w, h) * 1.5 + 200
+        self.setSceneRect(items_rect.adjusted(-margin, -margin, margin, margin))
+
+    # ---------- Snap + intersection guard ----------
+    def _propose_point_pos(self, idx: int, new_pos: QPointF, old_pos: QPointF) -> QPointF:
+        visible = self.mapToScene(self.viewport().rect()).boundingRect()
+        minor_step, _ = self._choose_grid_steps(visible)
+        snap_step = minor_step / float(self._snap_divisor)
+
+        sx = round(new_pos.x() / snap_step) * snap_step
+        sy = round(new_pos.y() / snap_step) * snap_step
+        snapped = QPointF(sx, sy)
+
+        tmp = [QPointF(p) for p in self._points]
+        tmp[idx] = snapped
+        if _has_self_intersection(tmp):
+            return old_pos
+        return snapped
+
+    def _apply_point_pos(self, idx: int, pos: QPointF, emit: bool) -> None:
+        self._points[idx] = QPointF(pos)
+
+        if idx - 1 >= 0:
+            a, b = self._points[idx - 1], self._points[idx]
+            self._line_items[idx - 1].setLine(a.x(), a.y(), b.x(), b.y())
+        if idx < len(self._points) - 1:
+            a, b = self._points[idx], self._points[idx + 1]
+            self._line_items[idx].setLine(a.x(), a.y(), b.x(), b.y())
+
+        self._update_coord_label(pos)
+        self.viewport().update()
+        if emit:
+            self.pointMoved.emit(idx, pos.x(), -pos.y())
+
+    def _on_point_moved(self, idx: int, pos: QPointF) -> None:
+        if self._suppress_emit:
+            return
+        self._apply_point_pos(idx, pos, emit=True)
+
+    # ---------- Coord label ----------
+    def _label_scene_pos(self, point_scene: QPointF) -> QPointF:
+        v = self.mapFromScene(point_scene)
+        v2 = v + QPoint(10, -20)
+        return self.mapToScene(v2)
+
+    def _show_coord_label(self, pos: QPointF) -> None:
+        self._coord_label.show()
+        self._update_coord_label(pos)
+
+    def _update_coord_label(self, pos: QPointF) -> None:
+        if not self._coord_label.isVisible():
+            return
+        self._coord_label.setText(f"({pos.x():.1f}, {-pos.y():.1f}){self._unit_name}")
+        self._coord_label.setPos(self._label_scene_pos(pos))
+
+    def _hide_coord_label(self) -> None:
+        self._coord_label.hide()
+
+    # ---------- helpers: hit-testing ----------
+    def _dist_point_to_segment_px(self, p: QPointF, a: QPointF, b: QPointF) -> float:
+        ax, ay = a.x(), a.y()
+        bx, by = b.x(), b.y()
+        px, py = p.x(), p.y()
+
+        vx, vy = bx - ax, by - ay
+        wx, wy = px - ax, py - ay
+
+        vv = vx * vx + vy * vy
+        if vv <= 1e-12:
+            return math.hypot(px - ax, py - ay)
+
+        t = (wx * vx + wy * vy) / vv
+        t = max(0.0, min(1.0, t))
+        cx, cy = ax + t * vx, ay + t * vy
+        return math.hypot(px - cx, py - cy)
+
+    def _find_segment_near_click(self, scene_pos: QPointF, thresh_px: float = 8.0) -> Optional[int]:
+        if len(self._points) < 2:
+            return None
+        pv = QPointF(self.mapFromScene(scene_pos))
+        best_i = None
+        best_d = 1e18
+        for i in range(len(self._points) - 1):
+            av = QPointF(self.mapFromScene(self._points[i]))
+            bv = QPointF(self.mapFromScene(self._points[i + 1]))
+            d = self._dist_point_to_segment_px(pv, av, bv)
+            if d < best_d:
+                best_d = d
+                best_i = i
+        if best_i is not None and best_d <= thresh_px:
+            return best_i
+        return None
+
+    def _find_point_near_click(self, scene_pos: QPointF, thresh_px: float = 10.0) -> Optional[int]:
+        if not self._points:
+            return None
+        pv = QPointF(self.mapFromScene(scene_pos))
+        best_i = None
+        best_d = 1e18
+        for i, p in enumerate(self._points):
+            qv = QPointF(self.mapFromScene(p))
+            d = math.hypot(pv.x() - qv.x(), pv.y() - qv.y())
+            if d < best_d:
+                best_d = d
+                best_i = i
+        if best_i is not None and best_d <= thresh_px:
+            return best_i
+        return None
+
+    # ---------- insert/delete logic ----------
+    def _insert_point_and_start_drag(self, seg_i: int, scene_pos: QPointF) -> None:
+        insert_idx = seg_i + 1
+        new_points = [QPointF(p) for p in self._points]
+        new_points.insert(insert_idx, QPointF(scene_pos))
+
+        if _has_self_intersection(new_points):
+            return
+
+        self._set_points(new_points)
+        self._inserting_idx = insert_idx
+        self._show_coord_label(self._points[insert_idx])
+
+        p = self._points[insert_idx]
+        self.pointInserted.emit(insert_idx, p.x(), -p.y())
+
+    def _delete_point(self, idx: int) -> None:
+        if idx <= 0 or idx >= len(self._points) - 1:
+            return
+        new_points = [QPointF(p) for p in self._points]
+        del new_points[idx]
+        self._set_points(new_points)
+        self.pointDeleted.emit(idx)
+
+    # ---------- Zoom / Pan / Insert / Delete ----------
+    def wheelEvent(self, event):
+        if event.modifiers() & Qt.ControlModifier:
+            zoom_factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
+            self.scale(zoom_factor, zoom_factor)
+            self._ensure_scene_margin()
+            self.viewport().update()
+            event.accept()
+            return
+        super().wheelEvent(event)
+
+    def mousePressEvent(self, event):
+        scene_pos = self.mapToScene(event.pos())
+
+        if event.button() == Qt.LeftButton and (event.modifiers() & Qt.ControlModifier):
+            self._panning = True
+            self._pan_start_view_pos = event.pos()
+            self._pan_start_center_scene = self.mapToScene(self.viewport().rect().center())
+            self.viewport().setCursor(Qt.ClosedHandCursor)
+            event.accept()
+            return
+
+        if event.button() == Qt.RightButton:
+            idx = self._find_point_near_click(scene_pos)
+            if idx is not None and (0 < idx < len(self._points) - 1):
+                self._begin_user_edit()
+                self._delete_point(idx)
+                self._end_user_edit()
+                event.accept()
+                return
+
+        if event.button() == Qt.LeftButton and not (event.modifiers() & Qt.ControlModifier):
+            pidx = self._find_point_near_click(scene_pos)
+            if pidx is None:
+                seg_i = self._find_segment_near_click(scene_pos)
+                if seg_i is not None:
+                    self._begin_user_edit()
+                    self._insert_point_and_start_drag(seg_i, scene_pos)
+                    event.accept()
+                    return
+
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._panning and (event.buttons() & Qt.LeftButton):
+            delta_view = event.pos() - self._pan_start_view_pos
+            p0 = self.mapToScene(0, 0)
+            p1 = self.mapToScene(delta_view.x(), delta_view.y())
+            delta_scene = p1 - p0
+            self.centerOn(self._pan_start_center_scene - delta_scene)
+            event.accept()
+            return
+
+        if self._inserting_idx is not None and (event.buttons() & Qt.LeftButton):
+            idx = self._inserting_idx
+            if 0 <= idx < len(self._point_items):
+                self._point_items[idx].setPos(self.mapToScene(event.pos()))
+                self._update_coord_label(self._point_items[idx].pos())
+            event.accept()
+            return
+
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self._panning:
+            self._panning = False
+            self._pan_start_view_pos = None
+            self._pan_start_center_scene = None
+            self.viewport().setCursor(Qt.ArrowCursor)
+            event.accept()
+            return
+
+        if event.button() == Qt.LeftButton and self._inserting_idx is not None:
+            self._inserting_idx = None
+            self._hide_coord_label()
+            self._end_user_edit()
+            event.accept()
+            return
+
+        super().mouseReleaseEvent(event)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._ensure_scene_margin()

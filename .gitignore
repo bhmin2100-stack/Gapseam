@@ -1,0 +1,18 @@
+﻿# Python virtual environment
+.venv/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Run/output folders
+runs/
+exports/
+
+# Build artifacts
+build/
+dist/
+
+# OS files
+.DS_Store
+Thumbs.db

@@ -1,0 +1,19 @@
+﻿[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gapsim"
+version = "0.1.0"
+description = "Gap Fill Simulator (UI scaffold + plugin-ready engine)"
+requires-python = ">=3.10"
+dependencies = [
+  "PySide6>=6.5",
+  "matplotlib",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
