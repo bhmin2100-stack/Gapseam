@@ -1,65 +1,8 @@
 {
   "version": 1,
   "presets": {
-    "gfs": {
-      "simulation_name": "gfs",
-      "cycles": 200,
-      "phase1_switches": {
-        "conformal": {
-          "enabled": true,
-          "params": {
-            "base_rate": 1.0,
-            "n_steps": 200,
-            "reparam_ds_a": 2.5
-          }
-        },
-        "attenuation": {
-          "enabled": false,
-          "params": {
-            "source_onset_width_a": 0.0,
-            "source_decay_pct": 98.0,
-            "source_distance_decay_pct": 0.0
-          }
-        },
-        "overhang": {
-          "enabled": false,
-          "params": {
-            "directional_pct": 50.0,
-            "angle_pct": 22.222,
-            "shadow_pct": 100.0,
-            "ray_count": "1",
-            "ray_spread_deg": 0.0
-          }
-        },
-        "sputter": {
-          "enabled": false,
-          "params": {
-            "strength_pct": 0.0,
-            "peak_angle_deg": 55.0,
-            "angle_sigma_deg": 15.0,
-            "depth_decay_length_a": 1000.0,
-            "vis_exponent": 1.0
-          }
-        },
-        "redepo": {
-          "enabled": false,
-          "params": {
-            "efficiency_pct": 50.0,
-            "lobe_sigma_deg": 20.0
-          }
-        },
-        "inhibition": {
-          "enabled": false,
-          "params": {
-            "i_max": 0.5,
-            "lambda_a": 500.0,
-            "field_extent_a": 0.0
-          }
-        }
-      }
-    },
-    "zzz": {
-      "simulation_name": "zzz",
+    "default": {
+      "simulation_name": "default",
       "cycles": 200,
       "phase1_switches": {
         "conformal": {
