@@ -9,6 +9,7 @@ __pycache__/
 build/
 dist/
 *.egg-info/
+src/gapsim.egg-info/
 
 # Run/output folders
 runs/

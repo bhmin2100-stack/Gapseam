@@ -13,3 +13,9 @@
 ## D3. Phase2 -> Step
 - Phase2(점 이동 성장)는 runner 하드코딩이 아니라 Step으로 구현한다.
 - runner는 steps 실행 + snapshot/metrics/events 기록 + cancel/progress만 담당한다.
+
+## D4. Build Artifacts and Packaging
+- 로컬 빌드 산출물(예: `build/`, `dist/`, `*.egg-info/`)은 커밋하지 않는다.
+- `src/gapsim.egg-info/`는 저장소에 포함하지 않으며 `.gitignore` 규칙으로 관리한다.
+- 릴리스/배포 절차는 사전 생성된 `egg-info` 파일에 의존하지 않는다.
+- 패키징은 setuptools 표준 흐름(`python -m build`로 sdist/wheel 생성)으로 수행한다.
