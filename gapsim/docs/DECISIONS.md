@@ -13,3 +13,7 @@
 ## D3. Phase2 -> Step
 - Phase2(점 이동 성장)는 runner 하드코딩이 아니라 Step으로 구현한다.
 - runner는 steps 실행 + snapshot/metrics/events 기록 + cancel/progress만 담당한다.
+## D4. Snapshot Rendering Boundary
+- 프로덕션 엔진(`src/gapsim/engine`)은 시각화 유틸에 의존하지 않는다.
+- 실행 결과 시각화/프레임 렌더링은 UI/툴링 레이어에서만 수행한다.
+- 미사용 엔진 렌더러(`engine/viz.py`)는 제거하여 런타임 경로를 단순화한다.
