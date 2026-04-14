@@ -131,12 +131,20 @@ class EngineRunner:
         reparam_ds_a = max(0.5, min(200.0, float(model_cfg.get("reparam_ds_a", 2.5))))
         phase1_switches = recipe.get("phase1_switches")
         conformal_enabled = True
+        sputter_only = bool(model_cfg.get("sputter_only", False))
         if isinstance(phase1_switches, dict):
             conformal_cfg = phase1_switches.get("conformal")
             if isinstance(conformal_cfg, dict):
                 conformal_enabled = bool(conformal_cfg.get("enabled", True))
+            sputter_cfg = phase1_switches.get("sputter")
+            if isinstance(sputter_cfg, dict):
+                sputter_params = sputter_cfg.get("params")
+                if isinstance(sputter_params, dict):
+                    sputter_only = bool(sputter_params.get("sputter_only", sputter_only))
         elif "conformal_enabled" in model_cfg:
             conformal_enabled = bool(model_cfg.get("conformal_enabled", True))
+        if sputter_only:
+            conformal_enabled = False
         run_stage_cfg = recipe.get("run_stage")
         if not isinstance(run_stage_cfg, dict):
             run_stage_cfg = {}
@@ -232,6 +240,7 @@ class EngineRunner:
             flux_model = SputterRedepositionFluxModel(
                 flux_model,
                 etch_reference_model=etch_reference_model,
+                sputter_only_mode=sputter_only,
                 sputter_enabled=sputter_enabled,
                 sputter_strength_pct=sputter_strength_pct,
                 sputter_peak_angle_deg=sputter_peak_angle_deg,

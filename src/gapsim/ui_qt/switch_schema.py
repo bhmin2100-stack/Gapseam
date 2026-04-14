@@ -99,6 +99,13 @@ PHASE1_SWITCH_SCHEMA: List[SwitchDef] = [
         "default_enabled": False,
         "params": [
             {
+                "id": "sputter_only",
+                "label_key": "switch.param.sputter_only",
+                "type": "bool",
+                "default": False,
+                "tooltip_key": "switch.tip.sputter_only",
+            },
+            {
                 "id": "strength_pct",
                 "label_key": "switch.param.sputter_strength_pct",
                 "type": "float",

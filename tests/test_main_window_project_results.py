@@ -139,6 +139,47 @@ class MainWindowProjectResultsTest(unittest.TestCase):
         finally:
             win.close()
 
+    def test_sputter_only_turns_off_conformal_and_serializes_reference_mode(self) -> None:
+        win = MainWindow()
+        try:
+            conformal = win._switch_widgets["conformal"]
+            sputter = win._switch_widgets["sputter"]
+
+            conformal["enabled"].setChecked(True)
+            conformal["controls"]["base_rate"].setValue(2.5)
+            sputter["enabled"].setChecked(True)
+            sputter["controls"]["strength_pct"].setValue(75.0)
+            sputter["controls"]["sputter_only"].setChecked(True)
+
+            self.assertFalse(conformal["enabled"].isChecked())
+            self.assertTrue(conformal["form_host"].isEnabled())
+
+            recipe = win._build_recipe()
+
+            self.assertFalse(recipe["model_base"]["conformal_enabled"])
+            self.assertTrue(recipe["model_base"]["sputter_only"])
+            self.assertEqual(recipe["model_base"]["base_rate"], 2.5)
+            self.assertTrue(recipe["phase1_switches"]["sputter"]["params"]["sputter_only"])
+        finally:
+            win.close()
+
+    def test_result_solid_fill_flags_apply_only_to_latest_etch_stage(self) -> None:
+        win = MainWindow()
+        try:
+            win._result_recipe = {
+                "run_stage": {"index": 2},
+                "phase1_switches": {
+                    "conformal": {"enabled": False, "params": {}},
+                    "sputter": {"enabled": True, "params": {"sputter_only": True}},
+                },
+            }
+
+            flags = win._result_solid_fill_flags([1, 1, 2, 2])
+
+            self.assertEqual(flags, [False, False, True, True])
+        finally:
+            win.close()
+
 
 if __name__ == "__main__":
     unittest.main()

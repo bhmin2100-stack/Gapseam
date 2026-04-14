@@ -447,6 +447,10 @@ TEXT: Dict[str, Dict[str, str]] = {
         "ko": "\uc2a4\ud37c\ud130 \uac15\ub3c4 (%)",
         "en": "Sputter strength (%)"
     },
+    "switch.param.sputter_only": {
+        "ko": "Sputter only",
+        "en": "Sputter only"
+    },
     "switch.param.sputter_peak_angle_deg": {
         "ko": "\ud53c\ud06c\uac01 (\ub3c4)",
         "en": "Peak angle (deg)"
@@ -666,6 +670,10 @@ TEXT: Dict[str, Dict[str, str]] = {
     "switch.tip.sputter_strength_pct": {
         "ko": "\uc804\uccb4 \uc5d0\uce58 \uc138\uae30\uc785\ub2c8\ub2e4. 0\uc774\uba74 \uc5d0\uce58 \uc5c6\uc74c, \uac12\uc774 \ud074\uc218\ub85d \ub354 \ub9ce\uc774 \uae4e\uc785\ub2c8\ub2e4.",
         "en": "Overall etch strength. 0 disables sputtering; larger values remove more material."
+    },
+    "switch.tip.sputter_only": {
+        "ko": "\uccb4\ud06c\ud558\uba74 ConformalDepo\ub294 \uaebc\uc9c0\uace0, ConformalDepo\uc5d0 \uc785\ub825\ub41c base_rate\ub97c \uae30\uc900\uc73c\ub85c \uc2a4\ud37c\ud130 \uc5d0\uce58\ub9cc \uc9c4\ud589\ud569\ub2c8\ub2e4.",
+        "en": "Turns off ConformalDepo and uses its base_rate only as the sputter-etch reference scale."
     },
     "switch.tip.sputter_peak_angle_deg": {
         "ko": "\uc2a4\ud37c\ud130 \uc77c\ub4dc\uac00 \ucd5c\ub300\uac00 \ub418\ub294 \uc785\uc0ac\uac01(\ubc95\uc120 \uae30\uc900)\uc785\ub2c8\ub2e4. \ubcf4\ud1b5 45~60\ub3c4 \uadfc\ucc98\uc5d0\uc11c \ud53c\ud06c\uac00 \ub0a9\ub2c8\ub2e4.",
@@ -1014,6 +1022,14 @@ TEXT: Dict[str, Dict[str, str]] = {
     "tip.base_rate": {
         "ko": "Base deposition rate when opening is sufficiently wide.",
         "en": "Base deposition rate when opening is sufficiently wide."
+    },
+    "common.on": {
+        "ko": "\ucf1c\uc9d0",
+        "en": "On"
+    },
+    "common.off": {
+        "ko": "\uaebc\uc9d0",
+        "en": "Off"
     },
     "tip.epsilon": {
         "ko": "Sealing model is applied when opening <= epsilon.",

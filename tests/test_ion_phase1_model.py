@@ -9,9 +9,13 @@ from gapsim.engine.deposition_pipeline import (
     SimulationState,
     SputterRedepositionFluxModel,
     Surface,
+    TopologyCleanup,
     VertexNormalPropagator,
     ZeroFluxModel,
+    _int_paths_area,
+    deposit_step,
     equal_arc_resample,
+    init_simulation_state,
 )
 from gapsim.engine.ion_los import OpeningLOS, PathLOS, _segment_intersects, build_opening_segment
 
@@ -469,6 +473,79 @@ class IonPhase1ModelTest(unittest.TestCase):
 
         self.assertTrue(any(v < 0.0 for v in net_flux))
         self.assertAlmostEqual(max(net_flux), 0.0, delta=1e-9)
+
+    def test_sputter_etch_only_step_removes_material_from_structure(self) -> None:
+        pts = equal_arc_resample(
+            [
+                (-120.0, 0.0),
+                (0.0, -120.0),
+                (120.0, 0.0),
+            ],
+            10.0,
+        )
+        state = init_simulation_state(pts, units="A", reparam_ds_a=2.5)
+        model = SputterRedepositionFluxModel(
+            ZeroFluxModel(),
+            etch_reference_model=ConformalFluxModel(),
+            sputter_enabled=True,
+            sputter_strength_pct=100.0,
+            sputter_peak_angle_deg=45.0,
+            sputter_angle_sigma_deg=5.0,
+            sputter_depth_decay_length_a=0.0,
+            sputter_vis_exponent=0.0,
+            redepo_enabled=False,
+        )
+
+        before_solid_area = float(_int_paths_area(state.solid_paths_i))
+        out = deposit_step(
+            1.0,
+            state,
+            model=model,
+            propagator=VertexNormalPropagator(),
+            cleanup=TopologyCleanup(),
+        )
+        after_solid_area = float(_int_paths_area(out.solid_paths_i))
+
+        self.assertLess(after_solid_area, before_solid_area)
+        self.assertEqual(out.meta.get("solid_merge_mode"), "candidate")
+
+    def test_sputter_only_strength_maps_peak_etch_to_reference_fraction(self) -> None:
+        pts = equal_arc_resample(
+            [
+                (-120.0, 0.0),
+                (0.0, -120.0),
+                (120.0, 0.0),
+            ],
+            10.0,
+        )
+        state = SimulationState(
+            surface=Surface(points=list(pts)),
+            scale=1,
+            x_left_i=0,
+            x_right_i=0,
+            y_top_i=0,
+            y_bot_i=0,
+            roi_path_i=[],
+            solid_paths_i=[],
+            meta={"dr": 1.0},
+        )
+        model = SputterRedepositionFluxModel(
+            ZeroFluxModel(),
+            etch_reference_model=ConformalFluxModel(),
+            sputter_only_mode=True,
+            sputter_enabled=True,
+            sputter_strength_pct=50.0,
+            sputter_peak_angle_deg=45.0,
+            sputter_angle_sigma_deg=5.0,
+            sputter_depth_decay_length_a=0.0,
+            sputter_vis_exponent=0.0,
+            redepo_enabled=False,
+        )
+
+        net_flux = model.compute_flux(state)
+
+        self.assertAlmostEqual(min(net_flux), -0.5, delta=1e-6)
+        self.assertTrue(state.meta.get("sputter_only_mode"))
 
     def test_sputter_compute_flux_records_timing_meta(self) -> None:
         pts = equal_arc_resample(

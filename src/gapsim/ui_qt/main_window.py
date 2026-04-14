@@ -823,6 +823,9 @@ class MainWindow(QMainWindow):
                     w.setRange(int(pdef.get("min", -1_000_000_000)), int(pdef.get("max", 1_000_000_000)))
                     w.setValue(int(state.get("params", {}).get(pid, pdef.get("default", 0))))
                     self._setup_int_editor(w)
+                elif ptype == "bool":
+                    w = QCheckBox()
+                    w.setChecked(bool(state.get("params", {}).get(pid, pdef.get("default", False))))
                 elif ptype == "enum":
                     w = QComboBox()
                     opts = list(pdef.get("options", []))
@@ -884,12 +887,59 @@ class MainWindow(QMainWindow):
 
         self._sync_switches_from_legacy_run_controls()
         self._sync_legacy_run_controls_from_switches()
+        self._refresh_switch_dependency_ui()
         self._update_reparam_preset_ui()
+
+    def _sputter_only_checked(self) -> bool:
+        sputter = self._switch_widgets.get("sputter")
+        if not sputter:
+            return False
+        ctrl = sputter.get("controls", {}).get("sputter_only")
+        return bool(ctrl.isChecked()) if isinstance(ctrl, QCheckBox) else False
+
+    def _refresh_switch_dependency_ui(self) -> None:
+        conformal = self._switch_widgets.get("conformal")
+        if not conformal:
+            return
+        keep_reference_editable = self._sputter_only_checked()
+        if keep_reference_editable and conformal["enabled"].isChecked():
+            try:
+                conformal["enabled"].blockSignals(True)
+                conformal["enabled"].setChecked(False)
+            finally:
+                conformal["enabled"].blockSignals(False)
+        conformal["form_host"].setEnabled(bool(conformal["enabled"].isChecked()) or keep_reference_editable)
+
+    def _on_sputter_only_toggled(self, checked: bool) -> None:
+        conformal = self._switch_widgets.get("conformal")
+        if checked and conformal and conformal["enabled"].isChecked():
+            try:
+                conformal["enabled"].blockSignals(True)
+                conformal["enabled"].setChecked(False)
+            finally:
+                conformal["enabled"].blockSignals(False)
+        self._refresh_switch_dependency_ui()
+        self._on_switch_controls_changed()
+
+    def _on_conformal_switch_toggled(self, checked: bool) -> None:
+        if checked:
+            sputter = self._switch_widgets.get("sputter")
+            ctrl = sputter.get("controls", {}).get("sputter_only") if sputter else None
+            if isinstance(ctrl, QCheckBox) and ctrl.isChecked():
+                try:
+                    ctrl.blockSignals(True)
+                    ctrl.setChecked(False)
+                finally:
+                    ctrl.blockSignals(False)
+        self._refresh_switch_dependency_ui()
+        self._on_switch_controls_changed()
 
     def _switch_widget_value(self, widget: Any, pdef: Dict[str, Any]) -> Any:
         ptype = str(pdef.get("type", "float"))
         if ptype == "int":
             return int(widget.value())
+        if ptype == "bool":
+            return bool(widget.isChecked())
         if ptype == "enum":
             data = widget.currentData()
             return str(data) if data is not None else str(widget.currentText())
@@ -901,6 +951,8 @@ class MainWindow(QMainWindow):
             widget.blockSignals(True)
             if ptype == "int":
                 widget.setValue(int(value))
+            elif ptype == "bool":
+                widget.setChecked(bool(value))
             elif ptype == "enum":
                 idx = widget.findData(str(value))
                 widget.setCurrentIndex(max(0, idx))
@@ -948,7 +1000,7 @@ class MainWindow(QMainWindow):
 
         preset = str(preset_ctrl.currentData() or "manual")
         manual = preset == "manual"
-        form_enabled = bool(conformal["enabled"].isChecked())
+        form_enabled = bool(conformal["form_host"].isEnabled())
         ds_ctrl.setEnabled(form_enabled and manual)
 
         if info_title is not None:
@@ -1008,13 +1060,13 @@ class MainWindow(QMainWindow):
         for sid, wd in self._switch_widgets.items():
             src = merged.get(sid, {"enabled": False, "params": {}})
             wd["enabled"].setChecked(bool(src.get("enabled", False)))
-            wd["form_host"].setEnabled(bool(src.get("enabled", False)))
             src_params = src.get("params") or {}
             for pid, ctrl in wd["controls"].items():
                 pdef = wd["param_defs"].get(pid, {})
                 val = src_params.get(pid, pdef.get("default"))
                 self._set_switch_widget_value(ctrl, pdef, val)
 
+        self._refresh_switch_dependency_ui()
         self._update_reparam_preset_ui()
         self._sync_legacy_run_controls_from_switches()
 
@@ -1040,6 +1092,7 @@ class MainWindow(QMainWindow):
             self.spin_cycles.setValue(int(controls["n_steps"].value()))
 
     def _on_switch_controls_changed(self, *_args) -> None:
+        self._refresh_switch_dependency_ui()
         self._update_reparam_preset_ui()
         self._switch_state = self._collect_switch_state()
         self._sync_legacy_run_controls_from_switches()
@@ -1254,6 +1307,17 @@ class MainWindow(QMainWindow):
                     ctrl.valueChanged.connect(self._on_switch_controls_changed)
                 elif isinstance(ctrl, QComboBox):
                     ctrl.currentIndexChanged.connect(self._on_switch_controls_changed)
+                elif isinstance(ctrl, QCheckBox):
+                    ctrl.toggled.connect(self._on_switch_controls_changed)
+
+        conformal_wd = self._switch_widgets.get("conformal")
+        if conformal_wd:
+            conformal_wd["enabled"].toggled.connect(self._on_conformal_switch_toggled)
+        sputter_wd = self._switch_widgets.get("sputter")
+        if sputter_wd:
+            sputter_only_ctrl = sputter_wd.get("controls", {}).get("sputter_only")
+            if isinstance(sputter_only_ctrl, QCheckBox):
+                sputter_only_ctrl.toggled.connect(self._on_sputter_only_toggled)
 
         self._on_switch_controls_changed()
         self._refresh_run_preset_combo()
@@ -1928,6 +1992,7 @@ class MainWindow(QMainWindow):
         sputter = self._switch_state.get("sputter", {"enabled": False, "params": {}})
         sp_enabled = bool(sputter.get("enabled", False))
         sp_params = sputter.get("params") or {}
+        sputter_only = bool(sp_params.get("sputter_only", False))
         sputter_strength_pct = float(sp_params.get("strength_pct", 0.0))
         sputter_peak_angle_deg = float(sp_params.get("peak_angle_deg", 55.0))
         sputter_angle_sigma_deg = float(sp_params.get("angle_sigma_deg", 15.0))
@@ -1951,7 +2016,10 @@ class MainWindow(QMainWindow):
             source_decay_pct = 0.0
             source_distance_decay_pct = 0.0
         if not sp_enabled:
+            sputter_only = False
             sputter_strength_pct = 0.0
+        if sputter_only:
+            conf_enabled = False
         if not inhib_enabled:
             inhibition_i_max = 0.0
             inhibition_lambda_a = 0.0
@@ -1987,6 +2055,7 @@ class MainWindow(QMainWindow):
                 "source_decay_pct": source_decay_pct,
                 "source_distance_decay_pct": source_distance_decay_pct,
                 "sputter_enabled": sp_enabled,
+                "sputter_only": sputter_only,
                 "sputter_strength_pct": sputter_strength_pct,
                 "sputter_peak_angle_deg": sputter_peak_angle_deg,
                 "sputter_angle_sigma_deg": sputter_angle_sigma_deg,
@@ -2173,7 +2242,7 @@ class MainWindow(QMainWindow):
             if conformal_wd and ("conformal_enabled" in mb):
                 conf_enabled = bool(mb.get("conformal_enabled", True))
                 conformal_wd["enabled"].setChecked(conf_enabled)
-                conformal_wd["form_host"].setEnabled(conf_enabled)
+                self._refresh_switch_dependency_ui()
             self._switch_state = self._collect_switch_state()
 
         if "reparam_ds_a" in mb:
@@ -2285,6 +2354,7 @@ class MainWindow(QMainWindow):
                     explicit_sputter = explicit_sputter or any(
                         key in maybe_params
                         for key in (
+                            "sputter_only",
                             "strength_pct",
                             "peak_angle_deg",
                             "angle_sigma_deg",
@@ -2297,6 +2367,7 @@ class MainWindow(QMainWindow):
         if sputter_wd and (not explicit_sputter):
             controls = sputter_wd.get("controls", {})
             pdefs = sputter_wd.get("param_defs", {})
+            sputter_only = bool(mb.get("sputter_only", False))
             strength_pct = float(mb.get("sputter_strength_pct", 0.0) or 0.0)
             peak_angle_deg = float(mb.get("sputter_peak_angle_deg", 55.0) or 55.0)
             angle_sigma_deg = float(mb.get("sputter_angle_sigma_deg", mb.get("sputter_peak_width_deg", 15.0)) or 15.0)
@@ -2313,6 +2384,12 @@ class MainWindow(QMainWindow):
             depth_decay_length_a = float(depth_decay_length_a or 0.0)
             vis_exponent = float(mb.get("sputter_sky_vis_exponent", mb.get("sputter_vis_exponent", 1.0)) or 1.0)
 
+            if "sputter_only" in controls:
+                self._set_switch_widget_value(
+                    controls["sputter_only"],
+                    pdefs.get("sputter_only", {}),
+                    sputter_only,
+                )
             if "strength_pct" in controls:
                 self._set_switch_widget_value(controls["strength_pct"], pdefs.get("strength_pct", {}), strength_pct)
             if "peak_angle_deg" in controls:
@@ -2335,9 +2412,8 @@ class MainWindow(QMainWindow):
                     pdefs.get("vis_exponent", {}),
                     vis_exponent,
                 )
-            sp_enable = bool(mb.get("sputter_enabled", False)) or strength_pct > 0.0
+            sp_enable = bool(mb.get("sputter_enabled", False)) or sputter_only or strength_pct > 0.0
             sputter_wd["enabled"].setChecked(sp_enable)
-            sputter_wd["form_host"].setEnabled(sp_enable)
             self._switch_state = self._collect_switch_state()
 
         explicit_redepo = False
@@ -3023,6 +3099,8 @@ class MainWindow(QMainWindow):
             option = str(value)
             text = self._tr(f"switch.enum.{option}")
             return option if text == f"switch.enum.{option}" else text
+        if ptype == "bool":
+            return self._tr("common.on") if bool(value) else self._tr("common.off")
         if ptype == "float":
             try:
                 decimals = int(pdef.get("decimals", 3))
@@ -3073,7 +3151,12 @@ class MainWindow(QMainWindow):
         out["attenuation"] = att
 
         sp = out.get("sputter", {"enabled": False, "params": {}})
-        sp["enabled"] = bool(model.get("sputter_enabled", False)) or float(model.get("sputter_strength_pct", 0.0)) > 0.0
+        sp["enabled"] = (
+            bool(model.get("sputter_enabled", False))
+            or bool(model.get("sputter_only", False))
+            or float(model.get("sputter_strength_pct", 0.0)) > 0.0
+        )
+        sp["params"]["sputter_only"] = bool(model.get("sputter_only", False))
         sp["params"]["strength_pct"] = float(model.get("sputter_strength_pct", 0.0))
         sp["params"]["peak_angle_deg"] = float(model.get("sputter_peak_angle_deg", 55.0))
         sp["params"]["angle_sigma_deg"] = float(model.get("sputter_angle_sigma_deg", 15.0))
@@ -3456,15 +3539,22 @@ class MainWindow(QMainWindow):
         self.spin_show_every.setValue(recommended)
         self.spin_show_every.blockSignals(False)
 
-    def _result_should_use_dynamic_substrate_fill(self, stage_ids: List[int]) -> bool:
+    def _result_solid_fill_flags(self, stage_ids: List[int]) -> List[bool]:
+        if not stage_ids:
+            return []
         recipe = self._result_recipe if isinstance(self._result_recipe, dict) else {}
         if not recipe:
-            return False
+            return [False for _ in stage_ids]
         switch_state = self._recipe_switch_state_for_results(recipe)
         conformal_enabled = bool(switch_state.get("conformal", {}).get("enabled", True))
-        if conformal_enabled:
-            return False
-        return all(max(1, int(sid)) == 1 for sid in (stage_ids or [1]))
+        sputter_state = switch_state.get("sputter", {})
+        sputter_params = sputter_state.get("params") if isinstance(sputter_state, dict) else {}
+        sputter_only = bool(sputter_params.get("sputter_only", False)) if isinstance(sputter_params, dict) else False
+        if conformal_enabled and not sputter_only:
+            return [False for _ in stage_ids]
+        stage_cfg = recipe.get("run_stage") if isinstance(recipe.get("run_stage"), dict) else {}
+        latest_stage = max(1, int(stage_cfg.get("index", self._result_stage_info.get("index", 1)) or 1))
+        return [max(1, int(sid)) == latest_stage for sid in stage_ids]
 
     def _rebuild_result_display(self, *, fit: bool) -> None:
         if not self._result_frames:
@@ -3500,7 +3590,7 @@ class MainWindow(QMainWindow):
         display_voids = [effective_voids[i] if i < len(effective_voids) else [] for i in next_indices]
         display_steps = [self._result_steps[i] if i < len(self._result_steps) else i for i in next_indices]
         display_stage_ids = [self._result_stage_ids[i] if i < len(self._result_stage_ids) else 1 for i in next_indices]
-        dynamic_substrate_fill = self._result_should_use_dynamic_substrate_fill(display_stage_ids)
+        solid_fill_flags = self._result_solid_fill_flags(display_stage_ids)
 
         self._result_display_indices = next_indices
         self._result_display_steps = display_steps
@@ -3511,7 +3601,8 @@ class MainWindow(QMainWindow):
             voids=display_voids,
             stage_ids=display_stage_ids,
             void_mode="legacy_cumulative",
-            dynamic_substrate_fill=dynamic_substrate_fill,
+            dynamic_substrate_fill=any(solid_fill_flags),
+            solid_fill_flags=solid_fill_flags,
         )
         self._update_stage_visibility_controls()
 

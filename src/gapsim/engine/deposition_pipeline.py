@@ -999,6 +999,7 @@ class SputterRedepositionFluxModel(FluxModel):
         base_model: FluxModel,
         *,
         etch_reference_model: FluxModel | None = None,
+        sputter_only_mode: bool = False,
         sputter_enabled: bool = False,
         sputter_strength_pct: float = 0.0,
         sputter_peak_angle_deg: float = 55.0,
@@ -1012,6 +1013,7 @@ class SputterRedepositionFluxModel(FluxModel):
     ) -> None:
         self.base_model = base_model
         self.etch_reference_model = etch_reference_model
+        self.sputter_only_mode = bool(sputter_only_mode)
         self.sputter_enabled = bool(sputter_enabled)
         self.sputter_strength_pct = max(0.0, min(10000.0, float(sputter_strength_pct)))
         self.sputter_peak_angle_deg = max(1.0, min(89.0, float(sputter_peak_angle_deg)))
@@ -1346,8 +1348,9 @@ class SputterRedepositionFluxModel(FluxModel):
                 # Calibrate sputter strength against the current local deposition scale:
                 # Additional gain keeps user-facing sputter strength responsive enough
                 # for the current point-normal propagation model.
+                sputter_gain = 1.0 if self.sputter_only_mode else _SPUTTER_STRENGTH_GAIN
                 raw_etch = (
-                    (_SPUTTER_STRENGTH_GAIN * strength)
+                    (sputter_gain * strength)
                     * float(etch_reference_flux[i])
                     * float(ion_depth_factors[i])
                     * sputter_vis_factor[i]
@@ -1363,6 +1366,7 @@ class SputterRedepositionFluxModel(FluxModel):
 
         net_flux = [float(deposition_flux[i]) - float(etch_flux[i]) + float(redepo_flux[i]) for i in range(n)]
         state.meta["sputter_enabled"] = self.sputter_enabled
+        state.meta["sputter_only_mode"] = self.sputter_only_mode
         state.meta["sputter_strength_pct"] = self.sputter_strength_pct
         state.meta["sputter_peak_angle_deg"] = self.sputter_peak_angle_deg
         state.meta["sputter_angle_sigma_deg"] = self.sputter_angle_sigma_deg
@@ -1871,6 +1875,7 @@ class TopologyCleanup:
         state: SimulationState,
         *,
         solid_ref_paths_i: Optional[Sequence[Sequence[IntPoint]]] = None,
+        solid_merge_mode: str = "union",
     ) -> Tuple[List[Point], List[IntPath]]:
         fallback = normalize_surface_order(proposed)
 
@@ -1880,8 +1885,12 @@ class TopologyCleanup:
             y_bot_i=state.y_bot_i,
             roi_path_i=state.roi_path_i,
         )
-        solid_candidate = _clip_union(state.solid_paths_i, candidate_from_surface)
-        solid_candidate = _clip_to_roi_if_needed(solid_candidate, state)
+        merge_mode = str(solid_merge_mode or "union").lower()
+        if merge_mode == "candidate":
+            solid_candidate = _clip_to_roi_if_needed(candidate_from_surface, state)
+        else:
+            solid_candidate = _clip_union(state.solid_paths_i, candidate_from_surface)
+            solid_candidate = _clip_to_roi_if_needed(solid_candidate, state)
         if not solid_candidate:
             solid_candidate = list(state.solid_paths_i)
 
@@ -2004,6 +2013,8 @@ def deposit_step(
             )
 
         proposed = propagator.advance(pts, flux, dr_sub)
+        has_negative_flux = any(float(v) < -_EPS for v in flux)
+        state.meta["solid_merge_mode"] = "candidate" if has_negative_flux else "union"
 
         mean_flux = 1.0
         if flux:
@@ -2014,7 +2025,12 @@ def deposit_step(
         if cancel_check is not None and cancel_check():
             raise SimulationCanceled()
         t_cleanup0 = time.perf_counter()
-        clean_surface, clean_solid = cleanup.cleanup(proposed, state, solid_ref_paths_i=solid_ref)
+        clean_surface, clean_solid = cleanup.cleanup(
+            proposed,
+            state,
+            solid_ref_paths_i=solid_ref,
+            solid_merge_mode=("candidate" if has_negative_flux else "union"),
+        )
         cleanup_time_s = time.perf_counter() - t_cleanup0
         t_resample0 = time.perf_counter()
         state.surface.points = equal_arc_resample(clean_surface, reparam_ds)

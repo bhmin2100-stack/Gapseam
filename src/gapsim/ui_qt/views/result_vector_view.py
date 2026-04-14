@@ -121,12 +121,14 @@ class ResultVectorView(QGraphicsView):
         self._stage_layer_totals: Dict[int, int] = {}
         self._show_initial_points = True
         self._dynamic_substrate_fill = False
+        self._solid_fill_flags: List[bool] = []
         self._layer_items: List[Optional[QGraphicsPathItem]] = []
         self._void_items_by_frame: List[List[QGraphicsPathItem]] = []
         self._initial_point_items: List[QGraphicsEllipseItem] = []
         self._substrate_item: Optional[QGraphicsPathItem] = None
         self._boundary_item: Optional[QGraphicsPathItem] = None
         self._last_draw_idx = -1
+        self._last_solid_fill_mode = False
 
         self._panning = False
         self._pan_start: Optional[QPointF] = None
@@ -202,12 +204,14 @@ class ResultVectorView(QGraphicsView):
         self._color_total_layers = 1
         self._stage_layer_totals = {}
         self._dynamic_substrate_fill = False
+        self._solid_fill_flags = []
         self._layer_items = []
         self._void_items_by_frame = []
         self._initial_point_items = []
         self._substrate_item = None
         self._boundary_item = None
         self._last_draw_idx = -1
+        self._last_solid_fill_mode = False
         self._scene.clear()
         self._scene.setSceneRect(-1000, -1000, 2000, 2000)
         self.resetTransform()
@@ -222,6 +226,7 @@ class ResultVectorView(QGraphicsView):
         if self._dynamic_substrate_fill == enabled:
             return
         self._dynamic_substrate_fill = enabled
+        self._solid_fill_flags = [enabled for _ in self._frame_profiles_raw]
         if self._frame_profiles_raw:
             cur_idx = self._visible_index(self._current_index if self._current_index >= 0 else len(self._frame_profiles_raw) - 1)
             self._build_scene_items()
@@ -236,6 +241,11 @@ class ResultVectorView(QGraphicsView):
             return 0
         return max(0, min(int(idx), len(self._frame_profiles_raw) - 1))
 
+    def _solid_fill_for_frame(self, idx: int) -> bool:
+        if 0 <= idx < len(self._solid_fill_flags):
+            return bool(self._solid_fill_flags[idx])
+        return bool(self._dynamic_substrate_fill)
+
     def set_frames(
         self,
         frames: Sequence[Sequence[Point]],
@@ -245,6 +255,7 @@ class ResultVectorView(QGraphicsView):
         stage_ids: Optional[Sequence[int]] = None,
         void_mode: str = "legacy_cumulative",
         dynamic_substrate_fill: bool = False,
+        solid_fill_flags: Optional[Sequence[bool]] = None,
     ) -> None:
         self._frame_profiles_raw = []
         for f in frames:
@@ -274,6 +285,16 @@ class ResultVectorView(QGraphicsView):
         self._void_cache.clear()
         self._void_mode = "current" if str(void_mode).lower() == "current" else "legacy_cumulative"
         self._dynamic_substrate_fill = bool(dynamic_substrate_fill)
+        self._solid_fill_flags = []
+        if solid_fill_flags is not None:
+            for flag in solid_fill_flags[: len(self._frame_profiles_raw)]:
+                self._solid_fill_flags.append(bool(flag))
+        if len(self._solid_fill_flags) != len(self._frame_profiles_raw):
+            default_flag = bool(dynamic_substrate_fill)
+            self._solid_fill_flags = [
+                self._solid_fill_flags[i] if i < len(self._solid_fill_flags) else default_flag
+                for i in range(len(self._frame_profiles_raw))
+            ]
         self._color_total_layers = max(1, len(self._frame_profiles_raw) - 1)
         stage_counts: Dict[int, int] = {}
         for i in range(1, len(self._frame_stage_ids)):
@@ -308,6 +329,7 @@ class ResultVectorView(QGraphicsView):
         self._substrate_item = None
         self._boundary_item = None
         self._last_draw_idx = -1
+        self._last_solid_fill_mode = False
 
         if not self._frame_profiles_raw:
             return
@@ -450,15 +472,24 @@ class ResultVectorView(QGraphicsView):
                 return False
 
         prev_draw = self._last_draw_idx
-        if prev_draw < 0:
-            for li in range(1, draw_idx + 1):
-                self._set_layer_visible(li, True)
-        elif draw_idx > prev_draw:
-            for li in range(prev_draw + 1, draw_idx + 1):
-                self._set_layer_visible(li, True)
-        elif draw_idx < prev_draw:
-            for li in range(draw_idx + 1, prev_draw + 1):
-                self._set_layer_visible(li, False)
+        solid_fill = self._solid_fill_for_frame(draw_idx)
+        if solid_fill:
+            if not self._last_solid_fill_mode:
+                for li in range(1, len(self._layer_items) + 1):
+                    self._set_layer_visible(li, False)
+        else:
+            if self._last_solid_fill_mode:
+                for li in range(1, len(self._layer_items) + 1):
+                    self._set_layer_visible(li, li <= draw_idx)
+            elif prev_draw < 0:
+                for li in range(1, draw_idx + 1):
+                    self._set_layer_visible(li, True)
+            elif draw_idx > prev_draw:
+                for li in range(prev_draw + 1, draw_idx + 1):
+                    self._set_layer_visible(li, True)
+            elif draw_idx < prev_draw:
+                for li in range(draw_idx + 1, prev_draw + 1):
+                    self._set_layer_visible(li, False)
 
         if self._void_mode == "current":
             if prev_draw < 0:
@@ -480,9 +511,11 @@ class ResultVectorView(QGraphicsView):
         for p in curr[1:]:
             line_path.lineTo(p)
         self._boundary_item.setPath(line_path)
-        if self._dynamic_substrate_fill and self._substrate_item is not None:
-            self._substrate_item.setPath(self._profile_fill_path(curr, self._floor_y))
+        if self._substrate_item is not None:
+            fill_profile = curr if solid_fill else self._cache_get_profile_scene(0)
+            self._substrate_item.setPath(self._profile_fill_path(fill_profile, self._floor_y))
         self._last_draw_idx = draw_idx
+        self._last_solid_fill_mode = solid_fill
 
         if fit:
             self.fit_content()
