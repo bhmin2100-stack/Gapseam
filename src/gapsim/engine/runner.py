@@ -10,7 +10,6 @@ from gapsim.engine.deposition_pipeline import (
     FluxModel,
     InhibitionFluxModel,
     OffsetBoolean,
-    OverhangFluxModel,
     SimulationCanceled,
     SputterRedepositionFluxModel,
     SealingFluxModel,
@@ -108,19 +107,6 @@ class EngineRunner:
                 # Legacy fallback: map L(A) to an equivalent percent at 100A reference.
                 raw_dist_decay_pct = (1.0 - math.exp(-100.0 / max(raw_len, 1e-9))) * 100.0
         source_distance_decay_pct = max(0.0, min(100.0, float(raw_dist_decay_pct)))
-        overhang_enabled = bool(model_cfg.get("overhang_enabled", False))
-        overhang_directional_pct = max(0.0, min(100.0, float(model_cfg.get("overhang_directional_pct", 0.0))))
-        raw_overhang_angle_pct = model_cfg.get("overhang_angle_pct")
-        if raw_overhang_angle_pct is None:
-            raw_overhang_angle_power = model_cfg.get("overhang_angle_power", 3)
-            try:
-                raw_overhang_angle_pct = (max(1.0, min(10.0, float(raw_overhang_angle_power))) - 1.0) / 9.0 * 100.0
-            except Exception:
-                raw_overhang_angle_pct = 22.222
-        overhang_angle_pct = max(0.0, min(100.0, float(raw_overhang_angle_pct)))
-        overhang_shadow_pct = max(0.0, min(100.0, float(model_cfg.get("overhang_shadow_pct", 100.0))))
-        overhang_ray_count = str(model_cfg.get("overhang_ray_count", "1") or "1")
-        overhang_ray_spread_deg = max(0.0, min(30.0, float(model_cfg.get("overhang_ray_spread_deg", 0.0))))
         sputter_enabled = bool(model_cfg.get("sputter_enabled", False))
         sputter_strength_pct = max(0.0, min(10000.0, float(model_cfg.get("sputter_strength_pct", 0.0))))
         sputter_peak_angle_deg = max(30.0, min(80.0, float(model_cfg.get("sputter_peak_angle_deg", 55.0))))
@@ -236,15 +222,6 @@ class EngineRunner:
         else:
             flux_model = ZeroFluxModel()
             etch_reference_model = ConformalFluxModel()
-        if overhang_enabled and overhang_directional_pct > 0.0:
-            flux_model = OverhangFluxModel(
-                flux_model,
-                directional_pct=overhang_directional_pct,
-                angle_pct=overhang_angle_pct,
-                shadow_pct=overhang_shadow_pct,
-                ray_count=overhang_ray_count,
-                ray_spread_deg=overhang_ray_spread_deg,
-            )
         if inhibition_enabled and inhibition_i_max > 0.0:
             flux_model = InhibitionFluxModel(
                 flux_model,
