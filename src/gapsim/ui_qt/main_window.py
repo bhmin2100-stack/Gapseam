@@ -1925,15 +1925,6 @@ class MainWindow(QMainWindow):
         source_decay_pct = float(att_params.get("source_decay_pct", 0.0))
         source_distance_decay_pct = float(att_params.get("source_distance_decay_pct", 0.0))
 
-        overhang = self._switch_state.get("overhang", {"enabled": False, "params": {}})
-        oh_enabled = bool(overhang.get("enabled", False))
-        oh_params = overhang.get("params") or {}
-        overhang_directional_pct = float(oh_params.get("directional_pct", 50.0))
-        overhang_angle_pct = float(oh_params.get("angle_pct", oh_params.get("angle_power", 22.222)))
-        overhang_shadow_pct = float(oh_params.get("shadow_pct", 100.0))
-        overhang_ray_count = str(oh_params.get("ray_count", "1"))
-        overhang_ray_spread_deg = float(oh_params.get("ray_spread_deg", 0.0))
-
         sputter = self._switch_state.get("sputter", {"enabled": False, "params": {}})
         sp_enabled = bool(sputter.get("enabled", False))
         sp_params = sputter.get("params") or {}
@@ -1959,11 +1950,6 @@ class MainWindow(QMainWindow):
             source_onset_width_a = 0.0
             source_decay_pct = 0.0
             source_distance_decay_pct = 0.0
-        if not oh_enabled:
-            overhang_directional_pct = 0.0
-            overhang_shadow_pct = 0.0
-            overhang_ray_count = "1"
-            overhang_ray_spread_deg = 0.0
         if not sp_enabled:
             sputter_strength_pct = 0.0
         if not inhib_enabled:
@@ -2000,12 +1986,6 @@ class MainWindow(QMainWindow):
                 "source_onset_width_a": source_onset_width_a,
                 "source_decay_pct": source_decay_pct,
                 "source_distance_decay_pct": source_distance_decay_pct,
-                "overhang_enabled": oh_enabled,
-                "overhang_directional_pct": overhang_directional_pct,
-                "overhang_angle_pct": overhang_angle_pct,
-                "overhang_shadow_pct": overhang_shadow_pct,
-                "overhang_ray_count": overhang_ray_count,
-                "overhang_ray_spread_deg": overhang_ray_spread_deg,
                 "sputter_enabled": sp_enabled,
                 "sputter_strength_pct": sputter_strength_pct,
                 "sputter_peak_angle_deg": sputter_peak_angle_deg,
@@ -2292,78 +2272,6 @@ class MainWindow(QMainWindow):
             att_enable = (onset > 0.0 and decay > 0.0) or (dist_pct > 0.0)
             attenuation_wd["enabled"].setChecked(att_enable)
             attenuation_wd["form_host"].setEnabled(att_enable)
-            self._switch_state = self._collect_switch_state()
-
-        explicit_overhang = False
-        if isinstance(switches, dict):
-            oh_sw = switches.get("overhang")
-            if isinstance(oh_sw, dict):
-                if "enabled" in oh_sw:
-                    explicit_overhang = True
-                maybe_params = oh_sw.get("params")
-                if isinstance(maybe_params, dict):
-                    explicit_overhang = explicit_overhang or any(
-                        key in maybe_params
-                        for key in (
-                            "directional_pct",
-                            "angle_pct",
-                            "angle_power",
-                            "shadow_pct",
-                            "ray_count",
-                            "ray_spread_deg",
-                        )
-                    )
-
-        overhang_wd = self._switch_widgets.get("overhang")
-        if overhang_wd and (not explicit_overhang):
-            controls = overhang_wd.get("controls", {})
-            pdefs = overhang_wd.get("param_defs", {})
-            directional_pct = float(mb.get("overhang_directional_pct", 0.0) or 0.0)
-            angle_pct = mb.get("overhang_angle_pct")
-            if angle_pct is None:
-                raw_angle_power = mb.get("overhang_angle_power", 3)
-                try:
-                    angle_pct = (max(1.0, min(10.0, float(raw_angle_power))) - 1.0) / 9.0 * 100.0
-                except Exception:
-                    angle_pct = 22.222
-            angle_pct = float(angle_pct or 0.0)
-            shadow_pct = float(mb.get("overhang_shadow_pct", 0.0) or 0.0)
-            ray_count = str(mb.get("overhang_ray_count", "1") or "1")
-            ray_spread_deg = float(mb.get("overhang_ray_spread_deg", 0.0) or 0.0)
-
-            if "directional_pct" in controls:
-                self._set_switch_widget_value(
-                    controls["directional_pct"],
-                    pdefs.get("directional_pct", {}),
-                    directional_pct,
-                )
-            if "angle_pct" in controls:
-                self._set_switch_widget_value(
-                    controls["angle_pct"],
-                    pdefs.get("angle_pct", {}),
-                    angle_pct,
-                )
-            if "shadow_pct" in controls:
-                self._set_switch_widget_value(
-                    controls["shadow_pct"],
-                    pdefs.get("shadow_pct", {}),
-                    shadow_pct,
-                )
-            if "ray_count" in controls:
-                self._set_switch_widget_value(
-                    controls["ray_count"],
-                    pdefs.get("ray_count", {}),
-                    ray_count,
-                )
-            if "ray_spread_deg" in controls:
-                self._set_switch_widget_value(
-                    controls["ray_spread_deg"],
-                    pdefs.get("ray_spread_deg", {}),
-                    ray_spread_deg,
-                )
-            oh_enable = bool(mb.get("overhang_enabled", False)) or directional_pct > 0.0
-            overhang_wd["enabled"].setChecked(oh_enable)
-            overhang_wd["form_host"].setEnabled(oh_enable)
             self._switch_state = self._collect_switch_state()
 
         explicit_sputter = False
@@ -3164,15 +3072,6 @@ class MainWindow(QMainWindow):
         att["enabled"] = any(float(att["params"].get(key, 0.0)) > 0.0 for key in att["params"])
         out["attenuation"] = att
 
-        oh = out.get("overhang", {"enabled": False, "params": {}})
-        oh["enabled"] = bool(model.get("overhang_enabled", False))
-        oh["params"]["directional_pct"] = float(model.get("overhang_directional_pct", 50.0))
-        oh["params"]["angle_pct"] = float(model.get("overhang_angle_pct", 22.222))
-        oh["params"]["shadow_pct"] = float(model.get("overhang_shadow_pct", 100.0))
-        oh["params"]["ray_count"] = str(model.get("overhang_ray_count", "1"))
-        oh["params"]["ray_spread_deg"] = float(model.get("overhang_ray_spread_deg", 0.0))
-        out["overhang"] = oh
-
         sp = out.get("sputter", {"enabled": False, "params": {}})
         sp["enabled"] = bool(model.get("sputter_enabled", False)) or float(model.get("sputter_strength_pct", 0.0)) > 0.0
         sp["params"]["strength_pct"] = float(model.get("sputter_strength_pct", 0.0))
@@ -3920,5 +3819,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
 
