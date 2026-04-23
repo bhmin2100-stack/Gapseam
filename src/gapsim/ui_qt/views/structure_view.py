@@ -111,6 +111,8 @@ class StructureView(QGraphicsView):
         self._overlay_scale_a_per_px = 1.0
         self._overlay_opacity = 0.35
         self._overlay_origin = (0.0, 0.0)
+        self._current_color = QColor(Qt.GlobalColor.blue)
+        self._reference_color = QColor(125, 125, 125, 220)
         self._overlay_drag_enabled = False
         self._overlay_dragging = False
         self._overlay_drag_last_scene: Optional[QPointF] = None
@@ -169,6 +171,22 @@ class StructureView(QGraphicsView):
                 continue
         self._reference_profiles = converted
         self._rebuild_items()
+
+    def set_profile_colors(
+        self,
+        *,
+        current: Optional[QColor] = None,
+        reference: Optional[QColor] = None,
+    ) -> None:
+        changed = False
+        if current is not None:
+            self._current_color = QColor(current)
+            changed = True
+        if reference is not None:
+            self._reference_color = QColor(reference)
+            changed = True
+        if changed:
+            self._rebuild_items()
 
     def fit_points(self, padding: float = 50.0, center_x_on_origin: bool = True) -> None:
         all_profiles: List[List[Tuple[float, float]]] = []
@@ -302,7 +320,7 @@ class StructureView(QGraphicsView):
         self._recreate_drag_label()
         self._add_overlay_item()
         self._reference_items = []
-        ref_pen = QPen(QColor(125, 125, 125, 220), 1.4)
+        ref_pen = QPen(QColor(self._reference_color), 1.4)
         ref_pen.setCosmetic(True)
         for prof in self._reference_profiles:
             if len(prof) < 2:
@@ -324,7 +342,7 @@ class StructureView(QGraphicsView):
                 path.lineTo(x, y)
 
         self._path_item = QGraphicsPathItem(path)
-        path_pen = QPen(Qt.GlobalColor.blue, 1.6)
+        path_pen = QPen(QColor(self._current_color), 1.6)
         path_pen.setCosmetic(True)
         self._path_item.setPen(path_pen)
         self._scene.addItem(self._path_item)
@@ -341,8 +359,8 @@ class StructureView(QGraphicsView):
                 self._on_item_drag_start_raw,
                 self._on_item_drag_finish_raw,
             )
-            it.setBrush(QBrush(Qt.GlobalColor.blue))
-            it.setPen(QPen(Qt.GlobalColor.blue))
+            it.setBrush(QBrush(QColor(self._current_color)))
+            it.setPen(QPen(QColor(self._current_color)))
             self._scene.addItem(it)
             self._point_items.append(it)
 

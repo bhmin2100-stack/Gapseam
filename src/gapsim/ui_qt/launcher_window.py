@@ -141,4 +141,5 @@ class LauncherWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, self._tr("dialog.open_error.title"), str(exc))
             return
-        self._open_in_mdi(stage="structure", data=data, source_path=p, run_dir=None, lang=self.lang)
+        stage = MainWindow.project_open_stage_from_data(data, source_path=p)
+        self._open_in_mdi(stage=stage, data=data, source_path=p, run_dir=None, lang=self.lang)

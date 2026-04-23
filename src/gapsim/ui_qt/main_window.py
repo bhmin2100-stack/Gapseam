@@ -1,7 +1,9 @@
 ﻿from __future__ import annotations
 
+import copy
 import math
 import json
+import os
 import re
 import sys
 import tempfile
@@ -19,6 +21,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
+    QDialogButtonBox,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
@@ -42,11 +45,18 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from gapsim.prediction import auto_anchor_spec, sanitize_anchor_spec
 from gapsim.ui_qt.calibrate_dialog import CalibrateDialog
 from gapsim.ui_qt.controllers.smoothing_ctrl import SmoothingController
 from gapsim.ui_qt.engine_worker import EngineWorker
 from gapsim.ui_qt.models.points_table import Point, PointsTableModel
 from gapsim.ui_qt.models.points_table_view import PointsTableView
+from gapsim.ui_qt.prediction_dialogs import (
+    PredictionAnchorDialog,
+    PredictionPostEditorDialog,
+    PredictionPostSmoothingDialog,
+)
+from gapsim.ui_qt.prediction_worker import ParameterPredictionWorker
 from gapsim.ui_qt.models.structure_document import (
     DeletePointCommand,
     InsertPointCommand,
@@ -81,6 +91,118 @@ REPARAM_PRESET_LIMITS_A: Dict[str, Tuple[float, float]] = {
 }
 
 
+def load_result_payload_from_run_dir(run_dir: Path) -> Dict[str, Any]:
+    run_dir = Path(run_dir)
+    profiles_path = run_dir / "profiles.json"
+    recipe_path = run_dir / "recipe.json"
+    meta_path = run_dir / "meta.json"
+
+    frames: List[List[Point]] = []
+    voids: List[List[List[Point]]] = []
+    steps: List[int] = []
+    stage_ids: List[int] = []
+    x_window: Optional[Tuple[float, float]] = None
+    stage_info: Dict[str, Any] = {"index": 1}
+    void_mode = "legacy_cumulative"
+    recipe: Dict[str, Any] = {}
+    meta: Dict[str, Any] = {}
+
+    if profiles_path.exists():
+        data = json.loads(profiles_path.read_text(encoding="utf-8"))
+        raw_frames = data.get("frame_profiles") or []
+        raw_voids = data.get("frame_voids") or []
+        raw_steps = data.get("frame_steps") or []
+        raw_stage_ids = data.get("frame_stage_ids") or []
+        raw_window = data.get("x_window")
+        raw_stage = data.get("stage")
+        raw_void_mode = data.get("frame_voids_mode")
+        if isinstance(raw_stage, dict):
+            stage_info = dict(raw_stage)
+        if isinstance(raw_void_mode, str) and raw_void_mode.lower() == "current":
+            void_mode = "current"
+
+        for frm in raw_frames:
+            if not isinstance(frm, list) or len(frm) < 2:
+                continue
+            pts: List[Point] = []
+            ok = True
+            for p in frm:
+                if not isinstance(p, (list, tuple)) or len(p) != 2:
+                    ok = False
+                    break
+                pts.append((float(p[0]), float(p[1])))
+            if ok:
+                frames.append(pts)
+
+        if isinstance(raw_voids, list):
+            for vf in raw_voids[: len(frames)]:
+                frame_voids: List[List[Point]] = []
+                if isinstance(vf, list):
+                    for poly in vf:
+                        if not isinstance(poly, list) or len(poly) < 3:
+                            continue
+                        vpts: List[Point] = []
+                        ok_poly = True
+                        for p in poly:
+                            if not isinstance(p, (list, tuple)) or len(p) != 2:
+                                ok_poly = False
+                                break
+                            vpts.append((float(p[0]), float(p[1])))
+                        if ok_poly:
+                            frame_voids.append(vpts)
+                voids.append(frame_voids)
+
+        if isinstance(raw_steps, list):
+            for s in raw_steps[: len(frames)]:
+                steps.append(int(s))
+
+        if isinstance(raw_stage_ids, list):
+            for sid in raw_stage_ids[: len(frames)]:
+                stage_ids.append(max(1, int(sid)))
+
+        if isinstance(raw_window, (list, tuple)) and len(raw_window) == 2:
+            x_window = (float(raw_window[0]), float(raw_window[1]))
+
+    stage_idx = 1
+    try:
+        stage_idx = max(1, int(stage_info.get("index", 1)))
+    except Exception:
+        stage_idx = 1
+    if len(voids) != len(frames):
+        voids = [[] for _ in frames]
+    if len(steps) != len(frames):
+        steps = list(range(len(frames)))
+    if len(stage_ids) != len(frames):
+        stage_ids = [stage_idx for _ in frames]
+
+    if recipe_path.exists():
+        try:
+            loaded_recipe = json.loads(recipe_path.read_text(encoding="utf-8"))
+            if isinstance(loaded_recipe, dict):
+                recipe = loaded_recipe
+        except Exception:
+            recipe = {}
+    if meta_path.exists():
+        try:
+            loaded_meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            if isinstance(loaded_meta, dict):
+                meta = loaded_meta
+        except Exception:
+            meta = {}
+
+    return {
+        "frames": frames,
+        "voids": voids,
+        "steps": steps,
+        "stage_ids": stage_ids,
+        "x_window": x_window,
+        "stage_info": stage_info,
+        "void_mode": void_mode,
+        "recipe": recipe,
+        "meta": meta,
+    }
+
+
 class _NoWheelEventFilter(QObject):
     def eventFilter(self, _obj: QObject, event: QEvent) -> bool:
         if event.type() == QEvent.Type.Wheel:
@@ -99,113 +221,11 @@ class ResultLoadWorker(QObject):
 
     @Slot()
     def run(self) -> None:
-        profiles_path = self.run_dir / "profiles.json"
-        recipe_path = self.run_dir / "recipe.json"
-        meta_path = self.run_dir / "meta.json"
-        frames: List[List[Point]] = []
-        voids: List[List[List[Point]]] = []
-        steps: List[int] = []
-        stage_ids: List[int] = []
-        x_window: Optional[Tuple[float, float]] = None
-        stage_info: Dict[str, Any] = {"index": 1}
-        void_mode = "legacy_cumulative"
-        recipe: Dict[str, Any] = {}
-        meta: Dict[str, Any] = {}
-
-        if profiles_path.exists():
-            try:
-                data = json.loads(profiles_path.read_text(encoding="utf-8"))
-                raw_frames = data.get("frame_profiles") or []
-                raw_voids = data.get("frame_voids") or []
-                raw_steps = data.get("frame_steps") or []
-                raw_stage_ids = data.get("frame_stage_ids") or []
-                raw_window = data.get("x_window")
-                raw_stage = data.get("stage")
-                raw_void_mode = data.get("frame_voids_mode")
-                if isinstance(raw_stage, dict):
-                    stage_info = dict(raw_stage)
-                if isinstance(raw_void_mode, str) and raw_void_mode.lower() == "current":
-                    void_mode = "current"
-
-                for frm in raw_frames:
-                    if not isinstance(frm, list) or len(frm) < 2:
-                        continue
-                    pts: List[Point] = []
-                    ok = True
-                    for p in frm:
-                        if not isinstance(p, (list, tuple)) or len(p) != 2:
-                            ok = False
-                            break
-                        pts.append((float(p[0]), float(p[1])))
-                    if ok:
-                        frames.append(pts)
-
-                if isinstance(raw_voids, list):
-                    for vf in raw_voids[: len(frames)]:
-                        frame_voids: List[List[Point]] = []
-                        if isinstance(vf, list):
-                            for poly in vf:
-                                if not isinstance(poly, list) or len(poly) < 3:
-                                    continue
-                                vpts: List[Point] = []
-                                ok_poly = True
-                                for p in poly:
-                                    if not isinstance(p, (list, tuple)) or len(p) != 2:
-                                        ok_poly = False
-                                        break
-                                    vpts.append((float(p[0]), float(p[1])))
-                                if ok_poly:
-                                    frame_voids.append(vpts)
-                        voids.append(frame_voids)
-
-                if isinstance(raw_steps, list):
-                    for s in raw_steps[: len(frames)]:
-                        steps.append(int(s))
-
-                if isinstance(raw_stage_ids, list):
-                    for sid in raw_stage_ids[: len(frames)]:
-                        stage_ids.append(max(1, int(sid)))
-
-                if isinstance(raw_window, (list, tuple)) and len(raw_window) == 2:
-                    x_window = (float(raw_window[0]), float(raw_window[1]))
-            except Exception as exc:
-                self.error.emit(self.seq, str(exc))
-                return
-
-        stage_idx = 1
         try:
-            stage_idx = max(1, int(stage_info.get("index", 1)))
-        except Exception:
-            stage_idx = 1
-        if len(stage_ids) != len(frames):
-            stage_ids = [stage_idx for _ in frames]
-
-        if recipe_path.exists():
-            try:
-                loaded_recipe = json.loads(recipe_path.read_text(encoding="utf-8"))
-                if isinstance(loaded_recipe, dict):
-                    recipe = loaded_recipe
-            except Exception:
-                recipe = {}
-        if meta_path.exists():
-            try:
-                loaded_meta = json.loads(meta_path.read_text(encoding="utf-8"))
-                if isinstance(loaded_meta, dict):
-                    meta = loaded_meta
-            except Exception:
-                meta = {}
-
-        payload = {
-            "frames": frames,
-            "voids": voids if len(voids) == len(frames) else [[] for _ in frames],
-            "steps": steps if len(steps) == len(frames) else list(range(len(frames))),
-            "stage_ids": stage_ids,
-            "x_window": x_window,
-            "stage_info": stage_info,
-            "void_mode": void_mode,
-            "recipe": recipe,
-            "meta": meta,
-        }
+            payload = load_result_payload_from_run_dir(self.run_dir)
+        except Exception as exc:
+            self.error.emit(self.seq, str(exc))
+            return
         self.loaded.emit(self.seq, payload)
 
 
@@ -289,6 +309,12 @@ class MainWindow(QMainWindow):
         self._switch_state = default_switch_state()
         self._switch_widgets: Dict[str, Dict[str, Any]] = {}
         self._no_wheel_filter = _NoWheelEventFilter(self)
+        self._prediction_post_points_raw: List[Point] = []
+        self._prediction_post_points_smooth: List[Point] = []
+        self._prediction_anchor_spec: Dict[str, Any] = {}
+        self._prediction_result: Dict[str, Any] = {}
+        self._prediction_thread: Optional[QThread] = None
+        self._prediction_worker: Optional[ParameterPredictionWorker] = None
 
         self._build_ui()
         self.document = StructureDocument(self.points_model)
@@ -305,10 +331,10 @@ class MainWindow(QMainWindow):
         self._goto("structure")
         self._apply_texts()
 
-        if self._workflow_initial_data is not None:
-            self._apply_loaded(self._workflow_initial_data)
         if self._workflow_source_path is not None:
             self._current_path = self._workflow_source_path
+        if self._workflow_initial_data is not None:
+            self._apply_loaded(self._workflow_initial_data)
         if self._workflow_initial_run_dir is not None:
             self._last_run_dir = self._workflow_initial_run_dir
             self._update_run_dir_label()
@@ -323,6 +349,58 @@ class MainWindow(QMainWindow):
 
     def _tf(self, key: str, **kwargs) -> str:
         return self._tr(key).format(**kwargs)
+
+    def _prediction_text(self, key: str, **kwargs) -> str:
+        ko = {
+            "button": "기존 결과 기반 PARAMETER 예측",
+            "busy_title": "파라미터 예측",
+            "busy_body": "파라미터 예측이 이미 실행 중입니다.",
+            "pre_invalid": "PRE 구조는 최소 2개 점이 필요합니다.",
+            "post_invalid": "POST 구조는 최소 2개 점이 필요합니다.",
+            "post_smooth_invalid": "POST smoothing 결과는 최소 2개 점이 필요합니다.",
+            "running": "기존 결과 기반 파라미터 예측을 준비 중입니다.",
+            "progress": "기존 결과 기반 파라미터 예측 중 ({step}/{total})",
+            "cancel_requested": "파라미터 예측 취소를 요청했습니다.",
+            "complete": "파라미터 예측 완료",
+            "complete_loss": "파라미터 예측 완료 (loss={loss:.4f})",
+            "canceled": "파라미터 예측이 취소되었습니다.",
+            "failed": "파라미터 예측 실패",
+            "confirm_title": "예측 파라미터 확인",
+            "confirm_body": "아래 예측 파라미터를 현재 Run 설정에 적용할까요?",
+            "confirm_apply": "적용",
+            "confirm_keep": "현재 값 유지",
+            "not_applied": "예측값은 계산되었지만 적용하지 않았습니다.",
+            "preview_header": "예측 loss={loss:.4f}, 후보 {count}개 평가",
+            "preview_none": "현재 값과 달라지는 파라미터가 없습니다.",
+            "preview_group": "[{group}]",
+            "preview_enabled": "enabled: {old} -> {new}",
+        }
+        en = {
+            "button": "Predict Parameters From Existing Result",
+            "busy_title": "Parameter Prediction",
+            "busy_body": "Parameter prediction is already running.",
+            "pre_invalid": "The PRE profile must contain at least 2 points.",
+            "post_invalid": "The POST profile must contain at least 2 points.",
+            "post_smooth_invalid": "The smoothed POST profile must contain at least 2 points.",
+            "running": "Preparing parameter prediction from the existing result.",
+            "progress": "Running parameter prediction ({step}/{total})",
+            "cancel_requested": "Parameter prediction cancel requested.",
+            "complete": "Parameter prediction complete",
+            "complete_loss": "Parameter prediction complete (loss={loss:.4f})",
+            "canceled": "Parameter prediction canceled.",
+            "failed": "Parameter prediction failed",
+            "confirm_title": "Review Predicted Parameters",
+            "confirm_body": "Apply the predicted parameters below to the current Run settings?",
+            "confirm_apply": "Apply",
+            "confirm_keep": "Keep Current",
+            "not_applied": "Prediction finished, but the values were not applied.",
+            "preview_header": "Prediction loss={loss:.4f}, evaluated {count} candidates",
+            "preview_none": "No parameters differ from the current settings.",
+            "preview_group": "[{group}]",
+            "preview_enabled": "enabled: {old} -> {new}",
+        }
+        table = ko if self.lang == "ko" else en
+        return table.get(key, key).format(**kwargs)
 
     # ---------------- UI build ----------------
     def _build_ui(self) -> None:
@@ -541,6 +619,13 @@ class MainWindow(QMainWindow):
         self.lbl_run_geometry_source = QLabel()
         run_meta_form.addRow(self.lbl_run_geometry_source)
         run_layout.addWidget(run_meta_widget)
+
+        prediction_row = QHBoxLayout()
+        self.btn_parameter_prediction = QPushButton()
+        self.btn_parameter_prediction.setMinimumWidth(240)
+        prediction_row.addWidget(self.btn_parameter_prediction)
+        prediction_row.addStretch(1)
+        run_layout.addLayout(prediction_row)
 
         self.lbl_cycles = QLabel()
         self.spin_cycles = QSpinBox()
@@ -1281,6 +1366,7 @@ class MainWindow(QMainWindow):
         self.btn_smoothing_next.clicked.connect(self._open_run_window)
 
         # run / result
+        self.btn_parameter_prediction.clicked.connect(self._open_parameter_prediction_flow)
         self.btn_run.clicked.connect(self._engine_run)
         self.btn_stop.clicked.connect(self._engine_stop)
         self.btn_open_dir.clicked.connect(self._open_run_dir)
@@ -1369,6 +1455,7 @@ class MainWindow(QMainWindow):
         self.lbl_run_title.setText(self._tr("run.title"))
         self.group_switches.setTitle(self._tr("run.switches"))
         self.group_run_advanced.setTitle(self._tr("run.advanced"))
+        self.btn_parameter_prediction.setText(self._prediction_text("button"))
         self.lbl_case.setText(self._tr("run.case_name"))
         self.lbl_run_preset.setText(self._tr("run.preset"))
         self.btn_save_run_preset.setText(self._tr("run.preset_save"))
@@ -1957,6 +2044,382 @@ class MainWindow(QMainWindow):
         pts, _source = self._active_profile_with_source()
         return pts
 
+    def _prediction_running(self) -> bool:
+        return self._prediction_thread is not None and self._prediction_thread.isRunning()
+
+    @staticmethod
+    def _prediction_points_payload(points: List[Point]) -> List[List[float]]:
+        return [[float(x), float(y)] for x, y in points]
+
+    @staticmethod
+    def _prediction_points_from_payload(payload: Any) -> List[Point]:
+        if not isinstance(payload, list):
+            return []
+        out: List[Point] = []
+        for item in payload:
+            if not isinstance(item, (list, tuple)) or len(item) != 2:
+                continue
+            try:
+                out.append((float(item[0]), float(item[1])))
+            except Exception:
+                continue
+        return out if len(out) >= 2 else []
+
+    def _build_parameter_prediction_payload(self) -> Optional[Dict[str, Any]]:
+        if not (
+            self._prediction_post_points_raw
+            or self._prediction_post_points_smooth
+            or self._prediction_anchor_spec
+            or self._prediction_result
+        ):
+            return None
+        payload: Dict[str, Any] = {
+            "post_points_raw": self._prediction_points_payload(self._prediction_post_points_raw),
+            "post_points_smooth": self._prediction_points_payload(self._prediction_post_points_smooth),
+            "anchor_spec": copy.deepcopy(self._prediction_anchor_spec),
+            "fit_result": copy.deepcopy(self._prediction_result),
+        }
+        return payload
+
+    def _apply_parameter_prediction_payload(self, payload: Any) -> None:
+        self._prediction_post_points_raw = []
+        self._prediction_post_points_smooth = []
+        self._prediction_anchor_spec = {}
+        self._prediction_result = {}
+        if not isinstance(payload, dict):
+            return
+
+        raw_points = self._prediction_points_from_payload(payload.get("post_points_raw"))
+        smooth_points = self._prediction_points_from_payload(payload.get("post_points_smooth"))
+        self._prediction_post_points_raw = raw_points
+        self._prediction_post_points_smooth = smooth_points
+
+        pre_points = self._active_profile_points()
+        anchor_post_points = smooth_points if len(smooth_points) >= 2 else raw_points
+        anchor_spec = payload.get("anchor_spec")
+        if len(pre_points) >= 2 and len(anchor_post_points) >= 2 and isinstance(anchor_spec, dict):
+            self._prediction_anchor_spec = sanitize_anchor_spec(pre_points, anchor_post_points, anchor_spec)
+        elif isinstance(anchor_spec, dict):
+            self._prediction_anchor_spec = copy.deepcopy(anchor_spec)
+
+        fit_result = payload.get("fit_result")
+        if isinstance(fit_result, dict):
+            self._prediction_result = copy.deepcopy(fit_result)
+
+    def _prediction_initial_post_points(self) -> List[Point]:
+        if len(self._prediction_post_points_raw) >= 2:
+            return [(float(x), float(y)) for x, y in self._prediction_post_points_raw]
+        structure_points = list(self.points_model.get_points())
+        if len(structure_points) >= 2:
+            return [(float(x), float(y)) for x, y in structure_points]
+        active_points = self._active_profile_points()
+        return [(float(x), float(y)) for x, y in active_points]
+
+    def _prediction_result_preview_text(self, result: Dict[str, Any]) -> str:
+        if not isinstance(result, dict):
+            return self._prediction_text("preview_none")
+
+        current_state = self._collect_switch_state()
+        predicted_state = result.get("predicted_switch_state")
+        if not isinstance(predicted_state, dict):
+            return self._prediction_text("preview_none")
+
+        lines: List[str] = []
+        if "loss" in result:
+            try:
+                lines.append(
+                    self._prediction_text(
+                        "preview_header",
+                        loss=float(result.get("loss", 0.0)),
+                        count=max(0, int(result.get("evaluated_candidates", 0))),
+                    )
+                )
+            except Exception:
+                pass
+
+        changed = False
+        for sid, wd in self._switch_widgets.items():
+            predicted_group = predicted_state.get(sid)
+            if not isinstance(predicted_group, dict):
+                continue
+            current_group = current_state.get(sid, {})
+            current_params = current_group.get("params") if isinstance(current_group, dict) else {}
+            predicted_params = predicted_group.get("params") if isinstance(predicted_group, dict) else {}
+            current_params = current_params if isinstance(current_params, dict) else {}
+            predicted_params = predicted_params if isinstance(predicted_params, dict) else {}
+
+            group_lines: List[str] = []
+            current_enabled = bool(current_group.get("enabled", False)) if isinstance(current_group, dict) else False
+            predicted_enabled = bool(predicted_group.get("enabled", False))
+            if current_enabled != predicted_enabled:
+                group_lines.append(
+                    self._prediction_text(
+                        "preview_enabled",
+                        old=self._tr("common.on") if current_enabled else self._tr("common.off"),
+                        new=self._tr("common.on") if predicted_enabled else self._tr("common.off"),
+                    )
+                )
+
+            param_defs = wd.get("param_defs", {})
+            if isinstance(param_defs, dict):
+                for pid, pdef in param_defs.items():
+                    if not isinstance(pdef, dict):
+                        continue
+                    old_value = current_params.get(pid, pdef.get("default"))
+                    new_value = predicted_params.get(pid, pdef.get("default"))
+                    old_text = self._format_result_param_value(pdef, old_value)
+                    new_text = self._format_result_param_value(pdef, new_value)
+                    if old_text == new_text:
+                        continue
+                    label = self._tr(str(pdef.get("label_key", pid)))
+                    group_lines.append(f"{label}: {old_text} -> {new_text}")
+
+            if not group_lines:
+                continue
+
+            changed = True
+            if lines:
+                lines.append("")
+            lines.append(self._prediction_text("preview_group", group=self._tr(str(wd.get("title_key", sid)))))
+            for line in group_lines:
+                lines.append(f"  {line}")
+
+        if not changed:
+            if lines:
+                lines.append("")
+            lines.append(self._prediction_text("preview_none"))
+        return "\n".join(lines)
+
+    def _confirm_prediction_result(self, result: Dict[str, Any]) -> bool:
+        dialog = QDialog(self)
+        dialog.setWindowTitle(self._prediction_text("confirm_title"))
+        dialog.setModal(True)
+        dialog.resize(560, 420)
+
+        layout = QVBoxLayout(dialog)
+        body = QLabel(self._prediction_text("confirm_body"))
+        body.setWordWrap(True)
+        layout.addWidget(body)
+
+        preview = QPlainTextEdit()
+        preview.setReadOnly(True)
+        preview.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+        preview.setPlainText(self._prediction_result_preview_text(result))
+        layout.addWidget(preview, 1)
+
+        buttons = QDialogButtonBox()
+        btn_apply = buttons.addButton(self._prediction_text("confirm_apply"), QDialogButtonBox.ButtonRole.AcceptRole)
+        buttons.addButton(self._prediction_text("confirm_keep"), QDialogButtonBox.ButtonRole.RejectRole)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        if btn_apply is not None:
+            btn_apply.setDefault(True)
+        layout.addWidget(buttons)
+        return dialog.exec() == QDialog.DialogCode.Accepted
+
+    def _apply_prediction_result(self, result: Dict[str, Any], *, announce: bool) -> None:
+        self._prediction_result = copy.deepcopy(result) if isinstance(result, dict) else {}
+        switch_state = self._prediction_result.get("predicted_switch_state")
+        if isinstance(switch_state, dict):
+            self._apply_switch_state(switch_state)
+            conformal = switch_state.get("conformal")
+            conformal_params = conformal.get("params") if isinstance(conformal, dict) else {}
+            if isinstance(conformal_params, dict):
+                if "base_rate" in conformal_params:
+                    self.spin_rate.setValue(float(conformal_params["base_rate"]))
+                if "n_steps" in conformal_params:
+                    self.spin_cycles.setValue(int(conformal_params["n_steps"]))
+                self._sync_switches_from_legacy_run_controls()
+                self._switch_state = self._collect_switch_state()
+        if not announce:
+            return
+        if "loss" in self._prediction_result:
+            text = self._prediction_text("complete_loss", loss=float(self._prediction_result.get("loss", 0.0)))
+        else:
+            text = self._prediction_text("complete")
+        self.lbl_status.setText(text)
+        self.lbl_status.setToolTip(text)
+        self.progress_run.setRange(0, 1)
+        self.progress_run.setValue(1)
+        self.progress_run.setFormat("")
+        self.statusBar().showMessage(self._prediction_text("complete"), 3000)
+
+    def _set_prediction_running_ui(self) -> None:
+        text = self._prediction_text("running")
+        self.btn_parameter_prediction.setEnabled(False)
+        self.btn_run.setEnabled(False)
+        self.btn_stop.setEnabled(True)
+        self.lbl_status.setText(text)
+        self.lbl_status.setToolTip(text)
+        self.progress_run.setRange(0, 0)
+        self.progress_run.setFormat("")
+
+    def _reset_prediction_running_ui(self) -> None:
+        self.btn_parameter_prediction.setEnabled(True)
+        self.btn_run.setEnabled(True)
+        self.btn_stop.setEnabled(False)
+        self.progress_run.setRange(0, 1000)
+        self.progress_run.setValue(0)
+        self.progress_run.setFormat("")
+
+    def _open_parameter_prediction_flow(self) -> None:
+        if self._prediction_running():
+            QMessageBox.warning(
+                self,
+                self._prediction_text("busy_title"),
+                self._prediction_text("busy_body"),
+            )
+            return
+        if self._engine_thread is not None and self._engine_thread.isRunning():
+            QMessageBox.warning(
+                self,
+                self._tr("dialog.engine_running.title"),
+                self._tr("dialog.engine_running.body"),
+            )
+            return
+
+        pre_points = self._active_profile_points()
+        if len(pre_points) < 2:
+            QMessageBox.warning(self, self._prediction_text("busy_title"), self._prediction_text("pre_invalid"))
+            return
+
+        initial_post_raw = self._prediction_initial_post_points()
+        editor = PredictionPostEditorDialog(
+            pre_points=pre_points,
+            initial_post_points=initial_post_raw,
+            lang=self.lang,
+            parent=self,
+        )
+        if editor.exec() != QDialog.DialogCode.Accepted:
+            return
+        post_points_raw = [(float(x), float(y)) for x, y in editor.post_points]
+        if len(post_points_raw) < 2:
+            QMessageBox.warning(self, self._prediction_text("busy_title"), self._prediction_text("post_invalid"))
+            return
+
+        initial_post_smooth = (
+            self._prediction_post_points_smooth if len(self._prediction_post_points_smooth) >= 2 else post_points_raw
+        )
+        smoothing_dialog = PredictionPostSmoothingDialog(
+            pre_points=pre_points,
+            post_points_raw=post_points_raw,
+            initial_post_points_smooth=initial_post_smooth,
+            segments=self.spin_segments.value(),
+            iterations=self.spin_iters.value(),
+            lang=self.lang,
+            parent=self,
+        )
+        if smoothing_dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        post_points_smooth = [(float(x), float(y)) for x, y in smoothing_dialog.post_points_smooth]
+        if len(post_points_smooth) < 2:
+            QMessageBox.warning(self, self._prediction_text("busy_title"), self._prediction_text("post_smooth_invalid"))
+            return
+
+        initial_anchor_spec = (
+            self._prediction_anchor_spec
+            if isinstance(self._prediction_anchor_spec, dict) and self._prediction_anchor_spec
+            else auto_anchor_spec(pre_points, post_points_smooth)
+        )
+        anchor_dialog = PredictionAnchorDialog(
+            pre_points=pre_points,
+            post_points=post_points_smooth,
+            initial_anchor_spec=initial_anchor_spec,
+            lang=self.lang,
+            parent=self,
+        )
+        if anchor_dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        self._prediction_post_points_raw = post_points_raw
+        self._prediction_post_points_smooth = post_points_smooth
+        self._prediction_anchor_spec = sanitize_anchor_spec(pre_points, post_points_smooth, anchor_dialog.anchor_spec)
+        self._start_parameter_prediction(pre_points)
+
+    def _start_parameter_prediction(self, pre_points: List[Point]) -> None:
+        if self._prediction_running():
+            return
+        base_switch_state = self._collect_switch_state()
+        base_recipe = self._build_recipe()
+
+        th = QThread()
+        worker = ParameterPredictionWorker(
+            pre_points=pre_points,
+            post_points=self._prediction_post_points_smooth,
+            anchor_spec=self._prediction_anchor_spec,
+            base_recipe=base_recipe,
+            base_switch_state=base_switch_state,
+        )
+        worker.moveToThread(th)
+        th.started.connect(worker.run)
+
+        worker.progress.connect(self._on_prediction_progress)
+        worker.message.connect(self._on_prediction_message)
+        worker.finished.connect(self._on_prediction_finished)
+        worker.error.connect(self._on_prediction_error)
+        worker.canceled.connect(self._on_prediction_canceled)
+
+        worker.finished.connect(th.quit)
+        worker.error.connect(th.quit)
+        worker.canceled.connect(th.quit)
+        th.finished.connect(worker.deleteLater)
+        th.finished.connect(th.deleteLater)
+        th.finished.connect(self._on_prediction_thread_finished)
+
+        self._prediction_thread = th
+        self._prediction_worker = worker
+        self._set_prediction_running_ui()
+        th.start()
+
+    def _on_prediction_progress(self, step: int, total: int) -> None:
+        text = self._prediction_text("progress", step=step, total=total)
+        self.lbl_status.setText(text)
+        self.lbl_status.setToolTip(text)
+        self.progress_run.setRange(0, max(1, int(total)))
+        self.progress_run.setValue(max(0, min(int(total), int(step))))
+        self.progress_run.setFormat(f"{int(step)}/{int(total)}")
+
+    def _on_prediction_message(self, msg: str) -> None:
+        self.statusBar().showMessage(str(msg), 2000)
+
+    def _on_prediction_finished(self, result_obj: object) -> None:
+        self._reset_prediction_running_ui()
+        result = copy.deepcopy(result_obj) if isinstance(result_obj, dict) else {}
+        if not isinstance(result.get("predicted_switch_state"), dict):
+            self._apply_prediction_result(result, announce=True)
+            return
+        if self._confirm_prediction_result(result):
+            result["applied"] = True
+            self._apply_prediction_result(result, announce=True)
+            return
+        result["applied"] = False
+        self._prediction_result = copy.deepcopy(result)
+        text = self._prediction_text("not_applied")
+        self.lbl_status.setText(text)
+        self.lbl_status.setToolTip(text)
+        self.progress_run.setRange(0, 1)
+        self.progress_run.setValue(1)
+        self.progress_run.setFormat("")
+        self.statusBar().showMessage(text, 3000)
+
+    def _on_prediction_canceled(self) -> None:
+        self._reset_prediction_running_ui()
+        text = self._prediction_text("canceled")
+        self.lbl_status.setText(text)
+        self.lbl_status.setToolTip(text)
+        self.statusBar().showMessage(text, 2500)
+
+    def _on_prediction_error(self, message: str) -> None:
+        self._reset_prediction_running_ui()
+        text = self._prediction_text("failed")
+        self.lbl_status.setText(text)
+        self.lbl_status.setToolTip(text)
+        QMessageBox.critical(self, self._prediction_text("busy_title"), message)
+
+    def _on_prediction_thread_finished(self) -> None:
+        self._prediction_thread = None
+        self._prediction_worker = None
+
     # ---------------- recipe IO ----------------
     def _sealed_model_code(self) -> str:
         code = self.combo_sealed_model.currentData()
@@ -2088,6 +2551,72 @@ class MainWindow(QMainWindow):
             return "results"
         return "structure"
 
+    @staticmethod
+    def _project_panel_key_from_data(data: Dict[str, Any]) -> str:
+        view_state = data.get("view_state") if isinstance(data.get("view_state"), dict) else {}
+        panel = str(view_state.get("panel") or "").strip().lower()
+        if panel in {"structure", "smoothing", "run", "results"}:
+            return panel
+        return "structure"
+
+    @staticmethod
+    def _resolve_project_run_dir_value(value: Any, *, source_path: Optional[Path] = None) -> Optional[Path]:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        run_dir = Path(raw)
+        candidates: List[Path] = []
+        if run_dir.is_absolute():
+            candidates.append(run_dir)
+        else:
+            if source_path is not None:
+                candidates.append(Path(source_path).parent / run_dir)
+            candidates.append(Path.cwd() / run_dir)
+        for candidate in candidates:
+            try:
+                resolved = candidate.resolve()
+            except Exception:
+                resolved = candidate
+            if resolved.exists():
+                return resolved
+        return None
+
+    @classmethod
+    def resolve_project_run_dir_from_data(
+        cls,
+        data: Dict[str, Any],
+        *,
+        source_path: Optional[Path] = None,
+    ) -> Optional[Path]:
+        return cls._resolve_project_run_dir_value(data.get("last_run_dir"), source_path=source_path)
+
+    @classmethod
+    def project_open_stage_from_data(
+        cls,
+        data: Dict[str, Any],
+        *,
+        source_path: Optional[Path] = None,
+    ) -> str:
+        panel = cls._project_panel_key_from_data(data)
+        if panel != "results":
+            return panel
+        if isinstance(data.get("saved_results"), dict):
+            return "results"
+        return "results" if cls.resolve_project_run_dir_from_data(data, source_path=source_path) is not None else "structure"
+
+    def _serialize_project_run_dir(self, run_dir: Path) -> str:
+        try:
+            resolved_run_dir = Path(run_dir).resolve()
+        except Exception:
+            resolved_run_dir = Path(run_dir)
+        if self._current_path is not None:
+            try:
+                base_dir = self._current_path.parent.resolve()
+                return os.path.relpath(str(resolved_run_dir), str(base_dir))
+            except ValueError:
+                pass
+        return str(resolved_run_dir)
+
     def _build_saved_results_payload(self) -> Optional[Dict[str, Any]]:
         if not self._result_frames:
             return None
@@ -2108,9 +2637,15 @@ class MainWindow(QMainWindow):
 
     def _build_project_payload(self) -> Dict[str, Any]:
         data = self._build_recipe()
-        results_payload = self._build_saved_results_payload()
-        if results_payload:
-            data["saved_results"] = results_payload
+        if self._last_run_dir is not None and self._last_run_dir.exists():
+            data["last_run_dir"] = self._serialize_project_run_dir(self._last_run_dir)
+        else:
+            results_payload = self._build_saved_results_payload()
+            if results_payload:
+                data["saved_results"] = results_payload
+        prediction_payload = self._build_parameter_prediction_payload()
+        if prediction_payload is not None:
+            data["parameter_prediction"] = prediction_payload
         data["view_state"] = {"panel": self._current_panel_key()}
         return data
 
@@ -2455,11 +2990,20 @@ class MainWindow(QMainWindow):
             redepo_wd["form_host"].setEnabled(rd_enable)
             self._switch_state = self._collect_switch_state()
 
+        self._apply_parameter_prediction_payload(data.get("parameter_prediction"))
+        if isinstance(self._prediction_result.get("predicted_switch_state"), dict) and bool(
+            self._prediction_result.get("applied", True)
+        ):
+            self._apply_prediction_result(self._prediction_result, announce=False)
+
         overlay_payload = data.get("overlay")
         if isinstance(overlay_payload, dict):
             self._apply_overlay_payload(overlay_payload)
         else:
             self._clear_overlay_image(silent=True)
+        self._last_run_dir = self.resolve_project_run_dir_from_data(data, source_path=self._current_path)
+        self._update_run_dir_label()
+        self.btn_open_dir.setEnabled(self._last_run_dir is not None)
         saved_results = data.get("saved_results")
         if isinstance(saved_results, dict):
             self._result_loading = False
@@ -2478,10 +3022,9 @@ class MainWindow(QMainWindow):
             self._result_void_mode = "legacy_cumulative"
             self._update_result_parameter_view()
         self._update_run_geometry_source_label()
-        view_state = data.get("view_state") if isinstance(data.get("view_state"), dict) else {}
-        panel = str(view_state.get("panel") or "").strip().lower()
+        panel = self._project_panel_key_from_data(data)
         if panel in {"structure", "smoothing", "run", "results"}:
-            if panel != "results" or self._result_frames:
+            if panel != "results" or self._result_frames or self._last_run_dir is not None:
                 self._goto(panel)
 
     def _open(self) -> None:
@@ -2495,15 +3038,17 @@ class MainWindow(QMainWindow):
             return
 
         p = Path(path)
+        prev_path = self._current_path
         try:
             data = json.loads(p.read_text(encoding="utf-8"))
+            self._current_path = p
             self._apply_loaded(data)
         except Exception as e:
+            self._current_path = prev_path
             self.statusBar().showMessage(self._tf("status.open_failed", error=e), 6000)
             QMessageBox.critical(self, self._tr("dialog.open_error.title"), str(e))
             return
 
-        self._current_path = p
         self.statusBar().showMessage(self._tr("status.loaded"), 2000)
 
     def _save(self) -> None:
@@ -2812,6 +3357,13 @@ class MainWindow(QMainWindow):
         th.start()
 
     def _engine_stop(self) -> None:
+        if self._prediction_worker is not None:
+            self._prediction_worker.request_cancel()
+            self.btn_stop.setEnabled(False)
+            text = self._prediction_text("cancel_requested")
+            self.lbl_status.setText(text)
+            self.lbl_status.setToolTip(text)
+            return
         if self._engine_worker is not None:
             self._engine_worker.request_cancel()
             self.btn_stop.setEnabled(False)
@@ -2860,83 +3412,8 @@ class MainWindow(QMainWindow):
         return True
 
     def _read_profiles_payload(self, run_dir: Path) -> Optional[Dict[str, Any]]:
-        profiles_path = run_dir / "profiles.json"
-        if not profiles_path.exists():
-            return None
         try:
-            data = json.loads(profiles_path.read_text(encoding="utf-8"))
-            raw_frames = data.get("frame_profiles") or []
-            raw_voids = data.get("frame_voids") or []
-            raw_steps = data.get("frame_steps") or []
-            raw_stage_ids = data.get("frame_stage_ids") or []
-            raw_stage = data.get("stage")
-            raw_void_mode = data.get("frame_voids_mode")
-
-            frames: List[List[Point]] = []
-            for frm in raw_frames:
-                if not isinstance(frm, list) or len(frm) < 2:
-                    continue
-                pts: List[Point] = []
-                ok = True
-                for p in frm:
-                    if not isinstance(p, (list, tuple)) or len(p) != 2:
-                        ok = False
-                        break
-                    pts.append((float(p[0]), float(p[1])))
-                if ok:
-                    frames.append(pts)
-
-            voids: List[List[List[Point]]] = []
-            if isinstance(raw_voids, list):
-                for vf in raw_voids[: len(frames)]:
-                    frame_voids: List[List[Point]] = []
-                    if isinstance(vf, list):
-                        for poly in vf:
-                            if not isinstance(poly, list) or len(poly) < 3:
-                                continue
-                            vpts: List[Point] = []
-                            ok_poly = True
-                            for p in poly:
-                                if not isinstance(p, (list, tuple)) or len(p) != 2:
-                                    ok_poly = False
-                                    break
-                                vpts.append((float(p[0]), float(p[1])))
-                            if ok_poly:
-                                frame_voids.append(vpts)
-                    voids.append(frame_voids)
-            if len(voids) != len(frames):
-                voids = [[] for _ in frames]
-
-            steps: List[int] = []
-            if isinstance(raw_steps, list):
-                for s in raw_steps[: len(frames)]:
-                    steps.append(int(s))
-            if len(steps) != len(frames):
-                steps = list(range(len(frames)))
-
-            stage_ids: List[int] = []
-            if isinstance(raw_stage_ids, list):
-                for sid in raw_stage_ids[: len(frames)]:
-                    stage_ids.append(max(1, int(sid)))
-
-            stage_info = dict(raw_stage) if isinstance(raw_stage, dict) else {"index": 1}
-            void_mode = "current" if (isinstance(raw_void_mode, str) and raw_void_mode.lower() == "current") else "legacy_cumulative"
-            if len(stage_ids) != len(frames):
-                stage_idx = 1
-                try:
-                    stage_idx = max(1, int(stage_info.get("index", 1)))
-                except Exception:
-                    stage_idx = 1
-                stage_ids = [stage_idx for _ in frames]
-
-            return {
-                "frames": frames,
-                "voids": voids,
-                "steps": steps,
-                "stage_ids": stage_ids,
-                "stage_info": stage_info,
-                "void_mode": void_mode,
-            }
+            return load_result_payload_from_run_dir(run_dir)
         except Exception:
             return None
 
@@ -3894,6 +4371,14 @@ class MainWindow(QMainWindow):
                     self._engine_worker.request_cancel()
                 self._engine_thread.quit()
                 self._engine_thread.wait(2000)
+            except Exception:
+                pass
+        if self._prediction_thread is not None and self._prediction_thread.isRunning():
+            try:
+                if self._prediction_worker is not None:
+                    self._prediction_worker.request_cancel()
+                self._prediction_thread.quit()
+                self._prediction_thread.wait(2000)
             except Exception:
                 pass
         super().closeEvent(event)
