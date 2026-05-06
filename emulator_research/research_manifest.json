@@ -1,0 +1,115 @@
+{
+  "version": 1,
+  "root": "emulator_research",
+  "created_numbers": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
+  "presentation_policy": "각 에뮬레이터별 PPTX를 분리하고, 의미 있는 업데이트마다 해당 PPT에 슬라이드 1장을 추가한다.",
+  "source_policy": "관련 논문, 리뷰, 공식 문서가 있으면 제목/연도/출처를 기록하고 물리 해석에 반영한다.",
+  "visual_policy": "PPT는 실험 screenshot, run GIF, geometry 비교 이미지, 논문 figure 기반 재구성 도식 등 시각 자료를 적극적으로 사용한다.",
+  "slots": [
+    {
+      "number": 0,
+      "slug": "conformal_depo_baseline",
+      "title_ko": "컨포멀 데포 기준",
+      "title_en": "Conformal Deposition Baseline",
+      "status_ko": "기준",
+      "module": "gapsim.emulation.trench_depo",
+      "presentation": "presentations/에뮬레이터00_컨포멀_데포_기준.pptx"
+    },
+    {
+      "number": 1,
+      "slug": "direct_angle_sputter_etch",
+      "title_ko": "각도기반 직접 스퍼터 에치",
+      "title_en": "Direct Angle Sputter Etch",
+      "status_ko": "진행중",
+      "module": "gapsim.emulation.trench_depo",
+      "presentation": "presentations/에뮬레이터01_각도기반_직접_스퍼터_에치.pptx"
+    },
+    {
+      "number": 2,
+      "slug": "ion_transmission_shadowing",
+      "title_ko": "이온 도달률 섀도잉",
+      "title_en": "Ion Transmission Shadowing",
+      "status_ko": "진행중",
+      "module": "gapsim.emulation.trench_depo",
+      "presentation": "presentations/에뮬레이터02_이온_도달률_섀도잉.pptx"
+    },
+    {
+      "number": 3,
+      "slug": "reflected_ion_etch",
+      "title_ko": "반사 이온 에치",
+      "title_en": "Reflected Ion Etch",
+      "status_ko": "폐기: 형상 차이 대비 실행 부담이 커서 채택하지 않음",
+      "module": "gapsim.emulation.trench_depo",
+      "presentation": "presentations/에뮬레이터03_반사_이온_에치.pptx"
+    },
+    {
+      "number": 4,
+      "slug": "sputter_redeposition",
+      "title_ko": "스퍼터 리데포",
+      "title_en": "Sputter Redeposition",
+      "status_ko": "준비중: 1번 direct sputter 출력 위에 redeposition 항을 결합할 예정",
+      "module": "gapsim.emulation.trench_depo",
+      "presentation": "presentations/에뮬레이터04_스퍼터_리데포.pptx"
+    },
+    {
+      "number": 5,
+      "slug": "unassigned",
+      "title_ko": "연구슬롯 미정",
+      "title_en": "Unassigned Research Slot",
+      "status_ko": "대기중",
+      "module": null,
+      "presentation": "presentations/에뮬레이터05_연구슬롯_미정.pptx"
+    },
+    {
+      "number": 6,
+      "slug": "unassigned",
+      "title_ko": "연구슬롯 미정",
+      "title_en": "Unassigned Research Slot",
+      "status_ko": "대기중",
+      "module": null,
+      "presentation": "presentations/에뮬레이터06_연구슬롯_미정.pptx"
+    },
+    {
+      "number": 7,
+      "slug": "unassigned",
+      "title_ko": "연구슬롯 미정",
+      "title_en": "Unassigned Research Slot",
+      "status_ko": "대기중",
+      "module": null,
+      "presentation": "presentations/에뮬레이터07_연구슬롯_미정.pptx"
+    },
+    {
+      "number": 8,
+      "slug": "unassigned",
+      "title_ko": "연구슬롯 미정",
+      "title_en": "Unassigned Research Slot",
+      "status_ko": "대기중",
+      "module": null,
+      "presentation": "presentations/에뮬레이터08_연구슬롯_미정.pptx"
+    },
+    {
+      "number": 9,
+      "slug": "unassigned",
+      "title_ko": "연구슬롯 미정",
+      "title_en": "Unassigned Research Slot",
+      "status_ko": "대기중",
+      "module": null,
+      "presentation": "presentations/에뮬레이터09_연구슬롯_미정.pptx"
+    },
+    {
+      "number": 10,
+      "slug": "unassigned",
+      "title_ko": "연구슬롯 미정",
+      "title_en": "Unassigned Research Slot",
+      "status_ko": "대기중",
+      "module": null,
+      "presentation": "presentations/에뮬레이터10_연구슬롯_미정.pptx"
+    }
+  ]
+}

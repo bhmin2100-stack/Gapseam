@@ -14,6 +14,7 @@ from gapsim.prediction import (
     build_feature_entries,
     build_switch_state_from_prediction,
     deep_copy_switch_state,
+    estimate_fast_prediction_params,
     feature_loss,
     recipe_with_switch_state,
 )
@@ -248,80 +249,163 @@ class ParameterPredictionWorker(QObject):
         ordered = sorted(candidates, key=lambda item: float(item["loss"]))
         return ordered[: max(1, int(limit))]
 
+    def _result_payload(
+        self,
+        *,
+        ranked: List[Dict[str, Any]],
+        target_feature_count: int,
+        evaluated_candidates: int,
+        prediction_mode: str,
+        fast_diagnostics: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        if not ranked:
+            raise RuntimeError("Parameter prediction did not produce any valid candidates.")
+        best = ranked[0]
+        payload: Dict[str, Any] = {
+            "loss": float(best["loss"]),
+            "predicted_switch_state": deep_copy_switch_state(best["switch_state"]),
+            "best_params": dict(best["params"]),
+            "top_candidates": [
+                {
+                    "loss": float(item["loss"]),
+                    "params": dict(item["params"]),
+                }
+                for item in ranked
+            ],
+            "target_feature_count": int(target_feature_count),
+            "evaluated_candidates": int(evaluated_candidates),
+            "sim_post_points": [(float(x), float(y)) for x, y in best.get("sim_post_points", [])],
+            "prediction_mode": str(prediction_mode),
+        }
+        if fast_diagnostics is not None:
+            payload["fast_diagnostics"] = dict(fast_diagnostics)
+        return payload
+
+    def _fast_prediction_result(
+        self,
+        *,
+        base_params: Dict[str, float],
+        target_entries: List[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        estimate = estimate_fast_prediction_params(
+            self.pre_points,
+            self.post_points,
+            self.anchor_spec,
+            base_params,
+        )
+        if not estimate:
+            return None
+
+        params = estimate.get("params")
+        if not isinstance(params, dict):
+            return None
+        fast_params = {key: float(value) for key, value in params.items()}
+        self.progress.emit(1, 1)
+        self.message.emit("Parameter prediction: fast feature estimate")
+        candidate = self._evaluate_candidate(
+            target_entries=target_entries,
+            params=fast_params,
+            candidate_index=1,
+        )
+        if candidate is None:
+            return None
+        self.message.emit(
+            (
+                f"Parameter prediction: fast feature estimate | loss={float(candidate['loss']):.4f} "
+                f"| preview {int(candidate.get('preview_completed_step', 0))}/{int(candidate.get('preview_cycles', 0))}"
+            )
+        )
+        return self._result_payload(
+            ranked=[candidate],
+            target_feature_count=len(target_entries),
+            evaluated_candidates=1,
+            prediction_mode="fast_feature",
+            fast_diagnostics=estimate.get("diagnostics") if isinstance(estimate.get("diagnostics"), dict) else None,
+        )
+
+    def _sampling_prediction_result(
+        self,
+        *,
+        base_params: Dict[str, float],
+        target_entries: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        bounds = self._parameter_bounds(base_params)
+        fixed_params = {"base_rate": float(base_params["base_rate"])}
+
+        total = 1 + (self.coarse_count - 1) + (self.local_seed_count * self.local_count_per_seed)
+        step = 0
+        candidates: List[Dict[str, Any]] = []
+
+        def evaluate(params: Dict[str, float], label: str) -> None:
+            nonlocal step, candidates
+            self._check_cancel()
+            step += 1
+            self.progress.emit(step, total)
+            self.message.emit(label)
+            candidate = self._evaluate_candidate(
+                target_entries=target_entries,
+                params=params,
+                candidate_index=step,
+            )
+            if candidate is not None:
+                candidates.append(candidate)
+                best = min(candidates, key=lambda item: float(item["loss"]))
+                self.message.emit(
+                    (
+                        f"{label} | best loss={float(best['loss']):.4f} "
+                        f"| preview {int(candidate.get('preview_completed_step', 0))}/{int(candidate.get('preview_cycles', 0))}"
+                    )
+                )
+
+        evaluate(base_params, "Parameter prediction: baseline candidate")
+        for idx in range(self.coarse_count - 1):
+            evaluate(
+                self._sample_candidate(bounds, fixed_params=fixed_params),
+                f"Parameter prediction: coarse search {idx + 1}/{self.coarse_count - 1}",
+            )
+
+        top_seeds = self._trim_top_candidates(candidates, limit=self.local_seed_count)
+        for seed_idx, seed in enumerate(top_seeds):
+            center = seed.get("params") if isinstance(seed.get("params"), dict) else {}
+            for local_idx in range(self.local_count_per_seed):
+                evaluate(
+                    self._sample_candidate(bounds, fixed_params=fixed_params, center=center, shrink=0.2),
+                    (
+                        "Parameter prediction: local refine "
+                        f"{seed_idx + 1}/{len(top_seeds)}-{local_idx + 1}/{self.local_count_per_seed}"
+                    ),
+                )
+
+        self._check_cancel()
+        ranked = self._trim_top_candidates(candidates, limit=3)
+        return self._result_payload(
+            ranked=ranked,
+            target_feature_count=len(target_entries),
+            evaluated_candidates=len(candidates),
+            prediction_mode="sampling",
+        )
+
     @Slot()
     def run(self) -> None:
         try:
             self._check_cancel()
             base_params = self._base_params()
-            bounds = self._parameter_bounds(base_params)
-            fixed_params = {"base_rate": float(base_params["base_rate"])}
             target_entries = build_feature_entries(self.pre_points, self.post_points, self.anchor_spec)
 
-            total = 1 + (self.coarse_count - 1) + (self.local_seed_count * self.local_count_per_seed)
-            step = 0
-            candidates: List[Dict[str, Any]] = []
-            def evaluate(params: Dict[str, float], label: str) -> None:
-                nonlocal step, candidates
-                self._check_cancel()
-                step += 1
-                self.progress.emit(step, total)
-                self.message.emit(label)
-                candidate = self._evaluate_candidate(
-                    target_entries=target_entries,
-                    params=params,
-                    candidate_index=step,
-                )
-                if candidate is not None:
-                    candidates.append(candidate)
-                    best = min(candidates, key=lambda item: float(item["loss"]))
-                    self.message.emit(
-                        (
-                            f"{label} | best loss={float(best['loss']):.4f} "
-                            f"| preview {int(candidate.get('preview_completed_step', 0))}/{int(candidate.get('preview_cycles', 0))}"
-                        )
-                    )
+            try:
+                fast_result = self._fast_prediction_result(base_params=base_params, target_entries=target_entries)
+            except PredictionCanceled:
+                raise
+            except Exception as exc:
+                self.message.emit(f"Parameter prediction: fast estimate failed, falling back ({exc})")
+                fast_result = None
 
-            evaluate(base_params, "Parameter prediction: baseline candidate")
-            for idx in range(self.coarse_count - 1):
-                evaluate(
-                    self._sample_candidate(bounds, fixed_params=fixed_params),
-                    f"Parameter prediction: coarse search {idx + 1}/{self.coarse_count - 1}",
-                )
+            if fast_result is not None:
+                self.finished.emit(fast_result)
+                return
 
-            top_seeds = self._trim_top_candidates(candidates, limit=self.local_seed_count)
-            for seed_idx, seed in enumerate(top_seeds):
-                center = seed.get("params") if isinstance(seed.get("params"), dict) else {}
-                for local_idx in range(self.local_count_per_seed):
-                    evaluate(
-                        self._sample_candidate(bounds, fixed_params=fixed_params, center=center, shrink=0.2),
-                        (
-                            "Parameter prediction: local refine "
-                            f"{seed_idx + 1}/{len(top_seeds)}-{local_idx + 1}/{self.local_count_per_seed}"
-                        ),
-                    )
-
-            self._check_cancel()
-            ranked = self._trim_top_candidates(candidates, limit=3)
-            if not ranked:
-                raise RuntimeError("Parameter prediction did not produce any valid candidates.")
-            best = ranked[0]
-            self.finished.emit(
-                {
-                    "loss": float(best["loss"]),
-                    "predicted_switch_state": deep_copy_switch_state(best["switch_state"]),
-                    "best_params": dict(best["params"]),
-                    "top_candidates": [
-                        {
-                            "loss": float(item["loss"]),
-                            "params": dict(item["params"]),
-                        }
-                        for item in ranked
-                    ],
-                    "target_feature_count": len(target_entries),
-                    "evaluated_candidates": len(candidates),
-                    "sim_post_points": [(float(x), float(y)) for x, y in best.get("sim_post_points", [])],
-                }
-            )
+            self.message.emit("Parameter prediction: fast estimate unavailable, falling back to sampling")
+            self.finished.emit(self._sampling_prediction_result(base_params=base_params, target_entries=target_entries))
         except PredictionCanceled:
             self.canceled.emit()
         except Exception as exc:

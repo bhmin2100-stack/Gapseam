@@ -10,6 +10,48 @@
 
 CI 또는 로컬 스크립트에서 pyproject 경로를 참조할 때는 항상 루트 기준(`./pyproject.toml`)으로 통일합니다.
 
+## Windows 실행
+
+Python이 설치된 개발 PC에서는 루트의 `run_gapsim.bat`를 실행하면 됩니다.
+
+회사 PC처럼 Python 설치 없이 실행하려면 Windows 빌드 산출물인 `GFS_portable_*.zip`을 내려받아 압축을 풀고 `GFS\GFS.exe`를 실행합니다. `GFS.exe`는 Qt DLL과 내부 Python 런타임 파일이 함께 있어야 하므로 exe만 따로 빼지 말고 `GFS` 폴더 전체를 유지해야 합니다.
+
+## Windows 실행파일 빌드
+
+로컬 Windows PC에서 portable zip을 만들려면 아래 파일을 실행합니다.
+
+`build_gfs_portable.bat`
+
+스크립트는 `.venv` 생성, 의존성 설치, PyInstaller 빌드, `dist/GFS_portable_*.zip` 생성까지 처리합니다.
+
+GitHub에서는 `.github/workflows/windows-build.yml` 워크플로가 `main` 또는 `codex/**` 브랜치 push 때 Windows 러너에서 테스트 후 같은 portable zip artifact를 생성합니다.
+
+## macOS 실행
+
+맥에서는 Windows용 `run_gapsim.bat` 대신 아래 방법 중 하나를 사용합니다.
+
+1. 가상환경 생성 및 설치
+   `python3 -m venv .venv`
+   `source .venv/bin/activate`
+   `pip install -e .`
+2. 실행
+   `gapsim`
+
+설치 없이 바로 실행하려면 루트의 `run_gapsim.command`를 실행해도 됩니다.
+Finder에서 더블클릭 실행도 가능하며, 터미널에서는 `chmod +x run_gapsim.command` 후 `./run_gapsim.command`로 실행할 수 있습니다.
+
+코드 내 실행 진입점은 공통으로 `python -m gapsim.ui_qt.main_window` 입니다.
+
+## macOS 실행파일(.app) 빌드
+
+터미널 명령 없이 Finder에서 바로 실행할 앱 번들은 `dist/GFS.app`로 생성됩니다.
+
+빌드:
+`chmod +x build_gfs_macos.sh`
+`./build_gfs_macos.sh`
+
+빌드가 끝나면 `dist/GFS.app`를 더블클릭해서 실행할 수 있습니다.
+
 ## Runtime Dependencies (code-usage based)
 
 루트 `pyproject.toml`의 런타임 의존성은 실제 코드 import/사용 기준으로 유지합니다.

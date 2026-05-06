@@ -1,12 +1,19 @@
 ﻿from __future__ import annotations
 
 import math
+import time
 from collections import OrderedDict
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QBrush, QColor, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import QGraphicsEllipseItem, QGraphicsItem, QGraphicsPathItem, QGraphicsScene, QGraphicsView
+from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, Signal
+from PySide6.QtGui import QBrush, QColor, QNativeGestureEvent, QPainter, QPainterPath, QPen
+from PySide6.QtWidgets import (
+    QGraphicsEllipseItem,
+    QGraphicsItem,
+    QGraphicsPathItem,
+    QGraphicsScene,
+    QGraphicsView,
+)
 
 Point = Tuple[float, float]  # USER coords (x, y_user)
 
@@ -99,6 +106,8 @@ def _decimate_profile(profile: Sequence[Point], stride: int) -> List[Point]:
 
 
 class ResultVectorView(QGraphicsView):
+    viewportChanged = Signal(object)
+
     def __init__(self) -> None:
         super().__init__()
         self._scene = QGraphicsScene(self)
@@ -122,7 +131,12 @@ class ResultVectorView(QGraphicsView):
         self._show_initial_points = True
         self._dynamic_substrate_fill = False
         self._solid_fill_flags: List[bool] = []
+        self._history_mode = "film"
         self._layer_items: List[Optional[QGraphicsPathItem]] = []
+        self._layer_base_paths: List[QPainterPath] = []
+        self._history_line_items: List[Optional[QGraphicsPathItem]] = []
+        self._etch_ghost_items: List[Optional[QGraphicsPathItem]] = []
+        self._etch_ghost_base_paths: List[QPainterPath] = []
         self._void_items_by_frame: List[List[QGraphicsPathItem]] = []
         self._initial_point_items: List[QGraphicsEllipseItem] = []
         self._substrate_item: Optional[QGraphicsPathItem] = None
@@ -132,15 +146,33 @@ class ResultVectorView(QGraphicsView):
 
         self._panning = False
         self._pan_start: Optional[QPointF] = None
+        self._suppress_viewport_signal = False
 
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
         self.setDragMode(QGraphicsView.DragMode.NoDrag)
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.BoundingRectViewportUpdate)
+        self.setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents, True)
+        self.viewport().setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents, True)
+        self.viewport().installEventFilter(self)
+        self.horizontalScrollBar().valueChanged.connect(self._emit_viewport_changed)
+        self.verticalScrollBar().valueChanged.connect(self._emit_viewport_changed)
 
         self._major_target_lines = 10
         self._minor_div = 5
+        self._min_zoom = 1e-5
+        self._max_zoom = 1e5
+        self._wheel_zoom_sensitivity = 2.0
+        self._native_pinch_zoom_sensitivity = 3.0
+        self._native_pinch_deadzone = 0.001
+        self._native_pinch_max_delta = 0.20
+        self._native_pinch_idle_reset_s = 0.35
+        self._native_pinch_ignore_wheel_s = 0.12
+        self._native_pinch_direction = 0
+        self._native_pinch_active = False
+        self._native_pinch_last_time = 0.0
+        self._native_pinch_ignore_wheel_until = 0.0
 
     def _trim_cache(self, cache: "OrderedDict[int, object]") -> None:
         while len(cache) > self._cache_limit:
@@ -205,7 +237,12 @@ class ResultVectorView(QGraphicsView):
         self._stage_layer_totals = {}
         self._dynamic_substrate_fill = False
         self._solid_fill_flags = []
+        self._history_mode = "film"
         self._layer_items = []
+        self._layer_base_paths = []
+        self._history_line_items = []
+        self._etch_ghost_items = []
+        self._etch_ghost_base_paths = []
         self._void_items_by_frame = []
         self._initial_point_items = []
         self._substrate_item = None
@@ -256,6 +293,7 @@ class ResultVectorView(QGraphicsView):
         void_mode: str = "legacy_cumulative",
         dynamic_substrate_fill: bool = False,
         solid_fill_flags: Optional[Sequence[bool]] = None,
+        history_mode: str = "film",
     ) -> None:
         self._frame_profiles_raw = []
         for f in frames:
@@ -284,6 +322,13 @@ class ResultVectorView(QGraphicsView):
         self._profile_cache.clear()
         self._void_cache.clear()
         self._void_mode = "current" if str(void_mode).lower() == "current" else "legacy_cumulative"
+        history_mode_key = str(history_mode).strip().lower().replace("-", "_")
+        if history_mode_key in {"ghost", "ghost_line", "ghost_lines"}:
+            self._history_mode = "ghost_lines"
+        elif history_mode_key in {"mixed_etch", "etch_mixed", "film_plus_etch_ghost"}:
+            self._history_mode = "mixed_etch"
+        else:
+            self._history_mode = "film"
         self._dynamic_substrate_fill = bool(dynamic_substrate_fill)
         self._solid_fill_flags = []
         if solid_fill_flags is not None:
@@ -324,6 +369,10 @@ class ResultVectorView(QGraphicsView):
     def _build_scene_items(self) -> None:
         self._scene.clear()
         self._layer_items = []
+        self._layer_base_paths = []
+        self._history_line_items = []
+        self._etch_ghost_items = []
+        self._etch_ghost_base_paths = []
         self._void_items_by_frame = [[] for _ in self._frame_profiles_raw]
         self._initial_point_items = []
         self._substrate_item = None
@@ -351,35 +400,85 @@ class ResultVectorView(QGraphicsView):
         if not self._dynamic_substrate_fill:
             self._substrate_item.setPath(self._profile_fill_path(base, floor_y))
 
-        # Deposited film layers (prebuilt once, toggled per frame)
+        # Deposited film layers (prebuilt once, toggled per frame). In etch
+        # playback, use solid-path differences so positive net deposition keeps
+        # the normal film color while eroded material becomes a faint ghost.
         prev = base
         stage_seen: Dict[int, int] = {}
+        use_ghost_history = self._history_mode == "ghost_lines"
+        use_mixed_etch_history = self._history_mode == "mixed_etch"
         for li in range(1, len(self._frame_profiles_raw)):
             cur = self._cache_get_profile_scene(li)
             item: Optional[QGraphicsPathItem] = None
+            history_item: Optional[QGraphicsPathItem] = None
+            etch_item: Optional[QGraphicsPathItem] = None
+            layer_base_path = QPainterPath()
+            etch_ghost_base_path = QPainterPath()
             if len(prev) >= 2 and len(cur) >= 2:
                 stage_id = self._frame_stage_ids[li] if li < len(self._frame_stage_ids) else 1
                 stage_id = max(1, int(stage_id))
                 stage_seen[stage_id] = stage_seen.get(stage_id, 0) + 1
-                poly = prev + list(reversed(cur))
-                path = QPainterPath()
-                path.moveTo(poly[0])
-                for p in poly[1:]:
-                    path.lineTo(p)
-                path.closeSubpath()
+                color = _film_color_stage(
+                    stage_id,
+                    stage_seen[stage_id] - 1,
+                    self._stage_layer_totals.get(stage_id, 1),
+                )
+                if use_mixed_etch_history:
+                    prev_fill = self._profile_fill_path(prev, floor_y)
+                    cur_fill = self._profile_fill_path(cur, floor_y)
+                    added_path = cur_fill.subtracted(prev_fill)
+                    eroded_path = prev_fill.subtracted(cur_fill)
+                    if self._path_has_area(added_path) and self._stage_visible(stage_id):
+                        layer_base_path = added_path
+                        item = QGraphicsPathItem(layer_base_path)
+                        item.setPen(QPen(Qt.PenStyle.NoPen))
+                        item.setBrush(QBrush(color))
+                        item.setZValue(2.0)
+                        item.setVisible(False)
+                        self._scene.addItem(item)
+                    if self._path_has_area(eroded_path):
+                        etch_ghost_base_path = eroded_path
+                        etch_item = QGraphicsPathItem(etch_ghost_base_path)
+                        ghost_pen = QPen(QColor(42, 117, 196, 75), 0.8)
+                        ghost_pen.setCosmetic(True)
+                        etch_item.setPen(ghost_pen)
+                        etch_item.setBrush(QBrush(QColor(42, 117, 196, 34)))
+                        etch_item.setZValue(1.0)
+                        etch_item.setVisible(False)
+                        self._scene.addItem(etch_item)
+                elif use_ghost_history:
+                    path = QPainterPath()
+                    path.moveTo(cur[0])
+                    for p in cur[1:]:
+                        path.lineTo(p)
+                    history_item = QGraphicsPathItem(path)
+                    alpha = 35 + int(55 * (li / max(1, len(self._frame_profiles_raw) - 1)))
+                    pen = QPen(QColor(42, 117, 196, alpha), 1.1)
+                    pen.setCosmetic(True)
+                    history_item.setPen(pen)
+                    history_item.setZValue(8.0)
+                    history_item.setVisible(False)
+                    self._scene.addItem(history_item)
+                else:
+                    poly = prev + list(reversed(cur))
+                    path = QPainterPath()
+                    path.moveTo(poly[0])
+                    for p in poly[1:]:
+                        path.lineTo(p)
+                    path.closeSubpath()
 
-                if self._stage_visible(stage_id):
-                    item = QGraphicsPathItem(path)
-                    item.setPen(QPen(Qt.PenStyle.NoPen))
-                    color = _film_color_stage(
-                        stage_id,
-                        stage_seen[stage_id] - 1,
-                        self._stage_layer_totals.get(stage_id, 1),
-                    )
-                    item.setBrush(QBrush(color))
-                    item.setVisible(False)
-                    self._scene.addItem(item)
+                    if self._stage_visible(stage_id):
+                        layer_base_path = path
+                        item = QGraphicsPathItem(path)
+                        item.setPen(QPen(Qt.PenStyle.NoPen))
+                        item.setBrush(QBrush(color))
+                        item.setVisible(False)
+                        self._scene.addItem(item)
             self._layer_items.append(item)
+            self._layer_base_paths.append(layer_base_path)
+            self._history_line_items.append(history_item)
+            self._etch_ghost_items.append(etch_item)
+            self._etch_ghost_base_paths.append(etch_ghost_base_path)
             prev = cur
 
         # Trapped voids (prebuilt once, toggled per frame)
@@ -440,6 +539,12 @@ class ResultVectorView(QGraphicsView):
         path.closeSubpath()
         return path
 
+    def _path_has_area(self, path: QPainterPath) -> bool:
+        if path.isEmpty():
+            return False
+        bounds = path.boundingRect()
+        return bounds.width() > 1e-6 and bounds.height() > 1e-6
+
     def _set_layer_visible(self, layer_index: int, visible: bool) -> None:
         if layer_index < 1:
             return
@@ -449,6 +554,53 @@ class ResultVectorView(QGraphicsView):
         item = self._layer_items[idx]
         if item is not None:
             item.setVisible(bool(visible))
+
+    def _set_history_line_visible(self, layer_index: int, visible: bool) -> None:
+        if layer_index < 1:
+            return
+        idx = layer_index - 1
+        if idx < 0 or idx >= len(self._history_line_items):
+            return
+        item = self._history_line_items[idx]
+        if item is not None:
+            item.setVisible(bool(visible))
+
+    def _set_etch_ghost_visible(self, layer_index: int, visible: bool) -> None:
+        if layer_index < 1:
+            return
+        idx = layer_index - 1
+        if idx < 0 or idx >= len(self._etch_ghost_items):
+            return
+        item = self._etch_ghost_items[idx]
+        if item is not None:
+            item.setVisible(bool(visible))
+
+    def _set_mixed_etch_layers_for_frame(self, draw_idx: int, current_fill: QPainterPath) -> None:
+        for li in range(1, len(self._layer_items) + 1):
+            idx = li - 1
+            layer_item = self._layer_items[idx]
+            etch_item = self._etch_ghost_items[idx] if idx < len(self._etch_ghost_items) else None
+            visible = li <= draw_idx
+            if layer_item is not None:
+                if visible and idx < len(self._layer_base_paths):
+                    clipped_path = self._layer_base_paths[idx].intersected(current_fill)
+                    if self._path_has_area(clipped_path):
+                        layer_item.setPath(clipped_path)
+                        layer_item.setVisible(True)
+                    else:
+                        layer_item.setVisible(False)
+                else:
+                    layer_item.setVisible(False)
+            if etch_item is not None:
+                if visible and idx < len(self._etch_ghost_base_paths):
+                    clipped_ghost = self._etch_ghost_base_paths[idx].subtracted(current_fill)
+                    if self._path_has_area(clipped_ghost):
+                        etch_item.setPath(clipped_ghost)
+                        etch_item.setVisible(True)
+                    else:
+                        etch_item.setVisible(False)
+                else:
+                    etch_item.setVisible(False)
 
     def _set_void_frame_visible(self, frame_index: int, visible: bool) -> None:
         if frame_index < 0 or frame_index >= len(self._void_items_by_frame):
@@ -473,11 +625,38 @@ class ResultVectorView(QGraphicsView):
 
         prev_draw = self._last_draw_idx
         solid_fill = self._solid_fill_for_frame(draw_idx)
-        if solid_fill:
+        use_ghost_history = self._history_mode == "ghost_lines"
+        use_mixed_etch_history = self._history_mode == "mixed_etch"
+        current_fill = self._profile_fill_path(curr, self._floor_y)
+        if use_mixed_etch_history:
+            self._set_mixed_etch_layers_for_frame(draw_idx, current_fill)
+            for li in range(1, len(self._history_line_items) + 1):
+                self._set_history_line_visible(li, False)
+        elif use_ghost_history:
+            if prev_draw < 0:
+                for li in range(1, draw_idx + 1):
+                    self._set_history_line_visible(li, True)
+                for li in range(draw_idx + 1, len(self._history_line_items) + 1):
+                    self._set_history_line_visible(li, False)
+            elif draw_idx > prev_draw:
+                for li in range(prev_draw + 1, draw_idx + 1):
+                    self._set_history_line_visible(li, True)
+            elif draw_idx < prev_draw:
+                for li in range(draw_idx + 1, prev_draw + 1):
+                    self._set_history_line_visible(li, False)
+            for li in range(1, len(self._layer_items) + 1):
+                self._set_layer_visible(li, False)
+            for li in range(1, len(self._etch_ghost_items) + 1):
+                self._set_etch_ghost_visible(li, False)
+        elif solid_fill:
             if not self._last_solid_fill_mode:
                 for li in range(1, len(self._layer_items) + 1):
                     self._set_layer_visible(li, False)
+            for li in range(1, len(self._etch_ghost_items) + 1):
+                self._set_etch_ghost_visible(li, False)
         else:
+            for li in range(1, len(self._etch_ghost_items) + 1):
+                self._set_etch_ghost_visible(li, False)
             if self._last_solid_fill_mode:
                 for li in range(1, len(self._layer_items) + 1):
                     self._set_layer_visible(li, li <= draw_idx)
@@ -527,8 +706,40 @@ class ResultVectorView(QGraphicsView):
             target = self._scene.itemsBoundingRect()
         if target.isNull():
             return
+        self._suppress_viewport_signal = True
         self.resetTransform()
         self.fitInView(target, Qt.AspectRatioMode.KeepAspectRatio)
+        self._suppress_viewport_signal = False
+        self._emit_viewport_changed()
+
+    def viewport_state(self) -> Dict[str, object]:
+        return {
+            "transform": self.transform(),
+            "center_scene": self.mapToScene(self.viewport().rect().center()),
+            "h": int(self.horizontalScrollBar().value()),
+            "v": int(self.verticalScrollBar().value()),
+        }
+
+    def apply_viewport_state(self, state: Dict[str, object]) -> None:
+        transform = state.get("transform")
+        if transform is None:
+            return
+        self._suppress_viewport_signal = True
+        try:
+            self.setTransform(transform)  # type: ignore[arg-type]
+            center_scene = state.get("center_scene")
+            if center_scene is not None:
+                self.centerOn(center_scene)  # type: ignore[arg-type]
+            else:
+                self.horizontalScrollBar().setValue(int(state.get("h", 0)))
+                self.verticalScrollBar().setValue(int(state.get("v", 0)))
+        finally:
+            self._suppress_viewport_signal = False
+
+    def _emit_viewport_changed(self, _value: int = 0) -> None:
+        if self._suppress_viewport_signal:
+            return
+        self.viewportChanged.emit(self.viewport_state())
 
     def _update_content_bounds(self) -> None:
         if not self._frame_profiles_raw:
@@ -687,13 +898,170 @@ class ResultVectorView(QGraphicsView):
         painter.restore()
 
     def wheelEvent(self, event) -> None:
-        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
-            angle = event.angleDelta().y()
-            factor = 1.0015 ** angle
-            self.scale(factor, factor)
+        if time.monotonic() < self._native_pinch_ignore_wheel_until:
             event.accept()
             return
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            delta = event.angleDelta().y()
+            if delta == 0:
+                delta = event.pixelDelta().y()
+            if delta != 0:
+                factor = 1.0015 ** (delta * self._wheel_zoom_sensitivity)
+                self._zoom_at_view_pos(factor, QPointF(event.position()))
+                event.accept()
+                return
         super().wheelEvent(event)
+
+    def viewportEvent(self, event) -> bool:  # noqa: N802
+        if self._handle_zoom_gesture_event(event):
+            return True
+        return super().viewportEvent(event)
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802, ANN001
+        if watched is self.viewport() and self._handle_zoom_gesture_event(event):
+            return True
+        return super().eventFilter(watched, event)
+
+    def event(self, event) -> bool:
+        if self._handle_zoom_gesture_event(event):
+            return True
+        return super().event(event)
+
+    def _handle_zoom_gesture_event(self, event) -> bool:
+        if event.type() == QEvent.Type.NativeGesture and isinstance(event, QNativeGestureEvent):
+            gesture_type = event.gestureType()
+            if gesture_type == Qt.NativeGestureType.BeginNativeGesture:
+                self._native_pinch_active = True
+                self._native_pinch_direction = 0
+                self._native_pinch_last_time = time.monotonic()
+                event.accept()
+                return True
+            if gesture_type == Qt.NativeGestureType.EndNativeGesture:
+                self._native_pinch_active = False
+                self._native_pinch_direction = 0
+                self._native_pinch_ignore_wheel_until = time.monotonic() + self._native_pinch_ignore_wheel_s
+                event.accept()
+                return True
+            if gesture_type == Qt.NativeGestureType.ZoomNativeGesture:
+                now = time.monotonic()
+                if (not self._native_pinch_active) or (
+                    self._native_pinch_last_time > 0.0
+                    and (now - self._native_pinch_last_time) > self._native_pinch_idle_reset_s
+                ):
+                    self._native_pinch_direction = 0
+                    self._native_pinch_active = True
+                self._native_pinch_last_time = now
+                self._native_pinch_ignore_wheel_until = now + self._native_pinch_ignore_wheel_s
+
+                value = float(event.value())
+                if not math.isfinite(value) or abs(value) <= 1e-12:
+                    return False
+                if abs(value) < self._native_pinch_deadzone:
+                    event.accept()
+                    return True
+                direction = 1 if value > 0.0 else -1
+                if self._native_pinch_direction == 0:
+                    self._native_pinch_direction = direction
+                elif direction != self._native_pinch_direction:
+                    event.accept()
+                    return True
+                value = max(-self._native_pinch_max_delta, min(self._native_pinch_max_delta, value))
+                factor = math.exp(value * self._native_pinch_zoom_sensitivity)
+                self._zoom_at_view_pos(factor, self._event_view_pos(event))
+                event.accept()
+                return True
+        return False
+
+    def _amplify_zoom_factor(self, factor: float, sensitivity: float) -> float:
+        factor = float(factor)
+        sensitivity = max(0.1, float(sensitivity))
+        if not math.isfinite(factor) or factor <= 0.0:
+            return 1.0
+        amplified = math.exp(math.log(factor) * sensitivity)
+        if not math.isfinite(amplified):
+            return 1.0
+        return max(0.01, min(100.0, amplified))
+
+    def _event_view_pos(self, event) -> QPointF:
+        def point_from(value) -> QPointF:
+            if hasattr(value, "toPointF"):
+                return QPointF(value.toPointF())
+            return QPointF(value)
+
+        def in_viewport_margin(pos: QPointF, margin: float = 24.0) -> bool:
+            rect = self.viewport().rect()
+            return (
+                -margin <= pos.x() <= rect.width() + margin
+                and -margin <= pos.y() <= rect.height() + margin
+            )
+
+        def clamp_to_viewport(pos: QPointF) -> QPointF:
+            rect = self.viewport().rect()
+            return QPointF(
+                max(0.0, min(float(rect.width()), float(pos.x()))),
+                max(0.0, min(float(rect.height()), float(pos.y()))),
+            )
+
+        for attr in ("globalPosition", "screenPos", "globalPos"):
+            getter = getattr(event, attr, None)
+            if getter is None:
+                continue
+            try:
+                global_pos = point_from(getter()).toPoint()
+            except (TypeError, RuntimeError):
+                continue
+            view_pos = QPointF(self.viewport().mapFromGlobal(global_pos))
+            if in_viewport_margin(view_pos):
+                return clamp_to_viewport(view_pos)
+
+        for attr in ("position", "localPos", "pos"):
+            getter = getattr(event, attr, None)
+            if getter is None:
+                continue
+            try:
+                pos = point_from(getter())
+            except TypeError:
+                continue
+            if in_viewport_margin(pos):
+                return clamp_to_viewport(pos)
+            view_relative = pos - QPointF(self.viewport().pos())
+            if in_viewport_margin(view_relative):
+                return clamp_to_viewport(view_relative)
+        return QPointF(self.viewport().rect().center())
+
+    def _zoom_at_view_pos(self, factor: float, view_pos) -> None:
+        factor = float(factor)
+        if not math.isfinite(factor) or factor <= 0.0:
+            return
+        current = abs(float(self.transform().m11()))
+        if current <= 0.0:
+            return
+        target = current * factor
+        if target < self._min_zoom:
+            factor = self._min_zoom / current
+        elif target > self._max_zoom:
+            factor = self._max_zoom / current
+        if abs(factor - 1.0) <= 1e-9:
+            return
+
+        if hasattr(view_pos, "toPoint"):
+            view_point = view_pos.toPoint()
+        else:
+            view_point = view_pos
+        scene_before = self.mapToScene(view_point)
+        old_anchor = self.transformationAnchor()
+        self._suppress_viewport_signal = True
+        try:
+            self.setTransformationAnchor(QGraphicsView.ViewportAnchor.NoAnchor)
+            self.scale(factor, factor)
+            view_after = QPointF(self.mapFromScene(scene_before))
+            delta = view_after - QPointF(view_point)
+            self.horizontalScrollBar().setValue(int(self.horizontalScrollBar().value() + delta.x()))
+            self.verticalScrollBar().setValue(int(self.verticalScrollBar().value() + delta.y()))
+        finally:
+            self.setTransformationAnchor(old_anchor)
+            self._suppress_viewport_signal = False
+        self._emit_viewport_changed()
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton and (event.modifiers() & Qt.KeyboardModifier.ControlModifier):
@@ -708,8 +1076,13 @@ class ResultVectorView(QGraphicsView):
         if self._panning and self._pan_start is not None and (event.buttons() & Qt.MouseButton.LeftButton):
             delta = QPointF(event.pos()) - self._pan_start
             self._pan_start = QPointF(event.pos())
-            self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - int(delta.x()))
-            self.verticalScrollBar().setValue(self.verticalScrollBar().value() - int(delta.y()))
+            self._suppress_viewport_signal = True
+            try:
+                self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - int(delta.x()))
+                self.verticalScrollBar().setValue(self.verticalScrollBar().value() - int(delta.y()))
+            finally:
+                self._suppress_viewport_signal = False
+            self._emit_viewport_changed()
             event.accept()
             return
         super().mouseMoveEvent(event)

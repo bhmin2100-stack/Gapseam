@@ -1,0 +1,109 @@
+{
+  "direct_sputter_inherited_from_emulator_01": true,
+  "sputter_strength_a_per_cycle": 4.0,
+  "sputter_peak_pct": 100.0,
+  "sputter_peak_angle_deg": 55.0,
+  "sputter_width_deg": 14.0,
+  "sputter_smoothing_a": 40.0,
+  "reflected_ion_strength_pct": 35.0,
+  "reflected_ion_bowing_weight": 0.75,
+  "reflected_ion_microtrench_weight": 1.0,
+  "reflected_ion_range_a": 1600.0,
+  "samples": [
+    {
+      "angle_deg": 0,
+      "response_pct": 0.04452668757848571,
+      "etch_a_per_cycle": 0.0017810675031394285
+    },
+    {
+      "angle_deg": 5,
+      "response_pct": 0.1699279365552657,
+      "etch_a_per_cycle": 0.0067971174622106275
+    },
+    {
+      "angle_deg": 10,
+      "response_pct": 0.5708401017279356,
+      "etch_a_per_cycle": 0.022833604069117427
+    },
+    {
+      "angle_deg": 15,
+      "response_pct": 1.687988414878991,
+      "etch_a_per_cycle": 0.06751953659515963
+    },
+    {
+      "angle_deg": 20,
+      "response_pct": 4.393693362340742,
+      "etch_a_per_cycle": 0.17574773449362968
+    },
+    {
+      "angle_deg": 25,
+      "response_pct": 10.066889977289781,
+      "etch_a_per_cycle": 0.40267559909159123
+    },
+    {
+      "angle_deg": 30,
+      "response_pct": 20.30327962511379,
+      "etch_a_per_cycle": 0.8121311850045516
+    },
+    {
+      "angle_deg": 35,
+      "response_pct": 36.0447788597821,
+      "etch_a_per_cycle": 1.441791154391284
+    },
+    {
+      "angle_deg": 40,
+      "response_pct": 56.327935050165344,
+      "etch_a_per_cycle": 2.253117402006614
+    },
+    {
+      "angle_deg": 45,
+      "response_pct": 77.48374288832494,
+      "etch_a_per_cycle": 3.0993497155329974
+    },
+    {
+      "angle_deg": 50,
+      "response_pct": 93.82155957191078,
+      "etch_a_per_cycle": 3.7528623828764314
+    },
+    {
+      "angle_deg": 55,
+      "response_pct": 100.0,
+      "etch_a_per_cycle": 4.0
+    },
+    {
+      "angle_deg": 60,
+      "response_pct": 93.82155957191078,
+      "etch_a_per_cycle": 3.7528623828764314
+    },
+    {
+      "angle_deg": 65,
+      "response_pct": 77.48374288832494,
+      "etch_a_per_cycle": 3.0993497155329974
+    },
+    {
+      "angle_deg": 70,
+      "response_pct": 56.327935050165344,
+      "etch_a_per_cycle": 2.253117402006614
+    },
+    {
+      "angle_deg": 75,
+      "response_pct": 36.0447788597821,
+      "etch_a_per_cycle": 1.441791154391284
+    },
+    {
+      "angle_deg": 80,
+      "response_pct": 20.30327962511379,
+      "etch_a_per_cycle": 0.8121311850045516
+    },
+    {
+      "angle_deg": 85,
+      "response_pct": 10.066889977289781,
+      "etch_a_per_cycle": 0.40267559909159123
+    },
+    {
+      "angle_deg": 90,
+      "response_pct": 4.393693362340742,
+      "etch_a_per_cycle": 0.17574773449362968
+    }
+  ]
+}

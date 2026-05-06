@@ -12,7 +12,12 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication, QDialog
 
-from gapsim.prediction import auto_anchor_spec, build_switch_state_from_prediction, recipe_with_switch_state
+from gapsim.prediction import (
+    auto_anchor_spec,
+    build_switch_state_from_prediction,
+    estimate_fast_prediction_params,
+    recipe_with_switch_state,
+)
 from gapsim.ui_qt.main_window import MainWindow
 from gapsim.ui_qt.prediction_worker import ParameterPredictionWorker
 from gapsim.ui_qt.switch_schema import default_switch_state
@@ -46,7 +51,7 @@ class MainWindowProjectResultsTest(unittest.TestCase):
 
                 win._current_path = project_dir / "SAVE.json"
                 win._last_run_dir = run_dir
-                win.right_stack.setCurrentWidget(win.panel_results)
+                win.right_stack.setCurrentWidget(win._panel_scroll_widgets["results"])
 
                 payload = win._build_project_payload()
 
@@ -108,7 +113,7 @@ class MainWindowProjectResultsTest(unittest.TestCase):
                 self.assertEqual(win._result_steps, [0, 1])
                 self.assertEqual(win._result_stage_ids, [1, 1])
                 self.assertEqual(win._result_x_window, (-12.0, 12.0))
-                self.assertEqual(win.right_stack.currentWidget(), win.panel_results)
+                self.assertEqual(win.right_stack.currentWidget(), win._panel_scroll_widgets["results"])
                 self.assertTrue(win.btn_open_dir.isEnabled())
                 self.assertTrue(win.btn_second_depo.isEnabled())
         finally:
@@ -149,7 +154,7 @@ class MainWindowProjectResultsTest(unittest.TestCase):
             self.assertEqual(win._result_steps, [0, 1])
             self.assertEqual(win._result_stage_ids, [1, 1])
             self.assertEqual(win._result_x_window, (-12.0, 12.0))
-            self.assertEqual(win.right_stack.currentWidget(), win.panel_results)
+            self.assertEqual(win.right_stack.currentWidget(), win._panel_scroll_widgets["results"])
             self.assertTrue(win.btn_second_depo.isEnabled())
         finally:
             win.close()
@@ -177,7 +182,7 @@ class MainWindowProjectResultsTest(unittest.TestCase):
             self.assertEqual(len(win._continuation_base_frames or []), 3)
             self.assertEqual(win._continuation_base_steps, [0, 5, 10])
             self.assertEqual(win.edit_case.text(), "caseA_p2")
-            self.assertEqual(win.right_stack.currentWidget(), win.panel_run)
+            self.assertEqual(win.right_stack.currentWidget(), win._panel_scroll_widgets["run"])
         finally:
             win.close()
 
@@ -380,6 +385,199 @@ class MainWindowProjectResultsTest(unittest.TestCase):
         self.assertAlmostEqual(preview_params["base_rate"], 2.5)
         self.assertGreaterEqual(preview_dt, 1.0)
         self.assertIn("n_steps", candidate)
+
+    def test_fast_prediction_estimates_gpc_from_top_thickness_with_fixed_cycles(self) -> None:
+        base_params = ParameterPredictionWorker(
+            pre_points=[],
+            post_points=[],
+            anchor_spec={},
+            base_recipe={},
+            base_switch_state=default_switch_state(),
+        )._base_params()
+        base_params["n_steps"] = 240.0
+        pre_points = [
+            (-220.0, 0.0),
+            (-120.0, 0.0),
+            (-80.0, 0.0),
+            (-35.0, -220.0),
+            (35.0, -220.0),
+            (80.0, 0.0),
+            (120.0, 0.0),
+            (220.0, 0.0),
+        ]
+        post_points = [
+            (-220.0, 12.0),
+            (-120.0, 12.0),
+            (-80.0, 12.0),
+            (-35.0, -180.0),
+            (35.0, -180.0),
+            (80.0, 12.0),
+            (120.0, 12.0),
+            (220.0, 12.0),
+        ]
+
+        result = estimate_fast_prediction_params(
+            pre_points,
+            post_points,
+            auto_anchor_spec(pre_points, post_points, division_count=5),
+            base_params,
+        )
+
+        self.assertIsNotNone(result)
+        params = result["params"]
+        self.assertEqual(params["n_steps"], 240.0)
+        self.assertAlmostEqual(params["base_rate"], 12.0 / 240.0, places=9)
+
+    def test_fast_prediction_maps_edge_deficit_and_bottom_excess(self) -> None:
+        base_params = ParameterPredictionWorker(
+            pre_points=[],
+            post_points=[],
+            anchor_spec={},
+            base_recipe={},
+            base_switch_state=default_switch_state(),
+        )._base_params()
+        base_params["n_steps"] = 240.0
+        pre_points = [
+            (-220.0, 0.0),
+            (-120.0, 0.0),
+            (-80.0, 0.0),
+            (-35.0, -220.0),
+            (35.0, -220.0),
+            (80.0, 0.0),
+            (120.0, 0.0),
+            (220.0, 0.0),
+        ]
+        post_points = [
+            (-220.0, 12.0),
+            (-120.0, 12.0),
+            (-80.0, 5.0),
+            (-35.0, -170.0),
+            (35.0, -170.0),
+            (80.0, 5.0),
+            (120.0, 12.0),
+            (220.0, 12.0),
+        ]
+
+        result = estimate_fast_prediction_params(
+            pre_points,
+            post_points,
+            auto_anchor_spec(pre_points, post_points, division_count=5),
+            base_params,
+        )
+
+        self.assertIsNotNone(result)
+        params = result["params"]
+        self.assertEqual(params["n_steps"], 240.0)
+        self.assertGreater(params["sputter_strength_pct"], 0.0)
+        self.assertGreater(params["redepo_efficiency_pct"], 0.0)
+
+    def test_prediction_worker_uses_fast_feature_path_with_single_candidate(self) -> None:
+        base_switch_state = default_switch_state()
+        base_switch_state["conformal"]["params"]["base_rate"] = 1.0
+        base_switch_state["conformal"]["params"]["n_steps"] = 240
+        recipe = {
+            "run": {"case_name": "caseA", "cycles": 240},
+            "model_base": {"base_rate": 1.0, "reparam_ds_a": 2.5},
+            "phase1_switches": base_switch_state,
+        }
+        pre_points = [
+            (-220.0, 0.0),
+            (-120.0, 0.0),
+            (-80.0, 0.0),
+            (-35.0, -220.0),
+            (35.0, -220.0),
+            (80.0, 0.0),
+            (120.0, 0.0),
+            (220.0, 0.0),
+        ]
+        post_points = [
+            (-220.0, 12.0),
+            (-120.0, 12.0),
+            (-80.0, 12.0),
+            (-35.0, -180.0),
+            (35.0, -180.0),
+            (80.0, 12.0),
+            (120.0, 12.0),
+            (220.0, 12.0),
+        ]
+        worker = ParameterPredictionWorker(
+            pre_points=pre_points,
+            post_points=post_points,
+            anchor_spec=auto_anchor_spec(pre_points, post_points, division_count=5),
+            base_recipe=recipe,
+            base_switch_state=base_switch_state,
+        )
+        results = []
+
+        def fake_evaluate(*, target_entries, params, candidate_index):
+            del target_entries, candidate_index
+            return {
+                "loss": 0.01,
+                "params": dict(params),
+                "switch_state": build_switch_state_from_prediction(base_switch_state, params),
+                "sim_post_points": list(post_points),
+                "preview_cycles": 20,
+                "preview_completed_step": 20,
+            }
+
+        worker.finished.connect(lambda result: results.append(result))
+        with mock.patch.object(worker, "_evaluate_candidate", side_effect=fake_evaluate) as evaluate, mock.patch.object(
+            worker,
+            "_sampling_prediction_result",
+        ) as sampling:
+            worker.run()
+
+        self.assertEqual(evaluate.call_count, 1)
+        sampling.assert_not_called()
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["prediction_mode"], "fast_feature")
+        self.assertEqual(results[0]["evaluated_candidates"], 1)
+        self.assertEqual(results[0]["predicted_switch_state"]["conformal"]["params"]["n_steps"], 240)
+        self.assertAlmostEqual(results[0]["best_params"]["base_rate"], 12.0 / 240.0, places=9)
+
+    def test_prediction_worker_falls_back_when_fast_top_thickness_is_invalid(self) -> None:
+        base_switch_state = default_switch_state()
+        base_switch_state["conformal"]["params"]["base_rate"] = 1.0
+        base_switch_state["conformal"]["params"]["n_steps"] = 240
+        recipe = {
+            "run": {"case_name": "caseA", "cycles": 240},
+            "model_base": {"base_rate": 1.0, "reparam_ds_a": 2.5},
+            "phase1_switches": base_switch_state,
+        }
+        pre_points = [(-120.0, 0.0), (-40.0, -220.0), (40.0, -220.0), (120.0, 0.0)]
+        post_points = list(pre_points)
+        worker = ParameterPredictionWorker(
+            pre_points=pre_points,
+            post_points=post_points,
+            anchor_spec=auto_anchor_spec(pre_points, post_points, division_count=5),
+            base_recipe=recipe,
+            base_switch_state=base_switch_state,
+        )
+        results = []
+        base_params = worker._base_params()
+        fallback_switch = build_switch_state_from_prediction(base_switch_state, base_params)
+        fallback_payload = {
+            "loss": 1.0,
+            "predicted_switch_state": fallback_switch,
+            "best_params": dict(base_params),
+            "top_candidates": [{"loss": 1.0, "params": dict(base_params)}],
+            "target_feature_count": 0,
+            "evaluated_candidates": 1,
+            "sim_post_points": list(post_points),
+            "prediction_mode": "sampling",
+        }
+
+        worker.finished.connect(lambda result: results.append(result))
+        with mock.patch.object(worker, "_sampling_prediction_result", return_value=fallback_payload) as sampling, mock.patch.object(
+            worker,
+            "_evaluate_candidate",
+        ) as evaluate:
+            worker.run()
+
+        sampling.assert_called_once()
+        evaluate.assert_not_called()
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["prediction_mode"], "sampling")
 
     def test_prediction_switch_state_and_recipe_include_sputter_and_redepo(self) -> None:
         base_state = default_switch_state()

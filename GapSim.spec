@@ -1,9 +1,12 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
 
 a = Analysis(
-    ['src\\gapsim\\ui_qt\\main_window.py'],
-    pathex=['src'],
+    [str(ROOT / 'src' / 'gapsim' / 'ui_qt' / 'main_window.py')],
+    pathex=[str(ROOT / 'src')],
     binaries=[],
     datas=[],
     hiddenimports=['pyclipper', 'PIL', 'PIL.Image', 'PIL.GifImagePlugin'],

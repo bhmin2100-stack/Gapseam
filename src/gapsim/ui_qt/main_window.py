@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QProgressBar,
+    QScrollArea,
     QToolBox,
     QPushButton,
     QSlider,
@@ -308,6 +309,7 @@ class MainWindow(QMainWindow):
 
         self._switch_state = default_switch_state()
         self._switch_widgets: Dict[str, Dict[str, Any]] = {}
+        self._panel_scroll_widgets: Dict[str, QScrollArea] = {}
         self._no_wheel_filter = _NoWheelEventFilter(self)
         self._prediction_post_points_raw: List[Point] = []
         self._prediction_post_points_smooth: List[Point] = []
@@ -472,7 +474,7 @@ class MainWindow(QMainWindow):
 
         self.right_stack = QStackedWidget()
         self.splitter.addWidget(self.right_stack)
-        self.right_stack.setMinimumWidth(280)
+        self.right_stack.setMinimumWidth(360)
         self.splitter.setStretchFactor(0, 4)
         self.splitter.setStretchFactor(1, 1)
         self.splitter.setChildrenCollapsible(False)
@@ -496,7 +498,9 @@ class MainWindow(QMainWindow):
         self.points_model = PointsTableModel()
         self.points_table = PointsTableView()
         self.points_table.setModel(self.points_model)
-        s_layout.addWidget(self.points_table)
+        self.points_table.setMinimumHeight(120)
+        self.points_table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        s_layout.addWidget(self.points_table, 1)
 
         overlay_row = QHBoxLayout()
         overlay_btn_col = QVBoxLayout()
@@ -575,7 +579,9 @@ class MainWindow(QMainWindow):
         self.smooth_table = PointsTableView()
         self.smooth_table.setModel(self.smooth_model)
         self.smooth_table.setEditTriggers(PointsTableView.NoEditTriggers)
-        sm_layout.addWidget(self.smooth_table)
+        self.smooth_table.setMinimumHeight(120)
+        self.smooth_table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        sm_layout.addWidget(self.smooth_table, 1)
 
         smoothing_next_row = QHBoxLayout()
         smoothing_next_row.addStretch(1)
@@ -695,9 +701,12 @@ class MainWindow(QMainWindow):
 
         self.group_switches = QGroupBox()
         switch_layout = QVBoxLayout(self.group_switches)
+        switch_layout.setContentsMargins(10, 10, 10, 10)
+        switch_layout.setSpacing(10)
         self.switch_toolbox = QToolBox()
+        self.switch_toolbox.setStyleSheet("QToolBox::tab { padding: 8px 12px; font-weight: 600; }")
         switch_layout.addWidget(self.switch_toolbox)
-        run_layout.addWidget(self.group_switches, 1)
+        run_layout.addWidget(self.group_switches)
 
         run_layout.addWidget(self.group_run_advanced)
 
@@ -839,11 +848,11 @@ class MainWindow(QMainWindow):
         frame_step_row.addStretch(1)
         res_layout.addLayout(frame_step_row)
 
-        self.right_stack.addWidget(self.panel_structure)
-        self.right_stack.addWidget(self.panel_smoothing)
-        self.right_stack.addWidget(self.panel_run)
-        self.right_stack.addWidget(self.panel_results)
-        self.right_stack.setCurrentWidget(self.panel_structure)
+        self.right_stack.addWidget(self._make_right_panel_scroll("structure", self.panel_structure))
+        self.right_stack.addWidget(self._make_right_panel_scroll("smoothing", self.panel_smoothing))
+        self.right_stack.addWidget(self._make_right_panel_scroll("run", self.panel_run))
+        self.right_stack.addWidget(self._make_right_panel_scroll("results", self.panel_results))
+        self.right_stack.setCurrentWidget(self._panel_scroll_widgets["structure"])
 
         root = QWidget()
         root_layout = QVBoxLayout(root)
@@ -865,6 +874,17 @@ class MainWindow(QMainWindow):
     def _setup_enum_editor(self, widget: QComboBox) -> None:
         widget.installEventFilter(self._no_wheel_filter)
 
+    def _make_right_panel_scroll(self, key: str, panel: QWidget) -> QScrollArea:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        scroll.setWidget(panel)
+        self._panel_scroll_widgets[key] = scroll
+        return scroll
+
     def _build_switch_accordion(self) -> None:
         while self.switch_toolbox.count() > 0:
             self.switch_toolbox.removeItem(0)
@@ -878,6 +898,8 @@ class MainWindow(QMainWindow):
             state = self._switch_state.get(sid, defaults.get(sid, {"enabled": False, "params": {}}))
             page = QWidget()
             page_layout = QVBoxLayout(page)
+            page_layout.setContentsMargins(14, 14, 14, 14)
+            page_layout.setSpacing(12)
 
             chk_enabled = QCheckBox(self._tr("switch.enabled"))
             chk_enabled.setChecked(bool(state.get("enabled", sw.get("default_enabled", False))))
@@ -885,6 +907,12 @@ class MainWindow(QMainWindow):
 
             form_host = QWidget()
             form = QFormLayout(form_host)
+            form.setContentsMargins(0, 0, 0, 0)
+            form.setSpacing(10)
+            form.setHorizontalSpacing(14)
+            form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+            form.setFormAlignment(Qt.AlignmentFlag.AlignTop)
+            form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
             controls: Dict[str, Any] = {}
             param_defs: Dict[str, Dict[str, Any]] = {}
             param_labels: Dict[str, QLabel] = {}
@@ -896,6 +924,9 @@ class MainWindow(QMainWindow):
                     continue
                 ptype = str(pdef.get("type", "float"))
                 label = QLabel(self._tr(str(pdef.get("label_key", pid))))
+                label.setWordWrap(True)
+                label.setMinimumWidth(150)
+                label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
                 tip_key = pdef.get("tooltip_key")
                 if isinstance(tip_key, str):
                     tooltip = self._tr(tip_key)
@@ -934,6 +965,9 @@ class MainWindow(QMainWindow):
                     w.setValue(float(state.get("params", {}).get(pid, pdef.get("default", 0.0))))
                     self._setup_float_editor(w)
 
+                if ptype != "bool":
+                    w.setMinimumWidth(170)
+                    w.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
                 if tooltip:
                     w.setToolTip(tooltip)
                 form.addRow(label, w)
@@ -955,7 +989,6 @@ class MainWindow(QMainWindow):
                 extras["reparam_info_value"] = info_value
 
             page_layout.addWidget(form_host)
-            page_layout.addStretch(1)
             form_host.setEnabled(chk_enabled.isChecked())
             chk_enabled.toggled.connect(form_host.setEnabled)
 
@@ -974,6 +1007,7 @@ class MainWindow(QMainWindow):
         self._sync_legacy_run_controls_from_switches()
         self._refresh_switch_dependency_ui()
         self._update_reparam_preset_ui()
+        self.group_switches.setMinimumHeight(self.group_switches.sizeHint().height())
 
     def _sputter_only_checked(self) -> bool:
         sputter = self._switch_widgets.get("sputter")
@@ -1628,7 +1662,7 @@ class MainWindow(QMainWindow):
             self.view.set_points_xy(self.points_model.get_points())
             self.view.fit_points()
             self.btn_structure_done.setVisible(True)
-            self.right_stack.setCurrentWidget(self.panel_structure)
+            self.right_stack.setCurrentWidget(self._panel_scroll_widgets["structure"])
         elif where == "smoothing":
             self._clear_continuation_context(clear_base=True)
             self.view.setVisible(True)
@@ -1641,7 +1675,7 @@ class MainWindow(QMainWindow):
             self._update_smoothing_limits()
             self.smooth_model.set_points([])
             self.btn_smoothing_next.setVisible(True)
-            self.right_stack.setCurrentWidget(self.panel_smoothing)
+            self.right_stack.setCurrentWidget(self._panel_scroll_widgets["smoothing"])
         elif where == "run":
             self.view.setVisible(True)
             self.view.set_reference_profiles_xy(self._continuation_reference_profiles())
@@ -1649,18 +1683,22 @@ class MainWindow(QMainWindow):
             self.view.set_points_xy(pts)
             self.view.set_point_radius_px(1 if len(pts) > 200 else 4)
             self._update_run_geometry_source_label()
-            self.right_stack.setCurrentWidget(self.panel_run)
+            self.right_stack.setCurrentWidget(self._panel_scroll_widgets["run"])
             self.view.fit_points()
             QTimer.singleShot(0, self._fit_current_non_result_view)
         elif where == "results":
             self.view.setVisible(False)
-            self.right_stack.setCurrentWidget(self.panel_results)
+            self.right_stack.setCurrentWidget(self._panel_scroll_widgets["results"])
             self._refresh_result_view()
 
         self._update_structure_edit_actions()
 
     def _fit_current_non_result_view(self) -> None:
-        if self.right_stack.currentWidget() in (self.panel_structure, self.panel_smoothing, self.panel_run):
+        if self.right_stack.currentWidget() in (
+            self._panel_scroll_widgets.get("structure"),
+            self._panel_scroll_widgets.get("smoothing"),
+            self._panel_scroll_widgets.get("run"),
+        ):
             self.view.fit_points()
 
     def showEvent(self, event) -> None:
@@ -1671,7 +1709,7 @@ class MainWindow(QMainWindow):
 
     # ---------------- structure edit + undo ----------------
     def _is_structure_panel_active(self) -> bool:
-        return self.right_stack.currentWidget() is self.panel_structure
+        return self.right_stack.currentWidget() is self._panel_scroll_widgets.get("structure")
 
     def _set_structure_points(self, pts: List[Point], *, mark_origin: bool, clear_undo: bool) -> None:
         self.document.set_points([(float(x), float(y)) for x, y in pts])
@@ -2287,6 +2325,7 @@ class MainWindow(QMainWindow):
         editor = PredictionPostEditorDialog(
             pre_points=pre_points,
             initial_post_points=initial_post_raw,
+            reset_points=self.points_model.get_points(),
             lang=self.lang,
             parent=self,
         )
@@ -2541,13 +2580,13 @@ class MainWindow(QMainWindow):
 
     def _current_panel_key(self) -> str:
         cur = self.right_stack.currentWidget()
-        if cur is self.panel_structure:
+        if cur is self._panel_scroll_widgets.get("structure"):
             return "structure"
-        if cur is self.panel_smoothing:
+        if cur is self._panel_scroll_widgets.get("smoothing"):
             return "smoothing"
-        if cur is self.panel_run:
+        if cur is self._panel_scroll_widgets.get("run"):
             return "run"
-        if cur is self.panel_results:
+        if cur is self._panel_scroll_widgets.get("results"):
             return "results"
         return "structure"
 
@@ -4352,7 +4391,7 @@ class MainWindow(QMainWindow):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if self.right_stack.currentWidget() is self.panel_results:
+        if self.right_stack.currentWidget() is self._panel_scroll_widgets.get("results"):
             self._refresh_result_view()
 
     def closeEvent(self, event):
@@ -4395,4 +4434,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

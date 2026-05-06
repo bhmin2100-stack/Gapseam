@@ -1,0 +1,435 @@
+from __future__ import annotations
+
+import os
+import unittest
+from pathlib import Path
+from unittest import mock
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from PySide6.QtCore import QPointF
+from PySide6.QtGui import QPixmap
+from PySide6.QtWidgets import QApplication
+
+from gapsim.emulation.trench_depo import TrenchDepoConfig, TrenchDepoResult, TrenchSweepResult
+from gapsim.emulation.trench_depo_ui import IonTransmissionEditor, SputterGaussianEditor, TrenchDepoWindow
+
+
+class SputterGaussianEditorTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._app = QApplication.instance() or QApplication([])
+
+    def test_peak_drag_updates_peak_angle_and_percent_without_changing_etch_cap(self) -> None:
+        editor = SputterGaussianEditor()
+        editor.resize(420, 140)
+        editor.set_etch_cap_a(12.0)
+        seen = []
+        editor.parametersChanged.connect(lambda amount, peak, width: seen.append((amount, peak, width)))
+
+        editor._apply_drag("peak", QPointF(editor._x_for_angle(70.0), editor._y_for_percent(25.0)))
+
+        peak_pct, peak, width = editor.parameters()
+        self.assertAlmostEqual(peak_pct, 25.0, places=6)
+        self.assertAlmostEqual(peak, 70.0, places=6)
+        self.assertAlmostEqual(width, 14.0, places=6)
+        self.assertAlmostEqual(editor._etch_cap_a, 12.0, places=6)
+        self.assertTrue(seen)
+
+    def test_side_handle_drag_updates_width(self) -> None:
+        editor = SputterGaussianEditor()
+        editor.resize(420, 140)
+        editor.set_parameters(8.0, 55.0, 14.0)
+
+        editor._apply_drag("right_width", QPointF(editor._x_for_angle(75.0), editor._y_for_percent(0.0)))
+
+        peak_pct, peak, width = editor.parameters()
+        self.assertAlmostEqual(peak_pct, 8.0, places=6)
+        self.assertAlmostEqual(peak, 55.0, places=6)
+        self.assertAlmostEqual(width, 20.0, places=6)
+
+    def test_editor_renders_curve(self) -> None:
+        editor = SputterGaussianEditor()
+        editor.resize(420, 140)
+        editor.set_parameters(8.0, 55.0, 14.0)
+        pixmap = QPixmap(editor.size())
+
+        editor.render(pixmap)
+
+        self.assertFalse(pixmap.isNull())
+
+    def test_ion_transmission_editor_drags_start_and_drop(self) -> None:
+        editor = IonTransmissionEditor()
+        editor.resize(420, 170)
+        seen = []
+        editor.parametersChanged.connect(
+            lambda start, end, drop, floor, curve: seen.append((start, end, drop, floor, curve))
+        )
+
+        editor._apply_drag("start", QPointF(editor._x_for_factor(1.0), editor._y_for_depth_pct(45.0)))
+        start_depth, end_depth, drop, floor, curve = editor.parameters()
+        self.assertAlmostEqual(start_depth, 45.0, places=6)
+        self.assertAlmostEqual(end_depth, 100.0, places=6)
+        self.assertAlmostEqual(drop, 100.0, places=6)
+        self.assertAlmostEqual(floor, 0.0, places=6)
+        self.assertAlmostEqual(curve, 1.0, places=6)
+
+        editor._apply_drag("strength", QPointF(editor._x_for_factor(1.0), editor._y_for_depth_pct(82.0)))
+        self.assertAlmostEqual(editor.parameters()[1], 82.0, places=6)
+        self.assertAlmostEqual(editor.parameters()[2], 0.0, places=6)
+        self.assertTrue(seen)
+
+    def test_ion_transmission_editor_renders_minimap(self) -> None:
+        editor = IonTransmissionEditor()
+        editor.resize(420, 170)
+        editor.set_parameters(20.0, 90.0, 65.0, 15.0, 1.4)
+        pixmap = QPixmap(editor.size())
+
+        editor.render(pixmap)
+
+        self.assertFalse(pixmap.isNull())
+
+    def test_window_keeps_spinboxes_and_curve_editor_in_sync(self) -> None:
+        result = TrenchDepoResult(
+            frame_steps=[0],
+            frame_profiles=[[(0.0, 0.0), (1.0, 0.0)]],
+            frame_voids=[[]],
+            final_profile=[(0.0, 0.0), (1.0, 0.0)],
+            meta={"cycles": 0},
+        )
+        with (
+            mock.patch("gapsim.emulation.trench_depo_ui.run_trench_depo", return_value=result),
+            mock.patch("gapsim.emulation.trench_depo_ui.QTimer.singleShot"),
+        ):
+            window = TrenchDepoWindow()
+
+        try:
+            window.set_active_emulator_number(1, run=False)
+            window.spin_sputter_peak.setValue(62.0)
+            self.assertAlmostEqual(window.sputter_curve_editor.parameters()[1], 62.0, places=6)
+
+            window.spin_sputter_strength.setValue(9.5)
+            self.assertAlmostEqual(window.sputter_curve_editor._etch_cap_a, 9.5, places=6)
+
+            window.apply_sputter_curve_parameters(75.0, 48.0, 22.0)
+            self.assertAlmostEqual(window.spin_sputter_strength.value(), 9.5, places=6)
+            self.assertAlmostEqual(window.spin_sputter_peak_pct.value(), 75.0, places=6)
+            self.assertAlmostEqual(window.spin_sputter_peak.value(), 48.0, places=6)
+            self.assertAlmostEqual(window.spin_sputter_width.value(), 22.0, places=6)
+            self.assertAlmostEqual(window.sputter_curve_editor.parameters()[0], 75.0, places=6)
+            self.assertAlmostEqual(window.current_config().sputter_strength_a_per_cycle, 9.5, places=6)
+            self.assertAlmostEqual(window.current_config().sputter_peak_pct, 75.0, places=6)
+        finally:
+            window.close()
+
+    def test_emulator_two_shows_ion_transmission_minimap_controls(self) -> None:
+        result = TrenchDepoResult(
+            frame_steps=[0],
+            frame_profiles=[[(0.0, 0.0), (1.0, 0.0)]],
+            frame_voids=[[]],
+            final_profile=[(0.0, 0.0), (1.0, 0.0)],
+            meta={"cycles": 0},
+        )
+        with (
+            mock.patch("gapsim.emulation.trench_depo_ui.run_trench_depo", return_value=result),
+            mock.patch("gapsim.emulation.trench_depo_ui.QTimer.singleShot"),
+        ):
+            window = TrenchDepoWindow()
+
+        try:
+            window.set_active_emulator_number(2, run=False)
+
+            self.assertTrue(window._active_emulator_supports_sputter())
+            self.assertTrue(window._active_emulator_supports_ion_transmission())
+            self.assertFalse(window._active_emulator_supports_reflected_ion())
+            self.assertEqual(window.chk_sputter.text(), "Etch enabled")
+            self.assertEqual(window.lbl_etch_section.text(), "Etch switch (1번 direct + 2번 modifier)")
+            self.assertFalse(window.ion_map_group.isHidden())
+            self.assertTrue(all(not widget.isHidden() for widget in window._ion_transmission_widgets))
+
+            split_keys = {
+                window.cmb_split_parameter.itemData(idx)
+                for idx in range(window.cmb_split_parameter.count())
+            }
+            self.assertIn("ion_transmission_start_depth_pct", split_keys)
+            self.assertIn("ion_transmission_end_depth_pct", split_keys)
+            self.assertIn("ion_transmission_decay_strength_pct", split_keys)
+            self.assertIn("ion_transmission_floor_pct", split_keys)
+            self.assertIn("ion_transmission_curve_power", split_keys)
+            self.assertIn("ion_transmission_aperture_shadow_pct", split_keys)
+            self.assertIn("ion_transmission_lateral_shadow_pct", split_keys)
+            self.assertIn("ion_transmission_edge_shadow_pct", split_keys)
+
+            window.spin_ion_start_depth.setValue(32.5)
+            self.assertAlmostEqual(window.ion_transmission_editor.parameters()[0], 32.5, places=6)
+            window.spin_ion_end_depth.setValue(88.0)
+            self.assertAlmostEqual(window.ion_transmission_editor.parameters()[1], 88.0, places=6)
+            window.slider_ion_aperture_shadow.setValue(40)
+            window.slider_ion_lateral_shadow.setValue(30)
+            window.slider_ion_edge_shadow.setValue(20)
+            self.assertEqual(window.lbl_ion_aperture_shadow_value.text(), "40%")
+
+            window.apply_ion_transmission_editor_parameters(25.0, 80.0, 70.0, 12.5, 1.8)
+            config = window.current_config()
+            self.assertTrue(config.ion_transmission_enabled)
+            self.assertAlmostEqual(config.ion_transmission_start_depth_pct, 25.0, places=6)
+            self.assertAlmostEqual(config.ion_transmission_end_depth_pct, 80.0, places=6)
+            self.assertAlmostEqual(config.ion_transmission_decay_strength_pct, 70.0, places=6)
+            self.assertAlmostEqual(config.ion_transmission_floor_pct, 12.5, places=6)
+            self.assertAlmostEqual(config.ion_transmission_curve_power, 1.8, places=6)
+            self.assertAlmostEqual(config.ion_transmission_aperture_shadow_pct, 40.0, places=6)
+            self.assertAlmostEqual(config.ion_transmission_lateral_shadow_pct, 30.0, places=6)
+            self.assertAlmostEqual(config.ion_transmission_edge_shadow_pct, 20.0, places=6)
+
+            window.chk_sputter.setChecked(False)
+            config = window.current_config()
+            self.assertFalse(config.sputter_enabled)
+            self.assertFalse(config.ion_transmission_enabled)
+            self.assertFalse(window.spin_ion_start_depth.isEnabled())
+        finally:
+            window.close()
+
+    def test_emulator_three_inherits_sputter_controls_and_adds_reflected_controls(self) -> None:
+        result = TrenchDepoResult(
+            frame_steps=[0],
+            frame_profiles=[[(0.0, 0.0), (1.0, 0.0)]],
+            frame_voids=[[]],
+            final_profile=[(0.0, 0.0), (1.0, 0.0)],
+            meta={"cycles": 0},
+        )
+        with (
+            mock.patch("gapsim.emulation.trench_depo_ui.run_trench_depo", return_value=result),
+            mock.patch("gapsim.emulation.trench_depo_ui.QTimer.singleShot"),
+        ):
+            window = TrenchDepoWindow()
+
+        try:
+            window.set_active_emulator_number(3, run=False)
+
+            self.assertTrue(window._active_emulator_supports_sputter())
+            self.assertTrue(window._active_emulator_supports_reflected_ion())
+            self.assertFalse(window._active_emulator_supports_ion_transmission())
+            self.assertFalse(window.gaussian_group.isHidden())
+            self.assertFalse(window.btn_compare_gapsim_angle.isHidden())
+            self.assertEqual(window.btn_compare_gapsim_angle.text(), "Compare Emulator 01")
+            self.assertEqual(window.lbl_etch_section.text(), "Etch switch (1번 direct + 3번 reflected)")
+            self.assertEqual(window.lbl_sputter_section.text(), "기존 1번 Direct sputter kernel")
+            self.assertEqual(window.lbl_reflected_section.text(), "3번 신규 Reflected ion")
+            self.assertTrue(all(not widget.isHidden() for widget in window._sputter_widgets))
+            self.assertTrue(all(not widget.isHidden() for widget in window._reflected_ion_widgets))
+            self.assertTrue(all(widget.isHidden() for widget in window._ion_transmission_widgets))
+
+            config = window.current_config()
+            self.assertTrue(config.sputter_enabled)
+            self.assertTrue(config.reflected_ion_enabled)
+            self.assertAlmostEqual(config.sputter_strength_a_per_cycle, 4.0, places=6)
+            self.assertAlmostEqual(config.sputter_peak_angle_deg, 55.0, places=6)
+            self.assertAlmostEqual(config.sputter_width_deg, 14.0, places=6)
+            self.assertAlmostEqual(config.reflected_ion_strength_pct, 35.0, places=6)
+
+            split_keys = {
+                window.cmb_split_parameter.itemData(idx)
+                for idx in range(window.cmb_split_parameter.count())
+            }
+            self.assertIn("sputter_peak_angle_deg", split_keys)
+            self.assertIn("sputter_width_deg", split_keys)
+            self.assertIn("reflected_ion_strength_pct", split_keys)
+            self.assertIn("reflected_ion_microtrench_weight", split_keys)
+        finally:
+            window.close()
+
+    def test_emulator_four_is_redeposition_prep_and_compares_to_emulator_one(self) -> None:
+        result = TrenchDepoResult(
+            frame_steps=[0],
+            frame_profiles=[[(0.0, 0.0), (1.0, 0.0)]],
+            frame_voids=[[]],
+            final_profile=[(0.0, 0.0), (1.0, 0.0)],
+            meta={"cycles": 0},
+        )
+        with (
+            mock.patch("gapsim.emulation.trench_depo_ui.run_trench_depo", return_value=result),
+            mock.patch("gapsim.emulation.trench_depo_ui.QTimer.singleShot"),
+        ):
+            window = TrenchDepoWindow()
+
+        try:
+            window.set_active_emulator_number(4, run=False)
+
+            self.assertTrue(window._active_emulator_supports_sputter())
+            self.assertTrue(window._active_emulator_supports_redeposition())
+            self.assertFalse(window._active_emulator_supports_ion_transmission())
+            self.assertFalse(window._active_emulator_supports_reflected_ion())
+            self.assertFalse(window.gaussian_group.isHidden())
+            self.assertEqual(window.btn_compare_gapsim_angle.text(), "Compare Emulator 01")
+            self.assertEqual(window.lbl_etch_section.text(), "Etch switch (1번 direct + 4번 redepo)")
+            self.assertEqual(window.lbl_sputter_section.text(), "기존 1번 Direct sputter kernel")
+            self.assertTrue(all(not widget.isHidden() for widget in window._sputter_widgets))
+            self.assertTrue(all(not widget.isHidden() for widget in window._redeposition_widgets))
+            self.assertTrue(all(widget.isHidden() for widget in window._ion_transmission_widgets))
+            self.assertTrue(all(widget.isHidden() for widget in window._reflected_ion_widgets))
+
+            config = window.current_config()
+            self.assertTrue(config.sputter_enabled)
+            self.assertTrue(config.redepo_enabled)
+            self.assertEqual(config.redepo_source_model, "model1")
+            self.assertAlmostEqual(config.redepo_efficiency_pct, 25.0, places=6)
+            self.assertFalse(config.ion_transmission_enabled)
+            self.assertFalse(config.reflected_ion_enabled)
+            self.assertAlmostEqual(config.sputter_strength_a_per_cycle, 4.0, places=6)
+
+            split_keys = {
+                window.cmb_split_parameter.itemData(idx)
+                for idx in range(window.cmb_split_parameter.count())
+            }
+            self.assertIn("sputter_strength_a_per_cycle", split_keys)
+            self.assertIn("sputter_peak_angle_deg", split_keys)
+            self.assertIn("redepo_efficiency_pct", split_keys)
+            self.assertIn("redepo_emit_power", split_keys)
+            self.assertIn("redepo_distance_power", split_keys)
+            self.assertNotIn("ion_transmission_decay_strength_pct", split_keys)
+            self.assertNotIn("reflected_ion_strength_pct", split_keys)
+        finally:
+            window.close()
+
+    def test_window_starts_on_emulator_zero_with_only_existing_toggles(self) -> None:
+        result = TrenchDepoResult(
+            frame_steps=[0],
+            frame_profiles=[[(0.0, 0.0), (1.0, 0.0)]],
+            frame_voids=[[]],
+            final_profile=[(0.0, 0.0), (1.0, 0.0)],
+            meta={"cycles": 0},
+        )
+        with (
+            mock.patch("gapsim.emulation.trench_depo_ui.run_trench_depo", return_value=result),
+            mock.patch("gapsim.emulation.trench_depo_ui.QTimer.singleShot"),
+        ):
+            window = TrenchDepoWindow()
+
+        try:
+            self.assertEqual(window.active_emulator_number(), 0)
+            self.assertEqual(window._emulator_numbers, [0, 1, 2, 3, 4])
+            self.assertEqual(sorted(window._emulator_buttons), [0, 1, 2, 3, 4])
+            self.assertTrue(window._emulator_buttons[0].isChecked())
+            self.assertFalse(window._emulator_buttons[1].isChecked())
+            self.assertFalse(window._emulator_buttons[2].isChecked())
+            self.assertFalse(window._emulator_buttons[3].isChecked())
+            self.assertFalse(window._emulator_buttons[4].isChecked())
+        finally:
+            window.close()
+
+    def test_window_can_create_next_emulator_toggle(self) -> None:
+        result = TrenchDepoResult(
+            frame_steps=[0],
+            frame_profiles=[[(0.0, 0.0), (1.0, 0.0)]],
+            frame_voids=[[]],
+            final_profile=[(0.0, 0.0), (1.0, 0.0)],
+            meta={"cycles": 0},
+        )
+        with (
+            mock.patch("gapsim.emulation.trench_depo_ui.run_trench_depo", return_value=result),
+            mock.patch("gapsim.emulation.trench_depo_ui.ensure_emulator_research_slot") as ensure_slot,
+            mock.patch("gapsim.emulation.trench_depo_ui.save_created_emulator_numbers") as save_numbers,
+            mock.patch("gapsim.emulation.trench_depo_ui.QTimer.singleShot"),
+        ):
+            window = TrenchDepoWindow()
+
+            try:
+                window.create_new_emulator()
+
+                self.assertEqual(window.active_emulator_number(), 5)
+                self.assertEqual(window._emulator_numbers, [0, 1, 2, 3, 4, 5])
+                self.assertTrue(window._emulator_buttons[5].isChecked())
+                ensure_slot.assert_called_once_with(5)
+                save_numbers.assert_called_once_with([0, 1, 2, 3, 4, 5])
+            finally:
+                window.close()
+
+    def test_emulator_toggle_does_not_run_preview_until_run_button(self) -> None:
+        result = TrenchDepoResult(
+            frame_steps=[0],
+            frame_profiles=[[(0.0, 0.0), (1.0, 0.0)]],
+            frame_voids=[[]],
+            final_profile=[(0.0, 0.0), (1.0, 0.0)],
+            meta={"cycles": 0},
+        )
+        with (
+            mock.patch("gapsim.emulation.trench_depo_ui.run_trench_depo", return_value=result) as run_depo,
+            mock.patch("gapsim.emulation.trench_depo_ui.QTimer.singleShot"),
+        ):
+            window = TrenchDepoWindow()
+
+            try:
+                self.assertEqual(run_depo.call_count, 0)
+
+                window.set_active_emulator_number(1)
+
+                self.assertEqual(window.active_emulator_number(), 1)
+                self.assertEqual(run_depo.call_count, 0)
+                self.assertFalse(window._emulator_run_timer.isActive())
+
+                window.set_active_emulator_number(0)
+
+                self.assertEqual(window.active_emulator_number(), 0)
+                self.assertEqual(run_depo.call_count, 0)
+
+                window.run_emulation(save_artifacts=False)
+
+                self.assertEqual(run_depo.call_count, 1)
+            finally:
+                window._emulator_run_timer.stop()
+                window.close()
+
+    def test_window_elides_long_saved_run_name(self) -> None:
+        result = TrenchDepoResult(
+            frame_steps=[0],
+            frame_profiles=[[(0.0, 0.0), (1.0, 0.0)]],
+            frame_voids=[[]],
+            final_profile=[(0.0, 0.0), (1.0, 0.0)],
+            meta={"cycles": 0},
+        )
+        with (
+            mock.patch("gapsim.emulation.trench_depo_ui.run_trench_depo", return_value=result),
+            mock.patch("gapsim.emulation.trench_depo_ui.QTimer.singleShot"),
+        ):
+            window = TrenchDepoWindow()
+
+        try:
+            run_dir = Path("/tmp/20260504_123456_트렌치증착_999사이클_123.456A_아주_긴_요청사항_이름_패널을_밀어내지_않도록_줄임")
+            window._set_run_dir_label(run_dir)
+
+            self.assertIn("...", window.lbl_run_dir.text())
+            self.assertNotIn(str(run_dir), window.lbl_run_dir.text())
+            self.assertEqual(window.lbl_run_dir.toolTip(), str(run_dir.resolve()))
+        finally:
+            window.close()
+
+    def test_loading_replay_opens_saved_split_group(self) -> None:
+        result = TrenchDepoResult(
+            frame_steps=[0],
+            frame_profiles=[[(0.0, 0.0), (1.0, 0.0)]],
+            frame_voids=[[]],
+            final_profile=[(0.0, 0.0), (1.0, 0.0)],
+            meta={"cycles": 0},
+        )
+        split_cases = [
+            TrenchSweepResult("angstrom_per_cycle", "Depo A/CYC", 5.0, TrenchDepoConfig(cycles=0), result),
+            TrenchSweepResult("angstrom_per_cycle", "Depo A/CYC", 10.0, TrenchDepoConfig(cycles=0), result),
+        ]
+        with (
+            mock.patch("gapsim.emulation.trench_depo_ui.run_trench_depo", return_value=result),
+            mock.patch("gapsim.emulation.trench_depo_ui.load_trench_depo_run", return_value=(TrenchDepoConfig(cycles=0), result, "note")),
+            mock.patch("gapsim.emulation.trench_depo_ui.load_trench_depo_split_group", return_value=split_cases),
+            mock.patch("gapsim.emulation.trench_depo_ui.QTimer.singleShot"),
+        ):
+            window = TrenchDepoWindow()
+            try:
+                window.load_replay_json("/tmp/replay.json")
+
+                self.assertEqual(len(window._split_windows), 1)
+                self.assertEqual(len(window._split_windows[0]._cases), 2)
+            finally:
+                window.close()
+
+
+if __name__ == "__main__":
+    unittest.main()

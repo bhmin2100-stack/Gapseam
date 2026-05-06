@@ -528,6 +528,230 @@ def feature_loss(
     return total + missing_penalty
 
 
+def _clamp_float(value: float, lo: float, hi: float) -> float:
+    return max(float(lo), min(float(hi), float(value)))
+
+
+def _finite_median(values: List[float]) -> Optional[float]:
+    vals: List[float] = []
+    for value in values:
+        try:
+            fv = float(value)
+        except Exception:
+            continue
+        if math.isfinite(fv):
+            vals.append(fv)
+    if not vals:
+        return None
+    vals.sort()
+    mid = len(vals) // 2
+    if len(vals) % 2 == 1:
+        return float(vals[mid])
+    return 0.5 * (float(vals[mid - 1]) + float(vals[mid]))
+
+
+def _vertical_delta_at_x(pre: List[Point], post: List[Point], x: float) -> Optional[float]:
+    pre_y = _vertical_sample_y(pre, float(x))
+    post_y = _vertical_sample_y(post, float(x))
+    if pre_y is None or post_y is None:
+        return None
+    return float(post_y) - float(pre_y)
+
+
+def _entry_float(entries: List[Dict[str, Any]], name: str) -> Optional[float]:
+    for entry in entries:
+        if str(entry.get("name")) != name:
+            continue
+        value = entry.get("value")
+        if value is None:
+            return None
+        try:
+            fv = float(value)
+        except Exception:
+            return None
+        return fv if math.isfinite(fv) else None
+    return None
+
+
+def _sidewall_thickness_samples(
+    pre: List[Point],
+    post: List[Point],
+    anchor: Dict[str, Any],
+) -> List[Tuple[float, float, float]]:
+    center_x = 0.5 * (float(anchor["left_lip"]["x"]) + float(anchor["right_lip"]["x"]))
+    lip_y = 0.5 * (float(anchor["left_lip"]["y"]) + float(anchor["right_lip"]["y"]))
+    bottom_y = float(anchor["bottom"]["y"])
+    span = max(1.0, abs(lip_y - bottom_y))
+    out: List[Tuple[float, float, float]] = []
+    for section in anchor.get("sections", []):
+        if not isinstance(section, dict) or not section.get("enabled", True):
+            continue
+        try:
+            y = float(section["y"])
+        except Exception:
+            continue
+        pre_left, pre_right = _wall_positions(pre, y, center_x)
+        post_left, post_right = _wall_positions(post, y, center_x)
+        values: List[float] = []
+        if pre_left is not None and post_left is not None:
+            values.append(float(post_left) - float(pre_left))
+        if pre_right is not None and post_right is not None:
+            values.append(float(pre_right) - float(post_right))
+        thickness = _finite_median(values)
+        if thickness is None:
+            continue
+        depth_fraction = _clamp_float(abs(lip_y - y) / span, 0.0, 1.0)
+        out.append((float(depth_fraction), float(y), float(thickness)))
+    out.sort(key=lambda item: item[0])
+    return out
+
+
+def _estimate_inhibition_from_sidewall(
+    samples: List[Tuple[float, float, float]],
+    *,
+    top_thickness: float,
+    source_distance_decay_pct: float,
+    depth: float,
+    fallback_lambda_a: float,
+) -> Tuple[float, float]:
+    if top_thickness <= _EPS or not samples:
+        return 0.0, max(1.0, float(fallback_lambda_a))
+
+    min_factor = 1.0 - (_clamp_float(source_distance_decay_pct, 0.0, 100.0) / 100.0)
+    residuals: List[Tuple[float, float]] = []
+    for depth_fraction, _y, thickness in samples:
+        if depth_fraction > 0.45:
+            continue
+        observed = _clamp_float(float(thickness) / max(top_thickness, _EPS), 0.0, 1.5)
+        predicted = _clamp_float(math.pow(max(min_factor, 1e-6), max(0.0, depth_fraction)), 0.0, 1.0)
+        residual = max(0.0, predicted - observed)
+        if residual > 0.0:
+            residuals.append((float(depth_fraction), float(residual)))
+
+    i_max = max((residual for _depth_fraction, residual in residuals), default=0.0)
+    if i_max < 0.05:
+        return 0.0, max(1.0, float(fallback_lambda_a))
+
+    lambda_candidates: List[float] = []
+    for depth_fraction, residual in residuals:
+        if residual <= _EPS or residual >= i_max - _EPS:
+            continue
+        d = max(1.0, float(depth_fraction) * max(1.0, float(depth)))
+        try:
+            lambda_candidates.append(-d / math.log(max(1e-6, residual / max(i_max, _EPS))))
+        except ValueError:
+            continue
+    lambda_a = _finite_median(lambda_candidates)
+    if lambda_a is None:
+        lambda_a = max(10.0, float(depth) * 0.25)
+    return _clamp_float(i_max, 0.0, 0.95), _clamp_float(lambda_a, 1.0, 1_000_000.0)
+
+
+def estimate_fast_prediction_params(
+    pre_points: List[Point],
+    post_points: List[Point],
+    anchor_spec: Dict[str, Any],
+    base_params: Dict[str, float],
+) -> Optional[Dict[str, Any]]:
+    pre = _as_points(pre_points)
+    post = _as_points(post_points)
+    if len(pre) < 2 or len(post) < 2:
+        return None
+
+    anchor = sanitize_anchor_spec(pre, post, anchor_spec)
+    cycles = max(1, int(round(float(base_params.get("n_steps", base_params.get("cycles", 200.0)) or 200.0))))
+    bounds = _profile_bounds(pre + post)
+    depth = max(1.0, float(bounds["top_y"]) - float(anchor["bottom"]["y"]))
+    opening = max(1.0, float(anchor["right_lip"]["x"]) - float(anchor["left_lip"]["x"]))
+
+    top_xs = [float(anchor["top"]["left_x"]), float(anchor["top"]["right_x"])]
+    top_deltas = [delta for x in top_xs if (delta := _vertical_delta_at_x(pre, post, x)) is not None]
+    top_thickness = _finite_median(top_deltas)
+    if top_thickness is None or top_thickness <= _EPS:
+        return None
+
+    base_rate = float(top_thickness) / float(cycles)
+    lip_xs = [float(anchor["left_lip"]["x"]), float(anchor["right_lip"]["x"])]
+    lip_deltas = [delta for x in lip_xs if (delta := _vertical_delta_at_x(pre, post, x)) is not None]
+    lip_thickness = _finite_median(lip_deltas)
+    if lip_thickness is None:
+        lip_thickness = float(top_thickness)
+
+    edge_deficit = max(0.0, float(top_thickness) - float(lip_thickness))
+    if edge_deficit < max(1e-6, float(top_thickness) * 0.02):
+        edge_deficit = 0.0
+
+    # The engine applies sputter as strength * local deposition * angular/visibility terms,
+    # with a 3x response gain in mixed deposition/sputter mode.
+    aspect = _clamp_float(opening / max(depth, 1.0), 0.0, 1.0)
+    sputter_geometry_factor = _clamp_float(0.35 + (0.65 * aspect), 0.15, 1.0)
+    sputter_strength_pct = 0.0
+    if edge_deficit > 0.0:
+        sputter_strength_pct = _clamp_float(
+            (edge_deficit / max(float(top_thickness), _EPS)) * (100.0 / (3.0 * sputter_geometry_factor)),
+            0.0,
+            10_000.0,
+        )
+
+    side_samples = _sidewall_thickness_samples(pre, post, anchor)
+    side_values = [max(0.0, thickness) for _t, _y, thickness in side_samples]
+    lower_side_values = [max(0.0, thickness) for t, _y, thickness in side_samples if t >= 0.55]
+    lower_side = _finite_median(lower_side_values)
+    if lower_side is None:
+        lower_side = _finite_median(side_values)
+    if lower_side is None:
+        lower_side = float(top_thickness)
+    lower_ratio = _clamp_float(float(lower_side) / max(float(top_thickness), _EPS), 0.0, 1.25)
+    source_distance_decay_pct = _clamp_float((1.0 - min(1.0, lower_ratio)) * 100.0, 0.0, 100.0)
+    if source_distance_decay_pct < 1.0:
+        source_distance_decay_pct = 0.0
+
+    i_max, lambda_a = _estimate_inhibition_from_sidewall(
+        side_samples,
+        top_thickness=float(top_thickness),
+        source_distance_decay_pct=source_distance_decay_pct,
+        depth=depth,
+        fallback_lambda_a=float(base_params.get("lambda_a", 500.0) or 500.0),
+    )
+
+    entries = build_feature_entries(pre, post, anchor)
+    bottom_rise = _entry_float(entries, "bottom_rise") or 0.0
+    bottom_fill = _entry_float(entries, "bottom_fill") or 0.0
+    expected_bottom = max(0.0, min(float(top_thickness), float(lower_side)))
+    bottom_excess = max(
+        0.0,
+        float(bottom_rise) - expected_bottom,
+        (float(bottom_fill) * 0.5) - expected_bottom,
+    )
+    redepo_efficiency_pct = 0.0
+    if edge_deficit > 0.0 and bottom_excess > max(1e-6, float(top_thickness) * 0.02):
+        redepo_efficiency_pct = _clamp_float((bottom_excess / max(edge_deficit, _EPS)) * 100.0, 0.0, 100.0)
+
+    params = {
+        "base_rate": float(base_rate),
+        "n_steps": float(cycles),
+        "source_onset_width_a": 0.0,
+        "source_decay_pct": 0.0,
+        "source_distance_decay_pct": float(source_distance_decay_pct),
+        "sputter_strength_pct": float(sputter_strength_pct),
+        "redepo_efficiency_pct": float(redepo_efficiency_pct),
+        "redepo_lobe_sigma_deg": _clamp_float(float(base_params.get("redepo_lobe_sigma_deg", 20.0) or 20.0), 1.0, 60.0),
+        "i_max": float(i_max),
+        "lambda_a": float(lambda_a),
+    }
+    diagnostics = {
+        "cycles": int(cycles),
+        "top_thickness": float(top_thickness),
+        "lip_thickness": float(lip_thickness),
+        "edge_deficit": float(edge_deficit),
+        "bottom_excess": float(bottom_excess),
+        "lower_sidewall_ratio": float(lower_ratio),
+        "sidewall_sample_count": int(len(side_samples)),
+        "sputter_geometry_factor": float(sputter_geometry_factor),
+    }
+    return {"params": params, "diagnostics": diagnostics}
+
+
 def deep_copy_switch_state(state: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
     defaults = default_switch_state()
     out = copy.deepcopy(defaults)

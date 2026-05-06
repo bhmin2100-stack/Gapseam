@@ -1,0 +1,145 @@
+{
+  "decision": "discard_model_03_reflected_ion_for_now",
+  "reason": "Shape impact is weak at sane parameters; visible settings need aggressive reflected ion weights while adding compute overhead.",
+  "configs": {
+    "model_01_direct": {
+      "sputter_strength_a_per_cycle": 4.0,
+      "peak_pct": 100.0,
+      "peak_angle_deg": 55.0,
+      "width_deg": 14.0
+    },
+    "model_03_default": {
+      "reflect_pct": 35.0,
+      "bowing": 0.75,
+      "microtrench": 1.0,
+      "range_a": 1600.0
+    },
+    "model_03_visible_demo": {
+      "reflect_pct": 90.0,
+      "bowing": 1.7,
+      "microtrench": 1.8,
+      "range_a": 900.0
+    }
+  },
+  "results": {
+    "model_01_direct": {
+      "timings_s": [
+        8.842280709002807,
+        8.882710417005,
+        8.865561458995217
+      ],
+      "mean_s": 8.863517528334341,
+      "cycles": 20,
+      "points": 2615,
+      "sputter_active": true,
+      "reflected_ion_active": false,
+      "reflected_direct_ratio_last": 0.0,
+      "debug_summary_reflected": {
+        "top": 0.0,
+        "mid_sidewall": 0.0,
+        "bottom_center": 0.0,
+        "bottom_corner": 0.0
+      }
+    },
+    "model_03_default": {
+      "timings_s": [
+        10.768943457995192,
+        10.818234458005463,
+        11.128905459001544
+      ],
+      "mean_s": 10.905361125000733,
+      "cycles": 20,
+      "points": 2637,
+      "sputter_active": true,
+      "reflected_ion_active": true,
+      "reflected_direct_ratio_last": 0.08204022813532004,
+      "debug_summary_reflected": {
+        "top": 4.4619125011901886e-05,
+        "mid_sidewall": 0.013926691515789178,
+        "bottom_center": 0.01380505677046139,
+        "bottom_corner": 0.01380505677046139
+      },
+      "vs_model_01": {
+        "sample_xs": [
+          -520,
+          -420,
+          -320,
+          -220,
+          -120,
+          0,
+          120,
+          220,
+          320,
+          420,
+          520
+        ],
+        "deltas_a": [
+          0.003966255779971561,
+          0.00437097575752432,
+          0.004775695735048657,
+          -0.11000977551671554,
+          -0.13821765259891095,
+          -27.83242779996158,
+          -0.14190473041907126,
+          -0.10789507116126629,
+          -0.004340147885670831,
+          -0.003972338742784132,
+          -0.003604529599954276
+        ],
+        "max_abs_delta_a": 27.83242779996158,
+        "mean_abs_delta_a": 2.577771361196227
+      },
+      "slowdown_vs_model_01_pct": 23.036493019155802
+    },
+    "model_03_visible_demo": {
+      "timings_s": [
+        12.44523920899519,
+        16.016819500000565,
+        11.980423125001835
+      ],
+      "mean_s": 13.480827277999197,
+      "cycles": 20,
+      "points": 2766,
+      "sputter_active": true,
+      "reflected_ion_active": true,
+      "reflected_direct_ratio_last": 0.3584425467759357,
+      "debug_summary_reflected": {
+        "top": 0.00014063808296993786,
+        "mid_sidewall": 0.06398338488337574,
+        "bottom_center": 0.04281137343192721,
+        "bottom_corner": 0.04281137343192721
+      },
+      "vs_model_01": {
+        "sample_xs": [
+          -520,
+          -420,
+          -320,
+          -220,
+          -120,
+          0,
+          120,
+          220,
+          320,
+          420,
+          520
+        ],
+        "deltas_a": [
+          -0.004331975371940189,
+          -0.004774013675188371,
+          -0.005216051978464975,
+          -0.0926519582744163,
+          -0.1863332771407329,
+          -188.86965925065329,
+          -0.19356441368334742,
+          -0.08828602482967085,
+          -0.004822320011044212,
+          -0.004413648823657468,
+          -0.004004977636299145
+        ],
+        "max_abs_delta_a": 188.86965925065329,
+        "mean_abs_delta_a": 17.223459810188913
+      },
+      "slowdown_vs_model_01_pct": 52.09342380047792
+    }
+  }
+}

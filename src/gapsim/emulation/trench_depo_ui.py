@@ -1,0 +1,2430 @@
+from __future__ import annotations
+
+from dataclasses import replace
+import math
+import platform
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import List, Optional, Sequence, Tuple
+
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QColor, QDesktopServices, QMouseEvent, QPainter, QPainterPath, QPen
+from PySide6.QtWidgets import (
+    QApplication,
+    QButtonGroup,
+    QCheckBox,
+    QComboBox,
+    QDoubleSpinBox,
+    QFileDialog,
+    QGridLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QMessageBox,
+    QPlainTextEdit,
+    QPushButton,
+    QScrollArea,
+    QSlider,
+    QSpinBox,
+    QStatusBar,
+    QSplitter,
+    QVBoxLayout,
+    QWidget,
+)
+
+from gapsim.emulation.research_registry import (
+    MAX_EMULATOR_NUMBER,
+    ensure_emulator_research_slot,
+    load_created_emulator_numbers,
+    next_emulator_number,
+    save_created_emulator_numbers,
+)
+from gapsim.emulation.trench_depo import (
+    ION_TRANSMISSION_STEPPED_TRENCH_POINTS,
+    TrenchDepoConfig,
+    TrenchDepoResult,
+    TrenchSweepResult,
+    run_trench_depo,
+    run_trench_depo_legacy_sputter,
+    run_trench_depo_sweep,
+)
+from gapsim.emulation.trench_depo_export import (
+    DEFAULT_RUNS_ROOT,
+    export_trench_depo_run,
+    export_trench_depo_sweep_runs,
+    load_trench_depo_run,
+    load_trench_depo_split_group,
+)
+from gapsim.ui_qt.views.result_vector_view import ResultVectorView
+
+
+def _use_solid_playback(result: TrenchDepoResult) -> bool:
+    if not bool(result.meta.get("sputter_active")):
+        return False
+    try:
+        depo_a = float(result.meta.get("angstrom_per_cycle", 0.0))
+        etch_a = float(result.meta.get("sputter_strength_a_per_cycle", 0.0))
+    except (TypeError, ValueError):
+        return True
+    return etch_a > depo_a + 1e-9
+
+
+def _elide_middle(text: str, max_chars: int) -> str:
+    raw = str(text)
+    limit = max(3, int(max_chars))
+    if len(raw) <= limit:
+        return raw
+    keep = max(1, limit - 3)
+    left = (keep + 1) // 2
+    right = keep // 2
+    return f"{raw[:left]}...{raw[-right:]}"
+
+
+EMULATOR_MODE_TITLES = {
+    0: "Conformal depo baseline",
+    1: "Direct angle sputter etch",
+    2: "Ion transmission shadowing",
+    3: "Discarded reflected ion etch",
+    4: "Sputter redeposition",
+}
+
+
+def _emulator_mode_title(number: int) -> str:
+    number_i = int(number)
+    if number_i in EMULATOR_MODE_TITLES:
+        return EMULATOR_MODE_TITLES[number_i]
+    return "Unassigned conformal baseline"
+
+
+def _emulator_mode_label(number: int) -> str:
+    return f"{int(number):02d} - {_emulator_mode_title(int(number))}"
+
+
+class SputterGaussianEditor(QWidget):
+    parametersChanged = Signal(float, float, float)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._peak_pct = 100.0
+        self._peak_deg = 55.0
+        self._width_deg = 14.0
+        self._etch_cap_a = 4.0
+        self._drag_handle: Optional[str] = None
+        self._percent_range = (0.0, 100.0)
+        self._peak_range = (0.0, 89.9)
+        self._width_range = (1.0, 60.0)
+        self.setMinimumHeight(132)
+        self.setMaximumHeight(156)
+        self.setMouseTracking(True)
+        self.setToolTip("Drag peak to set peak angle and peak percent. Drag side handles to set width.")
+
+    def parameters(self) -> Tuple[float, float, float]:
+        return (float(self._peak_pct), float(self._peak_deg), float(self._width_deg))
+
+    def set_parameters(self, peak_pct: float, peak_deg: float, width_deg: float) -> None:
+        pct_f = self._clamp(float(peak_pct), *self._percent_range)
+        peak_f = self._clamp(float(peak_deg), *self._peak_range)
+        width_f = self._clamp(float(width_deg), *self._width_range)
+        changed = (
+            abs(pct_f - self._peak_pct) > 1e-9
+            or abs(peak_f - self._peak_deg) > 1e-9
+            or abs(width_f - self._width_deg) > 1e-9
+        )
+        self._peak_pct = pct_f
+        self._peak_deg = peak_f
+        self._width_deg = width_f
+        if changed:
+            self.update()
+
+    def set_etch_cap_a(self, etch_cap_a: float) -> None:
+        cap_f = max(0.0, float(etch_cap_a))
+        if abs(cap_f - self._etch_cap_a) <= 1e-9:
+            return
+        self._etch_cap_a = cap_f
+        self.update()
+
+    @staticmethod
+    def _clamp(value: float, low: float, high: float) -> float:
+        return max(float(low), min(float(high), float(value)))
+
+    def _plot_rect(self) -> QRectF:
+        return QRectF(46.0, 24.0, max(80.0, float(self.width()) - 66.0), max(36.0, float(self.height()) - 58.0))
+
+    def _x_for_angle(self, angle_deg: float) -> float:
+        rect = self._plot_rect()
+        t = self._clamp(float(angle_deg) / 90.0, 0.0, 1.0)
+        return rect.left() + (rect.width() * t)
+
+    def _angle_for_x(self, x: float) -> float:
+        rect = self._plot_rect()
+        if rect.width() <= 1e-9:
+            return 0.0
+        t = self._clamp((float(x) - rect.left()) / rect.width(), 0.0, 1.0)
+        return 90.0 * t
+
+    def _y_for_percent(self, percent: float) -> float:
+        rect = self._plot_rect()
+        t = self._clamp(float(percent) / self._percent_range[1], 0.0, 1.0)
+        return rect.bottom() - (rect.height() * t)
+
+    def _percent_for_y(self, y: float) -> float:
+        rect = self._plot_rect()
+        if rect.height() <= 1e-9:
+            return 0.0
+        t = self._clamp((rect.bottom() - float(y)) / rect.height(), 0.0, 1.0)
+        return self._percent_range[1] * t
+
+    def _response_percent_at(self, angle_deg: float) -> float:
+        width = max(1e-9, float(self._width_deg))
+        z = (float(angle_deg) - float(self._peak_deg)) / width
+        return float(self._peak_pct) * math.exp(-0.5 * z * z)
+
+    def _handle_points(self) -> dict[str, QPointF]:
+        side_pct = float(self._peak_pct) * math.exp(-0.5)
+        return {
+            "peak": QPointF(self._x_for_angle(self._peak_deg), self._y_for_percent(self._peak_pct)),
+            "left_width": QPointF(
+                self._x_for_angle(max(0.0, self._peak_deg - self._width_deg)),
+                self._y_for_percent(side_pct),
+            ),
+            "right_width": QPointF(
+                self._x_for_angle(min(90.0, self._peak_deg + self._width_deg)),
+                self._y_for_percent(side_pct),
+            ),
+        }
+
+    def _hit_handle(self, pos: QPointF) -> Optional[str]:
+        best_name: Optional[str] = None
+        best_dist_sq = 12.0 * 12.0
+        for name, hp in self._handle_points().items():
+            dx = float(pos.x() - hp.x())
+            dy = float(pos.y() - hp.y())
+            dist_sq = (dx * dx) + (dy * dy)
+            if dist_sq <= best_dist_sq:
+                best_name = name
+                best_dist_sq = dist_sq
+        return best_name
+
+    def _emit_parameters_changed(self) -> None:
+        self.parametersChanged.emit(float(self._peak_pct), float(self._peak_deg), float(self._width_deg))
+
+    def _apply_drag(self, handle: str, pos: QPointF) -> None:
+        if handle == "peak":
+            self._peak_deg = self._clamp(self._angle_for_x(pos.x()), *self._peak_range)
+            self._peak_pct = self._clamp(self._percent_for_y(pos.y()), *self._percent_range)
+        elif handle in {"left_width", "right_width"}:
+            angle = self._angle_for_x(pos.x())
+            self._width_deg = self._clamp(abs(angle - float(self._peak_deg)), *self._width_range)
+        else:
+            return
+        self.update()
+        self._emit_parameters_changed()
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if event.button() != Qt.MouseButton.LeftButton:
+            super().mousePressEvent(event)
+            return
+        pos = event.position()
+        handle = self._hit_handle(pos)
+        if handle is None and self._plot_rect().contains(pos):
+            handle = "peak"
+        if handle is None:
+            super().mousePressEvent(event)
+            return
+        self._drag_handle = handle
+        self._apply_drag(handle, pos)
+        event.accept()
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        pos = event.position()
+        if self._drag_handle is not None:
+            self._apply_drag(self._drag_handle, pos)
+            event.accept()
+            return
+        handle = self._hit_handle(pos)
+        if handle == "peak":
+            self.setCursor(Qt.CursorShape.SizeAllCursor)
+        elif handle in {"left_width", "right_width"}:
+            self.setCursor(Qt.CursorShape.SizeHorCursor)
+        else:
+            self.unsetCursor()
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton and self._drag_handle is not None:
+            self._drag_handle = None
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802, ANN001
+        if self._drag_handle is None:
+            self.unsetCursor()
+        super().leaveEvent(event)
+
+    def paintEvent(self, event) -> None:  # noqa: N802, ANN001
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        rect = self._plot_rect()
+        painter.fillRect(self.rect(), QColor(248, 250, 252))
+        painter.setPen(QPen(QColor(203, 213, 225), 1.0))
+        painter.setBrush(QColor(255, 255, 255))
+        painter.drawRoundedRect(rect, 5.0, 5.0)
+
+        painter.setPen(QPen(QColor(226, 232, 240), 1.0))
+        for angle in (0.0, 30.0, 60.0, 90.0):
+            x = self._x_for_angle(angle)
+            painter.drawLine(QPointF(x, rect.top()), QPointF(x, rect.bottom()))
+        for percent in (0.0, 50.0, 100.0):
+            y = self._y_for_percent(percent)
+            painter.drawLine(QPointF(rect.left(), y), QPointF(rect.right(), y))
+
+        painter.setPen(QPen(QColor(100, 116, 139), 1.0))
+        for angle in (0.0, 30.0, 60.0, 90.0):
+            painter.drawText(QPointF(self._x_for_angle(angle) - 10.0, rect.bottom() + 18.0), f"{angle:.0f}")
+        painter.drawText(QPointF(rect.left() - 36.0, rect.top() + 4.0), "100")
+        painter.drawText(QPointF(rect.left() - 24.0, rect.bottom() + 4.0), "0")
+
+        curve = QPainterPath()
+        samples = 180
+        for idx in range(samples + 1):
+            angle = 90.0 * idx / float(samples)
+            point = QPointF(self._x_for_angle(angle), self._y_for_percent(self._response_percent_at(angle)))
+            if idx == 0:
+                curve.moveTo(point)
+            else:
+                curve.lineTo(point)
+        painter.setPen(QPen(QColor(37, 99, 235), 2.4))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawPath(curve)
+
+        handles = self._handle_points()
+        painter.setPen(QPen(QColor(202, 138, 4), 1.6))
+        painter.setBrush(QColor(253, 224, 71))
+        for name in ("left_width", "right_width"):
+            hp = handles[name]
+            painter.drawEllipse(hp, 5.2, 5.2)
+            painter.drawLine(QPointF(hp.x(), hp.y() + 7.0), QPointF(hp.x(), rect.bottom()))
+
+        peak = handles["peak"]
+        painter.setPen(QPen(QColor(29, 78, 216), 1.8))
+        painter.setBrush(QColor(96, 165, 250))
+        painter.drawEllipse(peak, 6.5, 6.5)
+        painter.drawLine(QPointF(peak.x(), peak.y() + 8.0), QPointF(peak.x(), rect.bottom()))
+
+        painter.setPen(QPen(QColor(15, 23, 42), 1.0))
+        effective_peak_a = float(self._etch_cap_a) * float(self._peak_pct) / 100.0
+        painter.drawText(
+            QPointF(rect.left(), 16.0),
+            (
+                f"P {self._peak_pct:.1f}% ({effective_peak_a:.2f} A)    "
+                f"Ang {self._peak_deg:.1f}    W {self._width_deg:.1f}"
+            ),
+        )
+        painter.drawText(QPointF(rect.right() - 76.0, rect.bottom() + 18.0), "angle deg")
+
+
+class IonTransmissionEditor(QWidget):
+    parametersChanged = Signal(float, float, float, float, float)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._start_depth_pct = 0.0
+        self._end_depth_pct = 100.0
+        self._decay_strength_pct = 100.0
+        self._floor_pct = 0.0
+        self._curve_power = 1.0
+        self._drag_handle: Optional[str] = None
+        self._points = tuple(ION_TRANSMISSION_STEPPED_TRENCH_POINTS)
+        self.setMinimumHeight(158)
+        self.setMaximumHeight(188)
+        self.setMouseTracking(True)
+        self.setToolTip("Drag the depth line to set where attenuation starts. Drag the bottom curve handle to set drop strength.")
+
+    def parameters(self) -> Tuple[float, float, float, float, float]:
+        return (
+            float(self._start_depth_pct),
+            float(self._end_depth_pct),
+            float(self._decay_strength_pct),
+            float(self._floor_pct),
+            float(self._curve_power),
+        )
+
+    def set_parameters(
+        self,
+        start_depth_pct: float,
+        end_depth_pct: float,
+        decay_strength_pct: float,
+        floor_pct: float,
+        curve_power: float,
+    ) -> None:
+        start_f = self._clamp(float(start_depth_pct), 0.0, 100.0)
+        end_f = self._clamp(float(end_depth_pct), 0.0, 100.0)
+        strength_f = self._clamp(float(decay_strength_pct), 0.0, 100.0)
+        floor_f = self._clamp(float(floor_pct), 0.0, 100.0)
+        curve_f = self._clamp(float(curve_power), 0.2, 6.0)
+        changed = (
+            abs(start_f - self._start_depth_pct) > 1e-9
+            or abs(end_f - self._end_depth_pct) > 1e-9
+            or abs(strength_f - self._decay_strength_pct) > 1e-9
+            or abs(floor_f - self._floor_pct) > 1e-9
+            or abs(curve_f - self._curve_power) > 1e-9
+        )
+        self._start_depth_pct = start_f
+        self._end_depth_pct = end_f
+        self._decay_strength_pct = strength_f
+        self._floor_pct = floor_f
+        self._curve_power = curve_f
+        if changed:
+            self.update()
+
+    @staticmethod
+    def _clamp(value: float, low: float, high: float) -> float:
+        return max(float(low), min(float(high), float(value)))
+
+    def _map_rect(self) -> QRectF:
+        return QRectF(32.0, 28.0, max(120.0, float(self.width()) - 64.0), max(72.0, float(self.height()) - 62.0))
+
+    def _bounds(self) -> Tuple[float, float, float, float]:
+        xs = [float(x) for x, _y in self._points]
+        ys = [float(y) for _x, y in self._points]
+        return (min(xs), max(xs), min(ys), max(ys))
+
+    def _point_to_widget(self, point: Tuple[float, float]) -> QPointF:
+        rect = self._map_rect()
+        x_min, x_max, y_min, y_max = self._bounds()
+        x_span = max(x_max - x_min, 1e-9)
+        y_span = max(y_max - y_min, 1e-9)
+        x, y = point
+        tx = (float(x) - x_min) / x_span
+        ty = (y_max - float(y)) / y_span
+        return QPointF(rect.left() + rect.width() * tx, rect.top() + rect.height() * ty)
+
+    def _y_for_depth_pct(self, depth_pct: float) -> float:
+        rect = self._map_rect()
+        t = self._clamp(float(depth_pct) / 100.0, 0.0, 1.0)
+        return rect.top() + rect.height() * t
+
+    def _depth_pct_for_y(self, y: float) -> float:
+        rect = self._map_rect()
+        if rect.height() <= 1e-9:
+            return 0.0
+        t = self._clamp((float(y) - rect.top()) / rect.height(), 0.0, 1.0)
+        return 100.0 * t
+
+    def _x_for_factor(self, factor: float) -> float:
+        rect = self._map_rect()
+        t = self._clamp(float(factor), 0.0, 1.0)
+        return rect.left() + rect.width() * t
+
+    def _factor_for_x(self, x: float) -> float:
+        rect = self._map_rect()
+        if rect.width() <= 1e-9:
+            return 1.0
+        return self._clamp((float(x) - rect.left()) / rect.width(), 0.0, 1.0)
+
+    def _depth_curve_factor(self, depth_pct: float) -> float:
+        depth_f = self._clamp(float(depth_pct), 0.0, 100.0)
+        if depth_f <= self._start_depth_pct:
+            return 1.0
+        end_f = max(float(self._start_depth_pct) + 1e-9, float(self._end_depth_pct))
+        span = max(1e-9, end_f - float(self._start_depth_pct))
+        t = self._clamp((depth_f - float(self._start_depth_pct)) / span, 0.0, 1.0)
+        factor = 1.0 - ((float(self._decay_strength_pct) / 100.0) * (t ** float(self._curve_power)))
+        return self._clamp(max(float(self._floor_pct) / 100.0, factor), 0.0, 1.0)
+
+    def _factor_curve_points(self) -> List[Tuple[float, float]]:
+        return [
+            (100.0 * idx / 100.0, self._depth_curve_factor(100.0 * idx / 100.0))
+            for idx in range(101)
+        ]
+
+    def _handle_points(self) -> dict[str, QPointF]:
+        end_depth = max(float(self._start_depth_pct), min(100.0, float(self._end_depth_pct)))
+        end_factor = self._depth_curve_factor(end_depth)
+        mid_depth = float(self._start_depth_pct) + ((end_depth - float(self._start_depth_pct)) * 0.5)
+        return {
+            "start": QPointF(self._map_rect().right() - 10.0, self._y_for_depth_pct(self._start_depth_pct)),
+            "strength": QPointF(self._x_for_factor(end_factor), self._y_for_depth_pct(end_depth)),
+            "curve": QPointF(self._x_for_factor(self._depth_curve_factor(mid_depth)), self._y_for_depth_pct(mid_depth)),
+        }
+
+    def _hit_handle(self, pos: QPointF) -> Optional[str]:
+        best_name: Optional[str] = None
+        best_dist_sq = 13.0 * 13.0
+        for name, hp in self._handle_points().items():
+            dx = float(pos.x() - hp.x())
+            dy = float(pos.y() - hp.y())
+            dist_sq = (dx * dx) + (dy * dy)
+            if dist_sq <= best_dist_sq:
+                best_name = name
+                best_dist_sq = dist_sq
+        start_y = self._y_for_depth_pct(self._start_depth_pct)
+        if best_name is None and abs(float(pos.y()) - start_y) <= 6.0 and self._map_rect().contains(pos):
+            return "start"
+        return best_name
+
+    def _emit_parameters_changed(self) -> None:
+        self.parametersChanged.emit(
+            float(self._start_depth_pct),
+            float(self._end_depth_pct),
+            float(self._decay_strength_pct),
+            float(self._floor_pct),
+            float(self._curve_power),
+        )
+
+    def _apply_drag(self, handle: str, pos: QPointF) -> None:
+        if handle == "start":
+            self._start_depth_pct = self._clamp(self._depth_pct_for_y(pos.y()), 0.0, 100.0)
+        elif handle == "strength":
+            self._end_depth_pct = self._clamp(
+                self._depth_pct_for_y(pos.y()),
+                float(self._start_depth_pct),
+                100.0,
+            )
+            target_factor = self._factor_for_x(pos.x())
+            self._decay_strength_pct = self._clamp(100.0 * (1.0 - target_factor), 0.0, 100.0)
+        elif handle == "curve":
+            drop = float(self._decay_strength_pct) / 100.0
+            if drop <= 1e-9:
+                return
+            target_factor = self._clamp(
+                self._factor_for_x(pos.x()),
+                float(self._floor_pct) / 100.0,
+                0.999999,
+            )
+            normalized_drop = self._clamp((1.0 - target_factor) / drop, 1e-6, 0.999999)
+            self._curve_power = self._clamp(math.log(normalized_drop) / math.log(0.5), 0.2, 6.0)
+        else:
+            return
+        self.update()
+        self._emit_parameters_changed()
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if event.button() != Qt.MouseButton.LeftButton:
+            super().mousePressEvent(event)
+            return
+        pos = event.position()
+        handle = self._hit_handle(pos)
+        if handle is None and self._map_rect().contains(pos):
+            handle = "start"
+        if handle is None:
+            super().mousePressEvent(event)
+            return
+        self._drag_handle = handle
+        self._apply_drag(handle, pos)
+        event.accept()
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        pos = event.position()
+        if self._drag_handle is not None:
+            self._apply_drag(self._drag_handle, pos)
+            event.accept()
+            return
+        handle = self._hit_handle(pos)
+        if handle == "start":
+            self.setCursor(Qt.CursorShape.SizeVerCursor)
+        elif handle == "strength":
+            self.setCursor(Qt.CursorShape.SizeAllCursor)
+        elif handle == "curve":
+            self.setCursor(Qt.CursorShape.SizeHorCursor)
+        else:
+            self.unsetCursor()
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton and self._drag_handle is not None:
+            self._drag_handle = None
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802, ANN001
+        if self._drag_handle is None:
+            self.unsetCursor()
+        super().leaveEvent(event)
+
+    def paintEvent(self, event) -> None:  # noqa: N802, ANN001
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        rect = self._map_rect()
+        painter.fillRect(self.rect(), QColor(248, 250, 252))
+        painter.setPen(QPen(QColor(203, 213, 225), 1.0))
+        painter.setBrush(QColor(255, 255, 255))
+        painter.drawRoundedRect(rect, 5.0, 5.0)
+
+        painter.setPen(QPen(QColor(226, 232, 240), 1.0))
+        for depth_pct in (0.0, 25.0, 50.0, 75.0, 100.0):
+            y = self._y_for_depth_pct(depth_pct)
+            painter.drawLine(QPointF(rect.left(), y), QPointF(rect.right(), y))
+        for factor in (0.0, 0.5, 1.0):
+            x = self._x_for_factor(factor)
+            painter.drawLine(QPointF(x, rect.top()), QPointF(x, rect.bottom()))
+
+        trench_path = QPainterPath()
+        for idx, point in enumerate(self._points):
+            mapped = self._point_to_widget(point)
+            if idx == 0:
+                trench_path.moveTo(mapped)
+            else:
+                trench_path.lineTo(mapped)
+        painter.setPen(QPen(QColor(51, 65, 85), 2.0))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawPath(trench_path)
+
+        start_y = self._y_for_depth_pct(self._start_depth_pct)
+        painter.setPen(QPen(QColor(245, 158, 11), 1.6, Qt.PenStyle.DashLine))
+        painter.drawLine(QPointF(rect.left(), start_y), QPointF(rect.right(), start_y))
+
+        curve = QPainterPath()
+        for idx, (depth_pct, factor) in enumerate(self._factor_curve_points()):
+            point = QPointF(self._x_for_factor(factor), self._y_for_depth_pct(depth_pct))
+            if idx == 0:
+                curve.moveTo(point)
+            else:
+                curve.lineTo(point)
+        painter.setPen(QPen(QColor(14, 116, 144), 2.6))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawPath(curve)
+
+        handles = self._handle_points()
+        painter.setPen(QPen(QColor(180, 83, 9), 1.8))
+        painter.setBrush(QColor(251, 191, 36))
+        painter.drawEllipse(handles["start"], 6.0, 6.0)
+        painter.setPen(QPen(QColor(15, 118, 110), 1.8))
+        painter.setBrush(QColor(45, 212, 191))
+        painter.drawEllipse(handles["strength"], 6.5, 6.5)
+        painter.setPen(QPen(QColor(79, 70, 229), 1.8))
+        painter.setBrush(QColor(129, 140, 248))
+        painter.drawEllipse(handles["curve"], 5.8, 5.8)
+
+        painter.setPen(QPen(QColor(15, 23, 42), 1.0))
+        painter.drawText(
+            QPointF(rect.left(), 18.0),
+            (
+                f"Start {self._start_depth_pct:.1f}%    "
+                f"End {self._end_depth_pct:.1f}%    "
+                f"Drop {self._decay_strength_pct:.1f}%    "
+                f"Curve {self._curve_power:.2f}    "
+                f"Floor {self._floor_pct:.1f}%"
+            ),
+        )
+        painter.setPen(QPen(QColor(100, 116, 139), 1.0))
+        painter.drawText(QPointF(rect.left() - 26.0, rect.top() + 4.0), "0")
+        painter.drawText(QPointF(rect.left() - 34.0, rect.bottom() + 4.0), "100")
+        painter.drawText(QPointF(rect.right() - 42.0, rect.bottom() + 18.0), "factor")
+
+
+class SplitTestWindow(QMainWindow):
+    def __init__(self, cases: Sequence[TrenchSweepResult]) -> None:
+        super().__init__()
+        self._cases = list(cases)
+        self._views: List[ResultVectorView] = []
+        self._case_status_labels: List[QLabel] = []
+        self._syncing_viewports = False
+
+        title = "Split Test"
+        if self._cases:
+            if self._cases[0].parameter == "model_compare":
+                title = "Model Compare - GapSim Angle Only"
+            else:
+                title = f"Split Test - {self._cases[0].label}"
+        self.setWindowTitle(title)
+        self.resize(1320, 860)
+
+        self._timer = QTimer(self)
+        self._timer.setInterval(220)
+        self._timer.timeout.connect(self._advance_frame)
+
+        self.slider_frame = QSlider(Qt.Orientation.Horizontal)
+        max_idx = max((len(case.result.frame_profiles) - 1 for case in self._cases), default=0)
+        self.slider_frame.setRange(0, max(0, max_idx))
+        self.slider_frame.setValue(0)
+        self.slider_frame.setEnabled(max_idx > 0)
+        self.slider_frame.valueChanged.connect(self.show_frame)
+
+        self.btn_play = QPushButton("Pause" if max_idx > 0 else "Play")
+        self.btn_play.setEnabled(max_idx > 0)
+        self.btn_play.clicked.connect(self.toggle_playback)
+        self.lbl_frame = QLabel("Frame 0/0")
+
+        controls = QHBoxLayout()
+        controls.addWidget(QLabel("Frame"))
+        controls.addWidget(self.slider_frame, 1)
+        controls.addWidget(self.lbl_frame)
+        controls.addWidget(self.btn_play)
+
+        grid_host = QWidget()
+        grid = QGridLayout()
+        grid.setContentsMargins(8, 8, 8, 8)
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(10)
+
+        case_count = max(1, len(self._cases))
+        columns = 1 if case_count <= 1 else (2 if case_count <= 4 else 3)
+        for idx, case in enumerate(self._cases):
+            cell = QWidget()
+            cell_layout = QVBoxLayout()
+            cell_layout.setContentsMargins(6, 6, 6, 6)
+            header = QLabel(self._case_label(case))
+            status = QLabel("Cycle 0/0 | Points 0")
+            view = ResultVectorView()
+            view.setMinimumSize(360, 260)
+            solid_playback = _use_solid_playback(case.result)
+            view.set_frames(
+                case.result.frame_profiles,
+                voids=case.result.frame_voids,
+                void_mode="current",
+                dynamic_substrate_fill=solid_playback,
+                history_mode="mixed_etch" if solid_playback else "film",
+            )
+            view.show_frame(0, fit=True)
+            view.viewportChanged.connect(lambda state, source=view: self._sync_viewports(source, state))
+            cell_layout.addWidget(header)
+            cell_layout.addWidget(view, 1)
+            cell_layout.addWidget(status)
+            cell.setLayout(cell_layout)
+            row = idx // columns
+            col = idx % columns
+            grid.addWidget(cell, row, col)
+            self._views.append(view)
+            self._case_status_labels.append(status)
+
+        grid_host.setLayout(grid)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(grid_host)
+
+        root = QVBoxLayout()
+        root.addLayout(controls)
+        root.addWidget(scroll, 1)
+        central = QWidget()
+        central.setLayout(root)
+        self.setCentralWidget(central)
+
+        self.show_frame(0)
+        QTimer.singleShot(0, self.fit_all_views)
+        if max_idx > 0:
+            self._timer.start()
+
+    def _case_label(self, case: TrenchSweepResult) -> str:
+        if case.parameter == "model_compare":
+            return case.label
+        if case.parameter == "cycles":
+            value_text = str(int(case.value))
+        else:
+            value_text = f"{case.value:g}"
+        return f"{case.label}: {value_text}"
+
+    def toggle_playback(self) -> None:
+        if self._timer.isActive():
+            self._timer.stop()
+            self.btn_play.setText("Play")
+            return
+        if self.slider_frame.value() >= self.slider_frame.maximum():
+            self.slider_frame.setValue(0)
+        self._timer.start()
+        self.btn_play.setText("Pause")
+
+    def _advance_frame(self) -> None:
+        current = self.slider_frame.value()
+        if current >= self.slider_frame.maximum():
+            self._timer.stop()
+            self.btn_play.setText("Replay")
+            return
+        self.slider_frame.setValue(current + 1)
+
+    def show_frame(self, index: int) -> None:
+        max_idx = self.slider_frame.maximum()
+        idx = max(0, min(int(index), max_idx))
+        self.lbl_frame.setText(f"Frame {idx}/{max_idx}")
+        for case_idx, case in enumerate(self._cases):
+            frames = case.result.frame_profiles
+            if not frames:
+                continue
+            local_idx = max(0, min(idx, len(frames) - 1))
+            self._views[case_idx].show_frame(local_idx, fit=False)
+            cycle = case.result.frame_steps[local_idx] if local_idx < len(case.result.frame_steps) else local_idx
+            total = case.result.meta.get("cycles", len(frames) - 1)
+            points = len(frames[local_idx])
+            self._case_status_labels[case_idx].setText(f"Cycle {cycle}/{total} | Points {points}")
+
+    def fit_all_views(self) -> None:
+        if not self._views:
+            return
+        self._syncing_viewports = True
+        try:
+            for view in self._views:
+                view.fit_content()
+        finally:
+            self._syncing_viewports = False
+
+    def _sync_viewports(self, source: ResultVectorView, state: object) -> None:
+        if self._syncing_viewports:
+            return
+        if not isinstance(state, dict):
+            return
+        self._syncing_viewports = True
+        try:
+            for view in self._views:
+                if view is not source:
+                    view.apply_viewport_state(state)
+        finally:
+            self._syncing_viewports = False
+
+    def closeEvent(self, event) -> None:  # noqa: N802, ANN001
+        self._timer.stop()
+        super().closeEvent(event)
+
+
+class TrenchDepoWindow(QMainWindow):
+    def _make_parameter_section(
+        self,
+        text: str,
+        *,
+        color: str = "#334155",
+        background: str = "#f8fafc",
+        border: str = "#cbd5e1",
+    ) -> QLabel:
+        label = QLabel(text)
+        label.setStyleSheet(
+            "QLabel {"
+            "font-weight: 700;"
+            f"color: {color};"
+            f"background: {background};"
+            f"border: 1px solid {border};"
+            "border-radius: 4px;"
+            "padding: 4px 6px;"
+            "}"
+        )
+        return label
+
+    def _make_ion_shadow_slider(self, value: int) -> Tuple[QSlider, QLabel, QWidget]:
+        slider = QSlider(Qt.Orientation.Horizontal)
+        slider.setRange(0, 100)
+        slider.setSingleStep(5)
+        slider.setPageStep(10)
+        slider.setValue(max(0, min(100, int(value))))
+        value_label = QLabel(f"{slider.value()}%")
+        value_label.setMinimumWidth(38)
+        value_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        row = QWidget()
+        layout = QHBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        layout.addWidget(slider, 1)
+        layout.addWidget(value_label)
+        row.setLayout(layout)
+        return slider, value_label, row
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setWindowTitle("Trench Depo Emulation")
+        self.resize(1280, 820)
+
+        self._result: Optional[TrenchDepoResult] = None
+        self._last_run_dir: Optional[Path] = None
+        self._split_windows: List[SplitTestWindow] = []
+        self._syncing_sputter_curve = False
+        self._syncing_ion_curve = False
+        self._active_emulator_number = 0
+        self._emulator_numbers = load_created_emulator_numbers()
+        self._emulator_buttons: dict[int, QPushButton] = {}
+        self._preview_result_cache: dict[tuple[object, ...], TrenchDepoResult] = {}
+        self._emulator_run_timer = QTimer(self)
+        self._emulator_run_timer.setSingleShot(True)
+        self._emulator_run_timer.setInterval(150)
+        self._emulator_run_timer.timeout.connect(self._run_deferred_emulator_preview)
+
+        self.view = ResultVectorView()
+        self.view.setMinimumSize(560, 620)
+        self.emulator_button_group = QButtonGroup(self)
+        self.emulator_button_group.setExclusive(True)
+        self.emulator_toggle_row = QHBoxLayout()
+        self.emulator_toggle_row.setContentsMargins(0, 0, 0, 0)
+        self.emulator_toggle_row.setSpacing(6)
+        self.emulator_toggle_row.addStretch(1)
+        for number in self._emulator_numbers:
+            self._add_emulator_toggle(number)
+        self.btn_new_emulator = QPushButton("New")
+        self.btn_new_emulator.setToolTip("Create the next emulator slot")
+        self._sync_new_emulator_button()
+
+        self.spin_cycles = QSpinBox()
+        self.spin_cycles.setRange(0, 10000)
+        self.spin_cycles.setValue(20)
+
+        self.spin_angstrom_per_cycle = QDoubleSpinBox()
+        self.spin_angstrom_per_cycle.setRange(0.0, 10000.0)
+        self.spin_angstrom_per_cycle.setDecimals(3)
+        self.spin_angstrom_per_cycle.setSingleStep(1.0)
+        self.spin_angstrom_per_cycle.setValue(10.0)
+
+        self.chk_sputter = QCheckBox("Etch enabled")
+        self.chk_sputter.setToolTip("Master switch for the direct sputter etch stack.")
+        self.chk_sputter.setChecked(False)
+        self.chk_ion_transmission = QCheckBox("2 Ion transmission modifier")
+        self.chk_ion_transmission.setToolTip(
+            "Multiplier on the existing direct sputter output. Deposition is not attenuated."
+        )
+        self.chk_ion_transmission.setChecked(False)
+        self.spin_ion_start_depth = QDoubleSpinBox()
+        self.spin_ion_start_depth.setRange(0.0, 100.0)
+        self.spin_ion_start_depth.setDecimals(1)
+        self.spin_ion_start_depth.setSingleStep(2.5)
+        self.spin_ion_start_depth.setValue(0.0)
+        self.spin_ion_end_depth = QDoubleSpinBox()
+        self.spin_ion_end_depth.setRange(0.0, 100.0)
+        self.spin_ion_end_depth.setDecimals(1)
+        self.spin_ion_end_depth.setSingleStep(2.5)
+        self.spin_ion_end_depth.setValue(100.0)
+        self.spin_ion_decay_strength = QDoubleSpinBox()
+        self.spin_ion_decay_strength.setRange(0.0, 100.0)
+        self.spin_ion_decay_strength.setDecimals(1)
+        self.spin_ion_decay_strength.setSingleStep(5.0)
+        self.spin_ion_decay_strength.setValue(100.0)
+        self.spin_ion_floor = QDoubleSpinBox()
+        self.spin_ion_floor.setRange(0.0, 100.0)
+        self.spin_ion_floor.setDecimals(1)
+        self.spin_ion_floor.setSingleStep(2.5)
+        self.spin_ion_floor.setValue(0.0)
+        self.spin_ion_curve_power = QDoubleSpinBox()
+        self.spin_ion_curve_power.setRange(0.2, 6.0)
+        self.spin_ion_curve_power.setDecimals(2)
+        self.spin_ion_curve_power.setSingleStep(0.1)
+        self.spin_ion_curve_power.setValue(1.0)
+        self.slider_ion_aperture_shadow, self.lbl_ion_aperture_shadow_value, self.ion_aperture_shadow_row = (
+            self._make_ion_shadow_slider(100)
+        )
+        self.slider_ion_lateral_shadow, self.lbl_ion_lateral_shadow_value, self.ion_lateral_shadow_row = (
+            self._make_ion_shadow_slider(100)
+        )
+        self.slider_ion_edge_shadow, self.lbl_ion_edge_shadow_value, self.ion_edge_shadow_row = (
+            self._make_ion_shadow_slider(100)
+        )
+        self.chk_reflected_ion = QCheckBox("Reflected ion")
+        self.chk_reflected_ion.setChecked(False)
+        self.spin_reflected_strength = QDoubleSpinBox()
+        self.spin_reflected_strength.setRange(0.0, 100.0)
+        self.spin_reflected_strength.setDecimals(1)
+        self.spin_reflected_strength.setSingleStep(5.0)
+        self.spin_reflected_strength.setValue(35.0)
+        self.spin_reflected_bowing = QDoubleSpinBox()
+        self.spin_reflected_bowing.setRange(0.0, 2.0)
+        self.spin_reflected_bowing.setDecimals(2)
+        self.spin_reflected_bowing.setSingleStep(0.05)
+        self.spin_reflected_bowing.setValue(0.75)
+        self.spin_reflected_microtrench = QDoubleSpinBox()
+        self.spin_reflected_microtrench.setRange(0.0, 2.0)
+        self.spin_reflected_microtrench.setDecimals(2)
+        self.spin_reflected_microtrench.setSingleStep(0.05)
+        self.spin_reflected_microtrench.setValue(1.0)
+        self.spin_reflected_range = QDoubleSpinBox()
+        self.spin_reflected_range.setRange(50.0, 10000.0)
+        self.spin_reflected_range.setDecimals(0)
+        self.spin_reflected_range.setSingleStep(100.0)
+        self.spin_reflected_range.setValue(1600.0)
+        self.chk_redepo = QCheckBox("Redepo enabled")
+        self.chk_redepo.setChecked(False)
+        self.cmb_redepo_source_model = QComboBox()
+        self.cmb_redepo_source_model.addItem("Model1", "model1")
+        self.cmb_redepo_source_model.addItem("Model2", "model2")
+        self.cmb_redepo_source_model.setCurrentIndex(0)
+        self.spin_redepo_efficiency = QDoubleSpinBox()
+        self.spin_redepo_efficiency.setRange(0.0, 100.0)
+        self.spin_redepo_efficiency.setDecimals(1)
+        self.spin_redepo_efficiency.setSingleStep(5.0)
+        self.spin_redepo_efficiency.setValue(25.0)
+        self.spin_redepo_emit_power = QDoubleSpinBox()
+        self.spin_redepo_emit_power.setRange(0.0, 8.0)
+        self.spin_redepo_emit_power.setDecimals(2)
+        self.spin_redepo_emit_power.setSingleStep(0.1)
+        self.spin_redepo_emit_power.setValue(1.0)
+        self.spin_redepo_distance_power = QDoubleSpinBox()
+        self.spin_redepo_distance_power.setRange(0.0, 4.0)
+        self.spin_redepo_distance_power.setDecimals(2)
+        self.spin_redepo_distance_power.setSingleStep(0.1)
+        self.spin_redepo_distance_power.setValue(1.0)
+        self.spin_sputter_strength = QDoubleSpinBox()
+        self.spin_sputter_strength.setRange(0.0, 100.0)
+        self.spin_sputter_strength.setDecimals(3)
+        self.spin_sputter_strength.setSingleStep(0.5)
+        self.spin_sputter_strength.setValue(4.0)
+        self.spin_sputter_peak_pct = QDoubleSpinBox()
+        self.spin_sputter_peak_pct.setRange(0.0, 100.0)
+        self.spin_sputter_peak_pct.setDecimals(1)
+        self.spin_sputter_peak_pct.setSingleStep(5.0)
+        self.spin_sputter_peak_pct.setValue(100.0)
+        self.spin_sputter_peak = QDoubleSpinBox()
+        self.spin_sputter_peak.setRange(0.0, 89.9)
+        self.spin_sputter_peak.setDecimals(1)
+        self.spin_sputter_peak.setSingleStep(1.0)
+        self.spin_sputter_peak.setValue(55.0)
+        self.spin_sputter_width = QDoubleSpinBox()
+        self.spin_sputter_width.setRange(1.0, 60.0)
+        self.spin_sputter_width.setDecimals(1)
+        self.spin_sputter_width.setSingleStep(1.0)
+        self.spin_sputter_width.setValue(14.0)
+        self.spin_sputter_smoothing = QDoubleSpinBox()
+        self.spin_sputter_smoothing.setRange(0.0, 200.0)
+        self.spin_sputter_smoothing.setDecimals(1)
+        self.spin_sputter_smoothing.setSingleStep(2.5)
+        self.spin_sputter_smoothing.setValue(40.0)
+        self.sputter_curve_editor = SputterGaussianEditor()
+        self.sputter_curve_editor.set_parameters(
+            float(self.spin_sputter_peak_pct.value()),
+            float(self.spin_sputter_peak.value()),
+            float(self.spin_sputter_width.value()),
+        )
+        self.sputter_curve_editor.set_etch_cap_a(float(self.spin_sputter_strength.value()))
+        self.ion_transmission_editor = IonTransmissionEditor()
+        self.ion_transmission_editor.set_parameters(
+            float(self.spin_ion_start_depth.value()),
+            float(self.spin_ion_end_depth.value()),
+            float(self.spin_ion_decay_strength.value()),
+            float(self.spin_ion_floor.value()),
+            float(self.spin_ion_curve_power.value()),
+        )
+
+        self.btn_run = QPushButton("Run")
+        self.btn_reset = QPushButton("Reset")
+        self.btn_open_json = QPushButton("Open JSON")
+        self.slider_frame = QSlider(Qt.Orientation.Horizontal)
+        self.slider_frame.setRange(0, 0)
+        self.slider_frame.setEnabled(False)
+        self.lbl_status = QLabel("Cycle 0/0 | Points 0")
+        self.edit_request_note = QPlainTextEdit()
+        self.edit_request_note.setPlaceholderText("요청사항 / 물리 메모를 적으면 run 파일명과 요약에 같이 들어갑니다.")
+        self.edit_request_note.setMaximumHeight(88)
+        self.edit_request_note.setPlainText("라운드 conformal offset 기반 트렌치 증착")
+        self.lbl_run_dir = QLabel("저장된 run: 아직 없음")
+        self.lbl_run_dir.setMinimumWidth(0)
+        self.lbl_run_dir.setWordWrap(False)
+        self.lbl_run_dir.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.btn_open_run_dir = QPushButton("Open Folder")
+        self.btn_open_run_dir.setEnabled(False)
+
+        self.cmb_split_parameter = QComboBox()
+        self.spin_split_start = QDoubleSpinBox()
+        self.spin_split_end = QDoubleSpinBox()
+        self.spin_split_step = QDoubleSpinBox()
+        for spin in (self.spin_split_start, self.spin_split_end):
+            spin.setDecimals(3)
+            spin.setRange(0.0, 10000.0)
+            spin.setSingleStep(1.0)
+        self.spin_split_step.setDecimals(3)
+        self.spin_split_step.setRange(0.001, 10000.0)
+        self.spin_split_step.setSingleStep(1.0)
+        self.btn_run_split = QPushButton("Run Split")
+        self.btn_compare_gapsim_angle = QPushButton("Compare GapSim Angle")
+
+        status = QStatusBar(self)
+        self.setStatusBar(status)
+
+        controls = QHBoxLayout()
+        controls.setContentsMargins(0, 0, 0, 0)
+        controls.addWidget(QLabel("Frame"))
+        controls.addWidget(self.slider_frame, 1)
+        controls.addWidget(self.lbl_status)
+
+        run_row = QHBoxLayout()
+        run_row.setContentsMargins(0, 0, 0, 0)
+        run_row.addWidget(self.lbl_run_dir, 1)
+        run_row.addWidget(self.btn_open_run_dir)
+
+        left_panel = QWidget()
+        left_layout = QVBoxLayout()
+        left_layout.setContentsMargins(8, 8, 6, 8)
+        left_layout.setSpacing(8)
+        left_layout.addWidget(self.view, 1)
+        left_layout.addLayout(controls)
+        left_panel.setLayout(left_layout)
+
+        emulator_group = QGroupBox("Emulator")
+        emulator_layout = QVBoxLayout()
+        emulator_layout.setContentsMargins(10, 10, 10, 10)
+        emulator_layout.addLayout(self.emulator_toggle_row)
+        emulator_layout.addWidget(self.btn_new_emulator)
+        emulator_group.setLayout(emulator_layout)
+
+        params_group = QGroupBox("Parameters")
+        params_grid = QGridLayout()
+        params_grid.setContentsMargins(10, 10, 10, 10)
+        params_grid.setHorizontalSpacing(8)
+        params_grid.setVerticalSpacing(8)
+        self.lbl_deposition_section = self._make_parameter_section("Deposition base")
+        self.lbl_etch_section = self._make_parameter_section(
+            "Etch switch",
+            color="#0f766e",
+            background="#f0fdfa",
+            border="#99f6e4",
+        )
+        self.lbl_sputter_section = self._make_parameter_section(
+            "1번 Direct sputter kernel",
+            color="#1d4ed8",
+            background="#eff6ff",
+            border="#bfdbfe",
+        )
+        self.lbl_ion_depth_section = self._make_parameter_section(
+            "2번 Ion transmission - depth curve",
+            color="#0e7490",
+            background="#ecfeff",
+            border="#a5f3fc",
+        )
+        self.lbl_ion_geometry_section = self._make_parameter_section(
+            "2번 Geometry shadowing modifiers",
+            color="#155e75",
+            background="#f0f9ff",
+            border="#bae6fd",
+        )
+        params_grid.addWidget(self.lbl_deposition_section, 0, 0, 1, 2)
+        params_grid.addWidget(QLabel("Cycles"), 1, 0)
+        params_grid.addWidget(self.spin_cycles, 1, 1)
+        params_grid.addWidget(QLabel("Depo A/CYC"), 2, 0)
+        params_grid.addWidget(self.spin_angstrom_per_cycle, 2, 1)
+        params_grid.addWidget(self.lbl_etch_section, 3, 0, 1, 2)
+        params_grid.addWidget(self.chk_sputter, 4, 0, 1, 2)
+        params_grid.addWidget(self.lbl_sputter_section, 5, 0, 1, 2)
+        self.lbl_sputter_strength = QLabel("Etch A/CYC")
+        self.lbl_sputter_peak_pct = QLabel("Peak %")
+        self.lbl_sputter_peak = QLabel("Peak")
+        self.lbl_sputter_width = QLabel("Width")
+        self.lbl_sputter_smoothing = QLabel("Smooth A")
+        params_grid.addWidget(self.lbl_sputter_strength, 6, 0)
+        params_grid.addWidget(self.spin_sputter_strength, 6, 1)
+        params_grid.addWidget(self.lbl_sputter_peak_pct, 7, 0)
+        params_grid.addWidget(self.spin_sputter_peak_pct, 7, 1)
+        params_grid.addWidget(self.lbl_sputter_peak, 8, 0)
+        params_grid.addWidget(self.spin_sputter_peak, 8, 1)
+        params_grid.addWidget(self.lbl_sputter_width, 9, 0)
+        params_grid.addWidget(self.spin_sputter_width, 9, 1)
+        params_grid.addWidget(self.lbl_sputter_smoothing, 10, 0)
+        params_grid.addWidget(self.spin_sputter_smoothing, 10, 1)
+        params_grid.addWidget(self.lbl_ion_depth_section, 11, 0, 1, 2)
+        params_grid.addWidget(self.chk_ion_transmission, 12, 0, 1, 2)
+        self.lbl_ion_start_depth = QLabel("Ion start %")
+        self.lbl_ion_end_depth = QLabel("Ion end %")
+        self.lbl_ion_decay_strength = QLabel("Ion drop %")
+        self.lbl_ion_floor = QLabel("Ion floor %")
+        self.lbl_ion_curve_power = QLabel("Ion curve")
+        self.lbl_ion_aperture_shadow = QLabel("Aperture")
+        self.lbl_ion_lateral_shadow = QLabel("Hidden")
+        self.lbl_ion_edge_shadow = QLabel("Edge")
+        params_grid.addWidget(self.lbl_ion_start_depth, 13, 0)
+        params_grid.addWidget(self.spin_ion_start_depth, 13, 1)
+        params_grid.addWidget(self.lbl_ion_end_depth, 14, 0)
+        params_grid.addWidget(self.spin_ion_end_depth, 14, 1)
+        params_grid.addWidget(self.lbl_ion_decay_strength, 15, 0)
+        params_grid.addWidget(self.spin_ion_decay_strength, 15, 1)
+        params_grid.addWidget(self.lbl_ion_floor, 16, 0)
+        params_grid.addWidget(self.spin_ion_floor, 16, 1)
+        params_grid.addWidget(self.lbl_ion_curve_power, 17, 0)
+        params_grid.addWidget(self.spin_ion_curve_power, 17, 1)
+        params_grid.addWidget(self.lbl_ion_geometry_section, 18, 0, 1, 2)
+        params_grid.addWidget(self.lbl_ion_aperture_shadow, 19, 0)
+        params_grid.addWidget(self.ion_aperture_shadow_row, 19, 1)
+        params_grid.addWidget(self.lbl_ion_lateral_shadow, 20, 0)
+        params_grid.addWidget(self.ion_lateral_shadow_row, 20, 1)
+        params_grid.addWidget(self.lbl_ion_edge_shadow, 21, 0)
+        params_grid.addWidget(self.ion_edge_shadow_row, 21, 1)
+        self.lbl_reflected_section = self._make_parameter_section(
+            "3번 신규 Reflected ion",
+            color="#b45309",
+            background="#fff7ed",
+            border="#fed7aa",
+        )
+        params_grid.addWidget(self.lbl_reflected_section, 22, 0, 1, 2)
+        params_grid.addWidget(self.chk_reflected_ion, 23, 0, 1, 2)
+        self.lbl_reflected_strength = QLabel("Reflect %")
+        self.lbl_reflected_bowing = QLabel("Bowing")
+        self.lbl_reflected_microtrench = QLabel("Microtrench")
+        self.lbl_reflected_range = QLabel("Range A")
+        params_grid.addWidget(self.lbl_reflected_strength, 24, 0)
+        params_grid.addWidget(self.spin_reflected_strength, 24, 1)
+        params_grid.addWidget(self.lbl_reflected_bowing, 25, 0)
+        params_grid.addWidget(self.spin_reflected_bowing, 25, 1)
+        params_grid.addWidget(self.lbl_reflected_microtrench, 26, 0)
+        params_grid.addWidget(self.spin_reflected_microtrench, 26, 1)
+        params_grid.addWidget(self.lbl_reflected_range, 27, 0)
+        params_grid.addWidget(self.spin_reflected_range, 27, 1)
+        self.lbl_redepo_section = self._make_parameter_section(
+            "4번 Sputter redeposition",
+            color="#7c2d12",
+            background="#fff7ed",
+            border="#fdba74",
+        )
+        params_grid.addWidget(self.lbl_redepo_section, 28, 0, 1, 2)
+        params_grid.addWidget(self.chk_redepo, 29, 0, 1, 2)
+        self.lbl_redepo_source = QLabel("Source")
+        self.lbl_redepo_efficiency = QLabel("Redepo %")
+        self.lbl_redepo_emit_power = QLabel("Emit power")
+        self.lbl_redepo_distance_power = QLabel("Dist power")
+        params_grid.addWidget(self.lbl_redepo_source, 30, 0)
+        params_grid.addWidget(self.cmb_redepo_source_model, 30, 1)
+        params_grid.addWidget(self.lbl_redepo_efficiency, 31, 0)
+        params_grid.addWidget(self.spin_redepo_efficiency, 31, 1)
+        params_grid.addWidget(self.lbl_redepo_emit_power, 32, 0)
+        params_grid.addWidget(self.spin_redepo_emit_power, 32, 1)
+        params_grid.addWidget(self.lbl_redepo_distance_power, 33, 0)
+        params_grid.addWidget(self.spin_redepo_distance_power, 33, 1)
+        params_group.setLayout(params_grid)
+
+        action_group = QGroupBox("Run")
+        action_layout = QVBoxLayout()
+        action_layout.setContentsMargins(10, 10, 10, 10)
+        action_buttons = QHBoxLayout()
+        action_buttons.addWidget(self.btn_open_json)
+        action_buttons.addWidget(self.btn_run)
+        action_buttons.addWidget(self.btn_reset)
+        action_layout.addLayout(action_buttons)
+        action_layout.addLayout(run_row)
+        action_group.setLayout(action_layout)
+
+        split_group = QGroupBox("Split / Compare")
+        split_grid = QGridLayout()
+        split_grid.setContentsMargins(10, 10, 10, 10)
+        split_grid.setHorizontalSpacing(8)
+        split_grid.setVerticalSpacing(8)
+        split_grid.addWidget(QLabel("Target"), 0, 0)
+        split_grid.addWidget(self.cmb_split_parameter, 0, 1)
+        split_grid.addWidget(QLabel("Start"), 1, 0)
+        split_grid.addWidget(self.spin_split_start, 1, 1)
+        split_grid.addWidget(QLabel("End"), 2, 0)
+        split_grid.addWidget(self.spin_split_end, 2, 1)
+        split_grid.addWidget(QLabel("Step"), 3, 0)
+        split_grid.addWidget(self.spin_split_step, 3, 1)
+        split_buttons = QHBoxLayout()
+        split_buttons.addWidget(self.btn_run_split)
+        split_buttons.addWidget(self.btn_compare_gapsim_angle)
+        split_grid.addLayout(split_buttons, 4, 0, 1, 2)
+        split_group.setLayout(split_grid)
+
+        note_group = QGroupBox("요청사항 / 물리 메모")
+        note_layout = QVBoxLayout()
+        note_layout.setContentsMargins(10, 10, 10, 10)
+        note_layout.addWidget(self.edit_request_note)
+        note_group.setLayout(note_layout)
+
+        gaussian_group = QGroupBox("Sputter Gaussian")
+        gaussian_layout = QVBoxLayout()
+        gaussian_layout.setContentsMargins(10, 10, 10, 10)
+        gaussian_layout.addWidget(self.sputter_curve_editor)
+        gaussian_group.setLayout(gaussian_layout)
+
+        ion_map_group = QGroupBox("Ion Transmission Map")
+        ion_map_layout = QVBoxLayout()
+        ion_map_layout.setContentsMargins(10, 10, 10, 10)
+        ion_map_layout.addWidget(self.ion_transmission_editor)
+        ion_map_group.setLayout(ion_map_layout)
+
+        self.emulator_group = emulator_group
+        self.params_group = params_group
+        self.split_group = split_group
+        self.ion_map_group = ion_map_group
+        self.gaussian_group = gaussian_group
+        self._sputter_widgets = [
+            self.lbl_etch_section,
+            self.chk_sputter,
+            self.lbl_sputter_section,
+            self.lbl_sputter_strength,
+            self.spin_sputter_strength,
+            self.lbl_sputter_peak_pct,
+            self.spin_sputter_peak_pct,
+            self.lbl_sputter_peak,
+            self.spin_sputter_peak,
+            self.lbl_sputter_width,
+            self.spin_sputter_width,
+            self.lbl_sputter_smoothing,
+            self.spin_sputter_smoothing,
+        ]
+        self._ion_transmission_widgets = [
+            self.lbl_ion_depth_section,
+            self.chk_ion_transmission,
+            self.lbl_ion_start_depth,
+            self.spin_ion_start_depth,
+            self.lbl_ion_end_depth,
+            self.spin_ion_end_depth,
+            self.lbl_ion_decay_strength,
+            self.spin_ion_decay_strength,
+            self.lbl_ion_floor,
+            self.spin_ion_floor,
+            self.lbl_ion_curve_power,
+            self.spin_ion_curve_power,
+            self.lbl_ion_geometry_section,
+            self.lbl_ion_aperture_shadow,
+            self.ion_aperture_shadow_row,
+            self.lbl_ion_lateral_shadow,
+            self.ion_lateral_shadow_row,
+            self.lbl_ion_edge_shadow,
+            self.ion_edge_shadow_row,
+            self.ion_map_group,
+        ]
+        self._reflected_ion_widgets = [
+            self.lbl_reflected_section,
+            self.chk_reflected_ion,
+            self.lbl_reflected_strength,
+            self.spin_reflected_strength,
+            self.lbl_reflected_bowing,
+            self.spin_reflected_bowing,
+            self.lbl_reflected_microtrench,
+            self.spin_reflected_microtrench,
+            self.lbl_reflected_range,
+            self.spin_reflected_range,
+        ]
+        self._redeposition_widgets = [
+            self.lbl_redepo_section,
+            self.chk_redepo,
+            self.lbl_redepo_source,
+            self.cmb_redepo_source_model,
+            self.lbl_redepo_efficiency,
+            self.spin_redepo_efficiency,
+            self.lbl_redepo_emit_power,
+            self.spin_redepo_emit_power,
+            self.lbl_redepo_distance_power,
+            self.spin_redepo_distance_power,
+        ]
+
+        right_top_content = QWidget()
+        right_top_layout = QVBoxLayout()
+        right_top_layout.setContentsMargins(0, 0, 0, 0)
+        right_top_layout.setSpacing(8)
+        right_top_layout.addWidget(emulator_group)
+        right_top_layout.addWidget(params_group)
+        right_top_layout.addWidget(action_group)
+        right_top_layout.addWidget(split_group)
+        right_top_layout.addWidget(note_group)
+        right_top_layout.addStretch(1)
+        right_top_content.setLayout(right_top_layout)
+
+        right_top_scroll = QScrollArea()
+        right_top_scroll.setWidgetResizable(True)
+        right_top_scroll.setWidget(right_top_content)
+        right_top_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        right_panel = QWidget()
+        right_panel.setMinimumWidth(360)
+        right_panel.setMaximumWidth(460)
+        right_layout = QVBoxLayout()
+        right_layout.setContentsMargins(6, 8, 8, 8)
+        right_layout.setSpacing(8)
+        right_layout.addWidget(right_top_scroll, 1)
+        right_layout.addWidget(ion_map_group)
+        right_layout.addWidget(gaussian_group)
+        right_panel.setLayout(right_layout)
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.addWidget(left_panel)
+        splitter.addWidget(right_panel)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 0)
+        splitter.setSizes([880, 400])
+        splitter.setChildrenCollapsible(False)
+
+        root = QVBoxLayout()
+        root.setContentsMargins(0, 0, 0, 0)
+        root.addWidget(splitter, 1)
+
+        central = QWidget()
+        central.setLayout(root)
+        self.setCentralWidget(central)
+
+        self.btn_run.clicked.connect(self.run_emulation)
+        self.btn_reset.clicked.connect(self.reset_defaults)
+        self.btn_open_json.clicked.connect(self.open_replay_json_dialog)
+        self.btn_open_run_dir.clicked.connect(self.open_last_run_dir)
+        self.btn_run_split.clicked.connect(self.run_split_test)
+        self.btn_compare_gapsim_angle.clicked.connect(self.run_compare_for_active_emulator)
+        self.btn_new_emulator.clicked.connect(self.create_new_emulator)
+        self.cmb_split_parameter.currentIndexChanged.connect(self.apply_split_parameter_defaults)
+        self.slider_frame.valueChanged.connect(self.show_frame)
+        self.chk_sputter.toggled.connect(self.sync_etch_control_availability)
+        self.chk_ion_transmission.toggled.connect(self.sync_etch_control_availability)
+        self.chk_reflected_ion.toggled.connect(self.sync_etch_control_availability)
+        self.chk_redepo.toggled.connect(self.sync_etch_control_availability)
+        self.spin_sputter_strength.valueChanged.connect(self.sync_sputter_curve_cap_from_spin)
+        self.spin_sputter_peak_pct.valueChanged.connect(self.sync_sputter_curve_from_spins)
+        self.spin_sputter_peak.valueChanged.connect(self.sync_sputter_curve_from_spins)
+        self.spin_sputter_width.valueChanged.connect(self.sync_sputter_curve_from_spins)
+        self.sputter_curve_editor.parametersChanged.connect(self.apply_sputter_curve_parameters)
+        self.spin_ion_start_depth.valueChanged.connect(self.sync_ion_transmission_editor_from_spins)
+        self.spin_ion_decay_strength.valueChanged.connect(self.sync_ion_transmission_editor_from_spins)
+        self.spin_ion_floor.valueChanged.connect(self.sync_ion_transmission_editor_from_spins)
+        self.spin_ion_curve_power.valueChanged.connect(self.sync_ion_transmission_editor_from_spins)
+        self.ion_transmission_editor.parametersChanged.connect(self.apply_ion_transmission_editor_parameters)
+        self.slider_ion_aperture_shadow.valueChanged.connect(self.sync_ion_shadow_slider_labels)
+        self.slider_ion_lateral_shadow.valueChanged.connect(self.sync_ion_shadow_slider_labels)
+        self.slider_ion_edge_shadow.valueChanged.connect(self.sync_ion_shadow_slider_labels)
+        self.sync_ion_shadow_slider_labels()
+        self.spin_ion_end_depth.valueChanged.connect(self.sync_ion_transmission_editor_from_spins)
+
+        self.apply_emulator_mode(run=False)
+
+    def active_emulator_number(self) -> int:
+        checked_id = self.emulator_button_group.checkedId()
+        if checked_id >= 0:
+            return int(checked_id)
+        return int(self._active_emulator_number)
+
+    def _add_emulator_toggle(self, number: int) -> None:
+        target = max(0, min(MAX_EMULATOR_NUMBER, int(number)))
+        if target in self._emulator_buttons:
+            return
+        if target not in self._emulator_numbers:
+            self._emulator_numbers.append(target)
+            self._emulator_numbers.sort()
+
+        button = QPushButton(f"{target:02d}")
+        button.setCheckable(True)
+        button.setFixedWidth(44)
+        button.setToolTip(_emulator_mode_label(target))
+        button.clicked.connect(lambda _checked=False, n=target: self.set_active_emulator_number(n))
+        self.emulator_button_group.addButton(button, target)
+        insert_at = max(0, self.emulator_toggle_row.count() - 1)
+        self.emulator_toggle_row.insertWidget(insert_at, button)
+        self._emulator_buttons[target] = button
+        if target == self._active_emulator_number:
+            button.setChecked(True)
+        self._sync_new_emulator_button()
+
+    def _sync_new_emulator_button(self) -> None:
+        if not hasattr(self, "btn_new_emulator"):
+            return
+        self.btn_new_emulator.setEnabled(next_emulator_number(self._emulator_numbers) is not None)
+
+    def _persist_emulator_numbers(self) -> None:
+        save_created_emulator_numbers(self._emulator_numbers)
+
+    def _create_emulator_slot(self, number: int, *, create_research_slot: bool) -> None:
+        if create_research_slot:
+            ensure_emulator_research_slot(number)
+        self._add_emulator_toggle(number)
+
+    def create_new_emulator(self) -> None:
+        number = next_emulator_number(self._emulator_numbers)
+        if number is None:
+            QMessageBox.information(
+                self,
+                "Emulator",
+                f"Emulator slots are full. Valid numbers are 00 to {MAX_EMULATOR_NUMBER:02d}.",
+            )
+            return
+        self._create_emulator_slot(number, create_research_slot=True)
+        self._persist_emulator_numbers()
+        self.set_active_emulator_number(number)
+        self.statusBar().showMessage(f"Created emulator {number:02d}", 3500)
+
+    def set_active_emulator_number(self, number: int, *, run: bool = False) -> None:
+        target = max(0, min(MAX_EMULATOR_NUMBER, int(number)))
+        created_any = False
+        for slot_number in range(0, target + 1):
+            if slot_number not in self._emulator_buttons:
+                self._create_emulator_slot(slot_number, create_research_slot=True)
+                created_any = True
+        if created_any:
+            self._persist_emulator_numbers()
+        button = self._emulator_buttons.get(target)
+        if button is None:
+            return
+        button.setChecked(True)
+        self.apply_emulator_mode(run=run)
+
+    def _active_emulator_supports_sputter(self) -> bool:
+        return self.active_emulator_number() in (1, 2, 3, 4)
+
+    def _active_emulator_supports_ion_transmission(self) -> bool:
+        return self.active_emulator_number() == 2
+
+    def _active_emulator_supports_reflected_ion(self) -> bool:
+        return self.active_emulator_number() == 3
+
+    def _active_emulator_supports_redeposition(self) -> bool:
+        return self.active_emulator_number() == 4
+
+    def _populate_split_parameters(self) -> None:
+        previous = self.cmb_split_parameter.currentData()
+        options = [
+            ("Depo A/CYC", "angstrom_per_cycle"),
+            ("Cycles", "cycles"),
+        ]
+        if self._active_emulator_supports_sputter():
+            options = [
+                ("Etch A/CYC", "sputter_strength_a_per_cycle"),
+                ("Peak %", "sputter_peak_pct"),
+                ("Peak angle", "sputter_peak_angle_deg"),
+                ("Width", "sputter_width_deg"),
+                *options,
+            ]
+        if self._active_emulator_supports_ion_transmission():
+            options = [
+                ("Ion start %", "ion_transmission_start_depth_pct"),
+                ("Ion end %", "ion_transmission_end_depth_pct"),
+                ("Ion drop %", "ion_transmission_decay_strength_pct"),
+                ("Ion floor %", "ion_transmission_floor_pct"),
+                ("Ion curve", "ion_transmission_curve_power"),
+                ("Ion aperture %", "ion_transmission_aperture_shadow_pct"),
+                ("Ion hidden %", "ion_transmission_lateral_shadow_pct"),
+                ("Ion edge %", "ion_transmission_edge_shadow_pct"),
+                *options,
+            ]
+        if self._active_emulator_supports_reflected_ion():
+            options = [
+                ("Reflect %", "reflected_ion_strength_pct"),
+                ("Bowing", "reflected_ion_bowing_weight"),
+                ("Microtrench", "reflected_ion_microtrench_weight"),
+                ("Reflect range", "reflected_ion_range_a"),
+                *options,
+            ]
+        if self._active_emulator_supports_redeposition():
+            options = [
+                ("Redepo %", "redepo_efficiency_pct"),
+                ("Emit power", "redepo_emit_power"),
+                ("Dist power", "redepo_distance_power"),
+                *options,
+            ]
+
+        self.cmb_split_parameter.blockSignals(True)
+        self.cmb_split_parameter.clear()
+        for label, key in options:
+            self.cmb_split_parameter.addItem(label, key)
+        restored_idx = self.cmb_split_parameter.findData(previous)
+        self.cmb_split_parameter.setCurrentIndex(restored_idx if restored_idx >= 0 else 0)
+        self.cmb_split_parameter.blockSignals(False)
+        self.apply_split_parameter_defaults()
+
+    def apply_emulator_mode(self, _index: int = 0, *, run: bool = True) -> None:
+        number = self.active_emulator_number()
+        changed = number != self._active_emulator_number
+        self._active_emulator_number = number
+        supports_sputter = self._active_emulator_supports_sputter()
+
+        self.setWindowTitle(f"Trench Depo Emulation - Emulator {number:02d}")
+        if supports_sputter:
+            if number == 2:
+                self.lbl_etch_section.setText("Etch switch (1번 direct + 2번 modifier)")
+            elif number == 3:
+                self.lbl_etch_section.setText("Etch switch (1번 direct + 3번 reflected)")
+            elif number == 4:
+                self.lbl_etch_section.setText("Etch switch (1번 direct + 4번 redepo)")
+            else:
+                self.lbl_etch_section.setText("Etch switch (1번 direct)")
+            self.lbl_sputter_section.setText(
+                "1번 Direct sputter kernel" if number == 1 else "기존 1번 Direct sputter kernel"
+            )
+        for widget in self._sputter_widgets:
+            widget.setVisible(supports_sputter)
+        supports_ion_transmission = self._active_emulator_supports_ion_transmission()
+        supports_reflected_ion = self._active_emulator_supports_reflected_ion()
+        supports_redeposition = self._active_emulator_supports_redeposition()
+        for widget in self._ion_transmission_widgets:
+            widget.setVisible(supports_ion_transmission)
+        for widget in self._reflected_ion_widgets:
+            widget.setVisible(supports_reflected_ion)
+        for widget in self._redeposition_widgets:
+            widget.setVisible(supports_redeposition)
+        self.gaussian_group.setVisible(supports_sputter)
+        self.btn_compare_gapsim_angle.setVisible(supports_sputter)
+        self.btn_compare_gapsim_angle.setEnabled(supports_sputter)
+        self.btn_compare_gapsim_angle.setText(
+            "Compare Emulator 01"
+            if (supports_ion_transmission or supports_reflected_ion or supports_redeposition)
+            else "Compare GapSim Angle"
+        )
+        self.ion_map_group.setTitle("2 Ion Transmission Depth Map")
+        self.gaussian_group.setTitle("1 Direct Sputter Gaussian")
+
+        if supports_sputter:
+            if changed:
+                self.chk_sputter.setChecked(True)
+                self.chk_ion_transmission.setChecked(supports_ion_transmission)
+                self.chk_reflected_ion.setChecked(supports_reflected_ion)
+                self.chk_redepo.setChecked(supports_redeposition)
+            if supports_ion_transmission:
+                self.edit_request_note.setPlaceholderText("요청사항 / ion transmission, shadowing 메모를 적으면 run 파일명과 요약에 같이 들어갑니다.")
+            elif supports_reflected_ion:
+                self.edit_request_note.setPlaceholderText("요청사항 / reflected ion, bowing, microtrenching 메모를 적으면 run 파일명과 요약에 같이 들어갑니다.")
+            elif supports_redeposition:
+                self.edit_request_note.setPlaceholderText("요청사항 / redeposition 결합 가설과 비교 메모를 적으면 run 파일명과 요약에 같이 들어갑니다.")
+            else:
+                self.edit_request_note.setPlaceholderText("요청사항 / etch 물리 메모를 적으면 run 파일명과 요약에 같이 들어갑니다.")
+        else:
+            self.chk_sputter.setChecked(False)
+            self.chk_ion_transmission.setChecked(False)
+            self.chk_reflected_ion.setChecked(False)
+            self.chk_redepo.setChecked(False)
+            if number == 0:
+                self.edit_request_note.setPlaceholderText("요청사항 / conformal depo 메모를 적으면 run 파일명과 요약에 같이 들어갑니다.")
+            else:
+                self.edit_request_note.setPlaceholderText("아직 물리 모델이 배정되지 않은 슬롯입니다. 기본 conformal depo로만 실행됩니다.")
+
+        self._populate_split_parameters()
+        self.sync_etch_control_availability()
+        if run:
+            self._schedule_emulator_preview_run()
+
+    def _schedule_emulator_preview_run(self) -> None:
+        self.statusBar().showMessage("Emulator mode changed", 1200)
+        self._emulator_run_timer.start()
+
+    def _run_deferred_emulator_preview(self) -> None:
+        self.run_emulation(save_artifacts=False, use_preview_cache=True)
+
+    def sync_sputter_curve_from_spins(self, _value: float = 0.0) -> None:
+        if self._syncing_sputter_curve:
+            return
+        self._syncing_sputter_curve = True
+        try:
+            self.sputter_curve_editor.set_parameters(
+                float(self.spin_sputter_peak_pct.value()),
+                float(self.spin_sputter_peak.value()),
+                float(self.spin_sputter_width.value()),
+            )
+            self.sputter_curve_editor.set_etch_cap_a(float(self.spin_sputter_strength.value()))
+        finally:
+            self._syncing_sputter_curve = False
+
+    def sync_sputter_curve_cap_from_spin(self, _value: float = 0.0) -> None:
+        self.sputter_curve_editor.set_etch_cap_a(float(self.spin_sputter_strength.value()))
+
+    def apply_sputter_curve_parameters(self, peak_pct: float, peak_deg: float, width_deg: float) -> None:
+        if self._syncing_sputter_curve:
+            return
+        self._syncing_sputter_curve = True
+        try:
+            self.spin_sputter_peak_pct.setValue(float(peak_pct))
+            self.spin_sputter_peak.setValue(float(peak_deg))
+            self.spin_sputter_width.setValue(float(width_deg))
+            self.sputter_curve_editor.set_parameters(
+                float(self.spin_sputter_peak_pct.value()),
+                float(self.spin_sputter_peak.value()),
+                float(self.spin_sputter_width.value()),
+            )
+            self.sputter_curve_editor.set_etch_cap_a(float(self.spin_sputter_strength.value()))
+        finally:
+            self._syncing_sputter_curve = False
+
+    def sync_ion_transmission_editor_from_spins(self, _value: float = 0.0) -> None:
+        if self._syncing_ion_curve:
+            return
+        self._syncing_ion_curve = True
+        try:
+            self.ion_transmission_editor.set_parameters(
+                float(self.spin_ion_start_depth.value()),
+                float(self.spin_ion_end_depth.value()),
+                float(self.spin_ion_decay_strength.value()),
+                float(self.spin_ion_floor.value()),
+                float(self.spin_ion_curve_power.value()),
+            )
+        finally:
+            self._syncing_ion_curve = False
+
+    def apply_ion_transmission_editor_parameters(
+        self,
+        start_depth_pct: float,
+        end_depth_pct: float,
+        decay_strength_pct: float,
+        floor_pct: float,
+        curve_power: float,
+    ) -> None:
+        if self._syncing_ion_curve:
+            return
+        self._syncing_ion_curve = True
+        try:
+            self.spin_ion_start_depth.setValue(float(start_depth_pct))
+            self.spin_ion_end_depth.setValue(float(end_depth_pct))
+            self.spin_ion_decay_strength.setValue(float(decay_strength_pct))
+            self.spin_ion_floor.setValue(float(floor_pct))
+            self.spin_ion_curve_power.setValue(float(curve_power))
+            self.ion_transmission_editor.set_parameters(
+                float(self.spin_ion_start_depth.value()),
+                float(self.spin_ion_end_depth.value()),
+                float(self.spin_ion_decay_strength.value()),
+                float(self.spin_ion_floor.value()),
+                float(self.spin_ion_curve_power.value()),
+            )
+        finally:
+            self._syncing_ion_curve = False
+
+    def sync_ion_shadow_slider_labels(self, _value: int = 0) -> None:
+        self.lbl_ion_aperture_shadow_value.setText(f"{int(self.slider_ion_aperture_shadow.value())}%")
+        self.lbl_ion_lateral_shadow_value.setText(f"{int(self.slider_ion_lateral_shadow.value())}%")
+        self.lbl_ion_edge_shadow_value.setText(f"{int(self.slider_ion_edge_shadow.value())}%")
+
+    def sync_etch_control_availability(self, _checked: bool = False) -> None:
+        supports_sputter = self._active_emulator_supports_sputter()
+        supports_ion_transmission = self._active_emulator_supports_ion_transmission()
+        supports_reflected_ion = self._active_emulator_supports_reflected_ion()
+        supports_redeposition = self._active_emulator_supports_redeposition()
+        etch_enabled = bool(supports_sputter and self.chk_sputter.isChecked())
+
+        direct_sputter_detail_widgets = [
+            self.lbl_sputter_section,
+            self.lbl_sputter_strength,
+            self.spin_sputter_strength,
+            self.lbl_sputter_peak_pct,
+            self.spin_sputter_peak_pct,
+            self.lbl_sputter_peak,
+            self.spin_sputter_peak,
+            self.lbl_sputter_width,
+            self.spin_sputter_width,
+            self.lbl_sputter_smoothing,
+            self.spin_sputter_smoothing,
+            self.gaussian_group,
+        ]
+        for widget in direct_sputter_detail_widgets:
+            widget.setEnabled(etch_enabled)
+
+        self.chk_ion_transmission.setEnabled(etch_enabled and supports_ion_transmission)
+        ion_enabled = bool(
+            etch_enabled
+            and supports_ion_transmission
+            and self.chk_ion_transmission.isChecked()
+        )
+        ion_detail_widgets = [
+            self.lbl_ion_depth_section,
+            self.lbl_ion_start_depth,
+            self.spin_ion_start_depth,
+            self.lbl_ion_end_depth,
+            self.spin_ion_end_depth,
+            self.lbl_ion_decay_strength,
+            self.spin_ion_decay_strength,
+            self.lbl_ion_floor,
+            self.spin_ion_floor,
+            self.lbl_ion_curve_power,
+            self.spin_ion_curve_power,
+            self.lbl_ion_geometry_section,
+            self.lbl_ion_aperture_shadow,
+            self.ion_aperture_shadow_row,
+            self.lbl_ion_lateral_shadow,
+            self.ion_lateral_shadow_row,
+            self.lbl_ion_edge_shadow,
+            self.ion_edge_shadow_row,
+            self.ion_map_group,
+        ]
+        for widget in ion_detail_widgets:
+            widget.setEnabled(ion_enabled)
+
+        self.chk_reflected_ion.setEnabled(etch_enabled and supports_reflected_ion)
+        reflected_enabled = bool(
+            etch_enabled
+            and supports_reflected_ion
+            and self.chk_reflected_ion.isChecked()
+        )
+        for widget in [
+            self.lbl_reflected_section,
+            self.lbl_reflected_strength,
+            self.spin_reflected_strength,
+            self.lbl_reflected_bowing,
+            self.spin_reflected_bowing,
+            self.lbl_reflected_microtrench,
+            self.spin_reflected_microtrench,
+            self.lbl_reflected_range,
+            self.spin_reflected_range,
+        ]:
+            widget.setEnabled(reflected_enabled)
+
+        self.chk_redepo.setEnabled(etch_enabled and supports_redeposition)
+        redepo_enabled = bool(
+            etch_enabled
+            and supports_redeposition
+            and self.chk_redepo.isChecked()
+        )
+        for widget in [
+            self.lbl_redepo_section,
+            self.lbl_redepo_source,
+            self.cmb_redepo_source_model,
+            self.lbl_redepo_efficiency,
+            self.spin_redepo_efficiency,
+            self.lbl_redepo_emit_power,
+            self.spin_redepo_emit_power,
+            self.lbl_redepo_distance_power,
+            self.spin_redepo_distance_power,
+        ]:
+            widget.setEnabled(redepo_enabled)
+
+    def reset_defaults(self) -> None:
+        supports_sputter = self._active_emulator_supports_sputter()
+        supports_ion_transmission = self._active_emulator_supports_ion_transmission()
+        supports_reflected_ion = self._active_emulator_supports_reflected_ion()
+        supports_redeposition = self._active_emulator_supports_redeposition()
+        self.spin_cycles.setValue(20)
+        self.spin_angstrom_per_cycle.setValue(10.0)
+        self.chk_sputter.setChecked(supports_sputter)
+        self.chk_ion_transmission.setChecked(supports_ion_transmission)
+        self.chk_reflected_ion.setChecked(supports_reflected_ion)
+        self.chk_redepo.setChecked(supports_redeposition)
+        self.spin_ion_start_depth.setValue(0.0)
+        self.spin_ion_end_depth.setValue(100.0)
+        self.spin_ion_decay_strength.setValue(100.0)
+        self.spin_ion_floor.setValue(0.0)
+        self.spin_ion_curve_power.setValue(1.0)
+        self.slider_ion_aperture_shadow.setValue(100)
+        self.slider_ion_lateral_shadow.setValue(100)
+        self.slider_ion_edge_shadow.setValue(100)
+        self.sync_ion_shadow_slider_labels()
+        self.spin_reflected_strength.setValue(35.0)
+        self.spin_reflected_bowing.setValue(0.75)
+        self.spin_reflected_microtrench.setValue(1.0)
+        self.spin_reflected_range.setValue(1600.0)
+        self.cmb_redepo_source_model.setCurrentIndex(max(0, self.cmb_redepo_source_model.findData("model1")))
+        self.spin_redepo_efficiency.setValue(25.0)
+        self.spin_redepo_emit_power.setValue(1.0)
+        self.spin_redepo_distance_power.setValue(1.0)
+        self.spin_sputter_strength.setValue(4.0)
+        self.spin_sputter_peak_pct.setValue(100.0)
+        self.spin_sputter_peak.setValue(55.0)
+        self.spin_sputter_width.setValue(14.0)
+        self.spin_sputter_smoothing.setValue(40.0)
+        self._populate_split_parameters()
+        self.sync_etch_control_availability()
+        if self.active_emulator_number() == 3:
+            self.edit_request_note.setPlainText("1번 direct sputter 위에 reflected ion bowing/microtrenching 추가 검증")
+        elif self.active_emulator_number() == 4:
+            self.edit_request_note.setPlainText("1번 direct sputter 위에 single-bounce LOS redeposition 결합 검증")
+        elif self.active_emulator_number() == 2:
+            self.edit_request_note.setPlainText("계단식 넓은 트렌치에서 ion transmission shadowing 검증")
+        elif self.active_emulator_number() == 1:
+            self.edit_request_note.setPlainText("각도기반 direct sputter etch 검증")
+        elif self.active_emulator_number() == 0:
+            self.edit_request_note.setPlainText("라운드 conformal offset 기반 트렌치 증착")
+        else:
+            self.edit_request_note.setPlainText("미배정 슬롯: 기본 conformal deposition만 실행")
+        self.run_emulation(save_artifacts=False)
+
+    def apply_split_parameter_defaults(self, _index: int = 0) -> None:
+        parameter = str(self.cmb_split_parameter.currentData())
+        if parameter == "cycles":
+            values = (5.0, 30.0, 5.0, 0, 0.0, 10000.0)
+        elif parameter == "angstrom_per_cycle":
+            values = (0.0, 20.0, 5.0, 3, 0.0, 10000.0)
+        elif parameter == "sputter_peak_pct":
+            values = (40.0, 100.0, 20.0, 1, 0.0, 100.0)
+        elif parameter == "sputter_peak_angle_deg":
+            values = (35.0, 75.0, 10.0, 1, 0.0, 89.9)
+        elif parameter == "sputter_width_deg":
+            values = (6.0, 24.0, 6.0, 1, 1.0, 60.0)
+        elif parameter == "ion_transmission_start_depth_pct":
+            values = (0.0, 60.0, 20.0, 1, 0.0, 100.0)
+        elif parameter == "ion_transmission_end_depth_pct":
+            values = (40.0, 100.0, 20.0, 1, 0.0, 100.0)
+        elif parameter == "ion_transmission_decay_strength_pct":
+            values = (0.0, 100.0, 25.0, 1, 0.0, 100.0)
+        elif parameter == "ion_transmission_floor_pct":
+            values = (0.0, 40.0, 10.0, 1, 0.0, 100.0)
+        elif parameter == "ion_transmission_curve_power":
+            values = (0.5, 2.0, 0.5, 2, 0.2, 6.0)
+        elif parameter in {
+            "ion_transmission_aperture_shadow_pct",
+            "ion_transmission_lateral_shadow_pct",
+            "ion_transmission_edge_shadow_pct",
+        }:
+            values = (0.0, 100.0, 25.0, 1, 0.0, 100.0)
+        elif parameter == "reflected_ion_strength_pct":
+            values = (0.0, 60.0, 20.0, 1, 0.0, 100.0)
+        elif parameter == "reflected_ion_bowing_weight":
+            values = (0.0, 1.2, 0.4, 2, 0.0, 2.0)
+        elif parameter == "reflected_ion_microtrench_weight":
+            values = (0.0, 1.5, 0.5, 2, 0.0, 2.0)
+        elif parameter == "reflected_ion_range_a":
+            values = (600.0, 2400.0, 600.0, 0, 50.0, 10000.0)
+        elif parameter == "redepo_efficiency_pct":
+            values = (0.0, 50.0, 10.0, 1, 0.0, 100.0)
+        elif parameter in {"redepo_emit_power", "redepo_distance_power"}:
+            values = (0.5, 2.0, 0.5, 2, 0.0, 8.0)
+        else:
+            values = (0.0, 16.0, 4.0, 3, 0.0, 100.0)
+
+        start, end, step, decimals, minimum, maximum = values
+        for spin in (self.spin_split_start, self.spin_split_end):
+            spin.setDecimals(int(decimals))
+            spin.setRange(float(minimum), float(maximum))
+            spin.setSingleStep(max(float(step), 1.0))
+        self.spin_split_step.setDecimals(int(decimals))
+        self.spin_split_step.setRange(0.001 if int(decimals) > 0 else 1.0, float(maximum))
+        self.spin_split_step.setSingleStep(max(float(step), 1.0))
+        self.spin_split_start.setValue(float(start))
+        self.spin_split_end.setValue(float(end))
+        self.spin_split_step.setValue(float(step))
+
+    def current_config(self) -> TrenchDepoConfig:
+        active_emulator = self.active_emulator_number()
+        supports_sputter = self._active_emulator_supports_sputter()
+        supports_ion_transmission = self._active_emulator_supports_ion_transmission()
+        supports_reflected_ion = self._active_emulator_supports_reflected_ion()
+        supports_redeposition = self._active_emulator_supports_redeposition()
+        etch_enabled = bool(supports_sputter and self.chk_sputter.isChecked())
+        return TrenchDepoConfig(
+            points=(
+                ION_TRANSMISSION_STEPPED_TRENCH_POINTS
+                if active_emulator == 2
+                else TrenchDepoConfig().points
+            ),
+            cycles=int(self.spin_cycles.value()),
+            angstrom_per_cycle=float(self.spin_angstrom_per_cycle.value()),
+            sputter_enabled=etch_enabled,
+            sputter_strength_a_per_cycle=(
+                float(self.spin_sputter_strength.value()) if supports_sputter else 0.0
+            ),
+            sputter_peak_pct=float(self.spin_sputter_peak_pct.value()),
+            sputter_peak_angle_deg=float(self.spin_sputter_peak.value()),
+            sputter_width_deg=float(self.spin_sputter_width.value()),
+            sputter_smoothing_a=float(self.spin_sputter_smoothing.value()),
+            ion_transmission_enabled=bool(
+                etch_enabled and supports_ion_transmission and self.chk_ion_transmission.isChecked()
+            ),
+            ion_transmission_start_depth_pct=(
+                float(self.spin_ion_start_depth.value()) if supports_ion_transmission else 0.0
+            ),
+            ion_transmission_end_depth_pct=(
+                float(self.spin_ion_end_depth.value()) if supports_ion_transmission else 100.0
+            ),
+            ion_transmission_decay_strength_pct=(
+                float(self.spin_ion_decay_strength.value()) if supports_ion_transmission else 100.0
+            ),
+            ion_transmission_floor_pct=(
+                float(self.spin_ion_floor.value()) if supports_ion_transmission else 0.0
+            ),
+            ion_transmission_curve_power=(
+                float(self.spin_ion_curve_power.value()) if supports_ion_transmission else 1.0
+            ),
+            ion_transmission_aperture_shadow_pct=(
+                float(self.slider_ion_aperture_shadow.value()) if supports_ion_transmission else 100.0
+            ),
+            ion_transmission_lateral_shadow_pct=(
+                float(self.slider_ion_lateral_shadow.value()) if supports_ion_transmission else 100.0
+            ),
+            ion_transmission_edge_shadow_pct=(
+                float(self.slider_ion_edge_shadow.value()) if supports_ion_transmission else 100.0
+            ),
+            reflected_ion_enabled=bool(
+                etch_enabled and supports_reflected_ion and self.chk_reflected_ion.isChecked()
+            ),
+            reflected_ion_strength_pct=(
+                float(self.spin_reflected_strength.value()) if supports_reflected_ion else 0.0
+            ),
+            reflected_ion_bowing_weight=float(self.spin_reflected_bowing.value()),
+            reflected_ion_microtrench_weight=float(self.spin_reflected_microtrench.value()),
+            reflected_ion_range_a=float(self.spin_reflected_range.value()),
+            redepo_enabled=bool(
+                etch_enabled and supports_redeposition and self.chk_redepo.isChecked()
+            ),
+            redepo_source_model=str(self.cmb_redepo_source_model.currentData() or "model1"),
+            redepo_efficiency_pct=(
+                float(self.spin_redepo_efficiency.value()) if supports_redeposition else 0.0
+            ),
+            redepo_emit_power=float(self.spin_redepo_emit_power.value()),
+            redepo_distance_power=float(self.spin_redepo_distance_power.value()),
+        )
+
+    def current_etch_config(self) -> TrenchDepoConfig:
+        cfg = self.current_config()
+        if cfg.sputter_enabled or cfg.sputter_strength_a_per_cycle <= 0.0:
+            return cfg
+        return TrenchDepoConfig(
+            points=cfg.points,
+            cycles=cfg.cycles,
+            angstrom_per_cycle=cfg.angstrom_per_cycle,
+            reparam_ds_a=cfg.reparam_ds_a,
+            sputter_enabled=True,
+            sputter_strength_a_per_cycle=cfg.sputter_strength_a_per_cycle,
+            sputter_peak_pct=cfg.sputter_peak_pct,
+            sputter_peak_angle_deg=cfg.sputter_peak_angle_deg,
+            sputter_width_deg=cfg.sputter_width_deg,
+            sputter_smoothing_a=cfg.sputter_smoothing_a,
+            ion_transmission_enabled=cfg.ion_transmission_enabled,
+            ion_transmission_override=cfg.ion_transmission_override,
+            ion_transmission_start_depth_pct=cfg.ion_transmission_start_depth_pct,
+            ion_transmission_end_depth_pct=cfg.ion_transmission_end_depth_pct,
+            ion_transmission_decay_strength_pct=cfg.ion_transmission_decay_strength_pct,
+            ion_transmission_floor_pct=cfg.ion_transmission_floor_pct,
+            ion_transmission_curve_power=cfg.ion_transmission_curve_power,
+            ion_transmission_aperture_shadow_pct=cfg.ion_transmission_aperture_shadow_pct,
+            ion_transmission_lateral_shadow_pct=cfg.ion_transmission_lateral_shadow_pct,
+            ion_transmission_edge_shadow_pct=cfg.ion_transmission_edge_shadow_pct,
+            reflected_ion_enabled=cfg.reflected_ion_enabled,
+            reflected_ion_strength_pct=cfg.reflected_ion_strength_pct,
+            reflected_ion_bowing_weight=cfg.reflected_ion_bowing_weight,
+            reflected_ion_microtrench_weight=cfg.reflected_ion_microtrench_weight,
+            reflected_ion_range_a=cfg.reflected_ion_range_a,
+            redepo_enabled=cfg.redepo_enabled,
+            redepo_source_model=cfg.redepo_source_model,
+            redepo_efficiency_pct=cfg.redepo_efficiency_pct,
+            redepo_emit_power=cfg.redepo_emit_power,
+            redepo_distance_power=cfg.redepo_distance_power,
+            redepo_neighbor_exclusion=cfg.redepo_neighbor_exclusion,
+            redepo_max_distance_a=cfg.redepo_max_distance_a,
+        )
+
+    def _set_run_dir_label(self, run_dir: Optional[Path]) -> None:
+        if run_dir is None:
+            self.lbl_run_dir.setText("저장된 run: 아직 없음")
+            self.lbl_run_dir.setToolTip("")
+            return
+        resolved = Path(run_dir).resolve()
+        self.lbl_run_dir.setText(f"저장된 run: {_elide_middle(resolved.name, 34)}")
+        self.lbl_run_dir.setToolTip(str(resolved))
+
+    def _preview_cache_key(self, config: TrenchDepoConfig) -> tuple[object, ...]:
+        return (
+            tuple((float(x), float(y)) for x, y in config.points),
+            int(config.cycles),
+            float(config.angstrom_per_cycle),
+            float(config.reparam_ds_a),
+            bool(config.sputter_enabled),
+            float(config.sputter_strength_a_per_cycle),
+            float(config.sputter_peak_pct),
+            float(config.sputter_peak_angle_deg),
+            float(config.sputter_width_deg),
+            float(config.sputter_smoothing_a),
+            bool(config.ion_transmission_enabled),
+            (
+                None
+                if config.ion_transmission_override is None
+                else float(config.ion_transmission_override)
+            ),
+            float(config.ion_transmission_start_depth_pct),
+            float(config.ion_transmission_end_depth_pct),
+            float(config.ion_transmission_decay_strength_pct),
+            float(config.ion_transmission_floor_pct),
+            float(config.ion_transmission_curve_power),
+            float(config.ion_transmission_aperture_shadow_pct),
+            float(config.ion_transmission_lateral_shadow_pct),
+            float(config.ion_transmission_edge_shadow_pct),
+            bool(config.reflected_ion_enabled),
+            float(config.reflected_ion_strength_pct),
+            float(config.reflected_ion_bowing_weight),
+            float(config.reflected_ion_microtrench_weight),
+            float(config.reflected_ion_range_a),
+            bool(config.redepo_enabled),
+            str(config.redepo_source_model),
+            float(config.redepo_efficiency_pct),
+            float(config.redepo_emit_power),
+            float(config.redepo_distance_power),
+            int(config.redepo_neighbor_exclusion),
+            float(config.redepo_max_distance_a),
+        )
+
+    def run_emulation(
+        self,
+        _checked: bool = False,
+        *,
+        save_artifacts: bool = True,
+        use_preview_cache: bool = False,
+    ) -> None:
+        self._emulator_run_timer.stop()
+        self.btn_run.setEnabled(False)
+        try:
+            config = self.current_config()
+            run_dir: Optional[Path] = None
+            cache_key = self._preview_cache_key(config)
+            if use_preview_cache and not save_artifacts and cache_key in self._preview_result_cache:
+                result = self._preview_result_cache[cache_key]
+            else:
+                result = run_trench_depo(config)
+                self._preview_result_cache[cache_key] = result
+            if save_artifacts:
+                run_dir = export_trench_depo_run(
+                    config,
+                    result,
+                    request_note=self.edit_request_note.toPlainText(),
+                    runs_root=DEFAULT_RUNS_ROOT,
+                )
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(
+                self,
+                "Trench Depo Emulation",
+                f"Failed to run trench deposition emulation:\n{exc}",
+            )
+            return
+        finally:
+            self.btn_run.setEnabled(True)
+
+        self._result = result
+        self._last_run_dir = run_dir.resolve() if run_dir is not None else None
+        self.view.set_frames(
+            result.frame_profiles,
+            voids=result.frame_voids,
+            void_mode="current",
+            dynamic_substrate_fill=_use_solid_playback(result),
+        )
+        max_idx = max(0, len(result.frame_profiles) - 1)
+        self.slider_frame.blockSignals(True)
+        self.slider_frame.setRange(0, max_idx)
+        self.slider_frame.setValue(max_idx)
+        self.slider_frame.setEnabled(max_idx > 0)
+        self.slider_frame.blockSignals(False)
+        self.show_frame(max_idx)
+        QTimer.singleShot(0, self.view.fit_content)
+        if run_dir is not None:
+            self._set_run_dir_label(self._last_run_dir)
+            self.btn_open_run_dir.setEnabled(True)
+            self.statusBar().showMessage(f"런 저장 완료: {self._last_run_dir}", 5000)
+        else:
+            self.btn_open_run_dir.setEnabled(self._last_run_dir is not None)
+
+    def run_split_test(self, _checked: bool = False) -> None:
+        self.btn_run_split.setEnabled(False)
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        self.statusBar().showMessage("Split test 계산 중...")
+        try:
+            parameter = str(self.cmb_split_parameter.currentData())
+            cases = run_trench_depo_sweep(
+                self.current_config(),
+                parameter,
+                float(self.spin_split_start.value()),
+                float(self.spin_split_end.value()),
+                float(self.spin_split_step.value()),
+                max_cases=24,
+            )
+            saved_dirs = export_trench_depo_sweep_runs(
+                cases,
+                request_note=self.edit_request_note.toPlainText(),
+                runs_root=DEFAULT_RUNS_ROOT,
+            )
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(
+                self,
+                "Trench Depo Split Test",
+                f"Failed to run or save split test:\n{exc}",
+            )
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+            self.btn_run_split.setEnabled(True)
+
+        if not cases:
+            return
+        if saved_dirs:
+            self._last_run_dir = saved_dirs[-1].resolve()
+            self._set_run_dir_label(self._last_run_dir)
+            self.btn_open_run_dir.setEnabled(True)
+        window = SplitTestWindow(cases)
+        window.destroyed.connect(lambda _obj=None, w=window: self._forget_split_window(w))
+        self._split_windows.append(window)
+        window.show()
+        window.raise_()
+        window.activateWindow()
+        self.statusBar().showMessage(f"Split test 완료/저장: {len(cases)} cases", 5000)
+
+    def run_compare_for_active_emulator(self, _checked: bool = False) -> None:
+        if self.active_emulator_number() == 2:
+            self.run_emulator_one_compare()
+            return
+        self.run_gapsim_angle_compare()
+
+    def run_emulator_one_compare(self) -> None:
+        if self.active_emulator_number() != 2:
+            QMessageBox.information(
+                self,
+                "Emulator Compare",
+                "Emulator 01 comparison is available in Emulator 02.",
+            )
+            return
+        self.btn_compare_gapsim_angle.setEnabled(False)
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        self.statusBar().showMessage("Emulator 01 baseline 비교 계산 중...")
+        try:
+            cfg_02 = self.current_config()
+            cfg_01 = replace(
+                cfg_02,
+                ion_transmission_enabled=False,
+                ion_transmission_override=None,
+            )
+            t0 = time.perf_counter()
+            result_01 = run_trench_depo(cfg_01)
+            elapsed_01 = time.perf_counter() - t0
+            t1 = time.perf_counter()
+            result_02 = run_trench_depo(cfg_02)
+            elapsed_02 = time.perf_counter() - t1
+            cases = [
+                TrenchSweepResult(
+                    parameter="emulator_compare",
+                    label=f"Emulator 01 direct sputter ({elapsed_01:.2f}s)",
+                    value=1.0,
+                    config=cfg_01,
+                    result=result_01,
+                ),
+                TrenchSweepResult(
+                    parameter="emulator_compare",
+                    label=f"Emulator 02 ion transmission ({elapsed_02:.2f}s)",
+                    value=2.0,
+                    config=cfg_02,
+                    result=result_02,
+                ),
+            ]
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(
+                self,
+                "Emulator Compare",
+                f"Failed to compare Emulator 01 and 02:\n{exc}",
+            )
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+            self.btn_compare_gapsim_angle.setEnabled(True)
+
+        window = SplitTestWindow(cases)
+        window.destroyed.connect(lambda _obj=None, w=window: self._forget_split_window(w))
+        self._split_windows.append(window)
+        window.show()
+        window.raise_()
+        window.activateWindow()
+
+        summary = result_02.meta.get("ion_debug_summary_last", {})
+        ion_summary = summary.get("ion_factor", {}) if isinstance(summary, dict) else {}
+        if isinstance(ion_summary, dict) and ion_summary:
+            self.statusBar().showMessage(
+                (
+                    "Emulator 01/02 비교 완료 | ion top/mid/bottom="
+                    f"{float(ion_summary.get('top', 0.0)):.3f}/"
+                    f"{float(ion_summary.get('mid', 0.0)):.3f}/"
+                    f"{float(ion_summary.get('bottom', 0.0)):.3f}"
+                ),
+                7000,
+            )
+        else:
+            self.statusBar().showMessage("Emulator 01/02 비교 완료", 5000)
+
+    def run_gapsim_angle_compare(self, _checked: bool = False) -> None:
+        if not self._active_emulator_supports_sputter():
+            QMessageBox.information(
+                self,
+                "Model Compare",
+                "Angle/model comparison is available in sputter-based emulators.",
+            )
+            return
+        self.btn_compare_gapsim_angle.setEnabled(False)
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        compare_to_emulator_01 = self.active_emulator_number() in (2, 3, 4)
+        self.statusBar().showMessage("Emulator 01 비교 계산 중..." if compare_to_emulator_01 else "GapSim angle-only 비교 계산 중...")
+        try:
+            config = self.current_etch_config()
+            t0 = time.perf_counter()
+            mini_result = run_trench_depo(config)
+            mini_elapsed = time.perf_counter() - t0
+            t1 = time.perf_counter()
+            if compare_to_emulator_01:
+                baseline_config = replace(
+                    config,
+                    ion_transmission_enabled=False,
+                    ion_transmission_override=None,
+                    reflected_ion_enabled=False,
+                    reflected_ion_strength_pct=0.0,
+                    redepo_enabled=False,
+                    redepo_efficiency_pct=0.0,
+                )
+                comparison_result = run_trench_depo(baseline_config)
+                comparison_label = "Emulator 01 direct"
+            else:
+                baseline_config = config
+                comparison_result = run_trench_depo_legacy_sputter(config)
+                comparison_label = "GapSim angle-only"
+            comparison_elapsed = time.perf_counter() - t1
+            cases = [
+                TrenchSweepResult(
+                    parameter="model_compare",
+                    label=f"Current emulator ({mini_elapsed:.2f}s)",
+                    value=0.0,
+                    config=config,
+                    result=mini_result,
+                ),
+                TrenchSweepResult(
+                    parameter="model_compare",
+                    label=f"{comparison_label} ({comparison_elapsed:.2f}s)",
+                    value=1.0,
+                    config=baseline_config,
+                    result=comparison_result,
+                ),
+            ]
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(
+                self,
+                "Model Compare" if compare_to_emulator_01 else "GapSim Angle Compare",
+                (
+                    f"Failed to run Emulator 01 comparison:\n{exc}"
+                    if compare_to_emulator_01
+                    else f"Failed to run GapSim angle-only comparison:\n{exc}"
+                ),
+            )
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+            self.btn_compare_gapsim_angle.setEnabled(True)
+
+        window = SplitTestWindow(cases)
+        window.destroyed.connect(lambda _obj=None, w=window: self._forget_split_window(w))
+        self._split_windows.append(window)
+        window.show()
+        window.raise_()
+        window.activateWindow()
+        self.statusBar().showMessage("Emulator 01 비교 완료" if compare_to_emulator_01 else "GapSim angle-only 비교 완료", 5000)
+
+    def _forget_split_window(self, window: SplitTestWindow) -> None:
+        if window in self._split_windows:
+            self._split_windows.remove(window)
+
+    def _show_split_group_window(self, cases: Sequence[TrenchSweepResult], *, status: str) -> None:
+        if len(cases) <= 1:
+            return
+        window = SplitTestWindow(cases)
+        window.destroyed.connect(lambda _obj=None, w=window: self._forget_split_window(w))
+        self._split_windows.append(window)
+        window.show()
+        window.raise_()
+        window.activateWindow()
+        self.statusBar().showMessage(status, 5000)
+
+    def _open_split_group_for_replay(self, replay_path: Path) -> None:
+        cases = load_trench_depo_split_group(replay_path)
+        if len(cases) <= 1:
+            return
+        self._show_split_group_window(cases, status=f"Split 묶음 로드 완료: {len(cases)} cases")
+
+    def show_frame(self, index: int) -> None:
+        if self._result is None or not self._result.frame_profiles:
+            self.lbl_status.setText("Cycle 0/0 | Points 0")
+            return
+
+        idx = max(0, min(int(index), len(self._result.frame_profiles) - 1))
+        self.view.show_frame(idx, fit=False)
+        cycle = self._result.frame_steps[idx] if idx < len(self._result.frame_steps) else idx
+        total = self._result.meta.get("cycles", len(self._result.frame_profiles) - 1)
+        points = len(self._result.frame_profiles[idx])
+        self.lbl_status.setText(f"Cycle {cycle}/{total} | Points {points}")
+
+    def load_replay_json(self, path: Path | str) -> None:
+        replay_path = Path(path).resolve()
+        config, result, note = load_trench_depo_run(replay_path)
+        replay_emulator = (
+            4
+            if bool(config.redepo_enabled)
+            else (
+                3
+                if bool(config.reflected_ion_enabled)
+                else (2 if bool(config.ion_transmission_enabled) else (1 if bool(config.sputter_enabled) else 0))
+            )
+        )
+        self.set_active_emulator_number(replay_emulator, run=False)
+        self.spin_cycles.setValue(int(config.cycles))
+        self.spin_angstrom_per_cycle.setValue(float(config.angstrom_per_cycle))
+        self.chk_sputter.setChecked(bool(config.sputter_enabled))
+        self.chk_ion_transmission.setChecked(bool(config.ion_transmission_enabled))
+        self.chk_reflected_ion.setChecked(bool(config.reflected_ion_enabled))
+        self.chk_redepo.setChecked(bool(config.redepo_enabled))
+        self.spin_ion_start_depth.setValue(float(config.ion_transmission_start_depth_pct))
+        self.spin_ion_end_depth.setValue(float(config.ion_transmission_end_depth_pct))
+        self.spin_ion_decay_strength.setValue(float(config.ion_transmission_decay_strength_pct))
+        self.spin_ion_floor.setValue(float(config.ion_transmission_floor_pct))
+        self.spin_ion_curve_power.setValue(float(config.ion_transmission_curve_power))
+        self.slider_ion_aperture_shadow.setValue(int(round(float(config.ion_transmission_aperture_shadow_pct))))
+        self.slider_ion_lateral_shadow.setValue(int(round(float(config.ion_transmission_lateral_shadow_pct))))
+        self.slider_ion_edge_shadow.setValue(int(round(float(config.ion_transmission_edge_shadow_pct))))
+        self.sync_ion_shadow_slider_labels()
+        self.spin_reflected_strength.setValue(float(config.reflected_ion_strength_pct))
+        self.spin_reflected_bowing.setValue(float(config.reflected_ion_bowing_weight))
+        self.spin_reflected_microtrench.setValue(float(config.reflected_ion_microtrench_weight))
+        self.spin_reflected_range.setValue(float(config.reflected_ion_range_a))
+        source_index = self.cmb_redepo_source_model.findData(str(config.redepo_source_model))
+        self.cmb_redepo_source_model.setCurrentIndex(source_index if source_index >= 0 else 0)
+        self.spin_redepo_efficiency.setValue(float(config.redepo_efficiency_pct))
+        self.spin_redepo_emit_power.setValue(float(config.redepo_emit_power))
+        self.spin_redepo_distance_power.setValue(float(config.redepo_distance_power))
+        self.spin_sputter_strength.setValue(float(config.sputter_strength_a_per_cycle))
+        self.spin_sputter_peak_pct.setValue(float(config.sputter_peak_pct))
+        self.spin_sputter_peak.setValue(float(config.sputter_peak_angle_deg))
+        self.spin_sputter_width.setValue(float(config.sputter_width_deg))
+        self.spin_sputter_smoothing.setValue(float(config.sputter_smoothing_a))
+        self.sync_etch_control_availability()
+        self.edit_request_note.setPlainText(note)
+        self._result = result
+        self._last_run_dir = replay_path.parent
+        self.view.set_frames(
+            result.frame_profiles,
+            voids=result.frame_voids,
+            void_mode="current",
+            dynamic_substrate_fill=_use_solid_playback(result),
+        )
+        max_idx = max(0, len(result.frame_profiles) - 1)
+        self.slider_frame.blockSignals(True)
+        self.slider_frame.setRange(0, max_idx)
+        self.slider_frame.setValue(max_idx)
+        self.slider_frame.setEnabled(max_idx > 0)
+        self.slider_frame.blockSignals(False)
+        self.show_frame(max_idx)
+        QTimer.singleShot(0, self.view.fit_content)
+        self._set_run_dir_label(self._last_run_dir)
+        self.btn_open_run_dir.setEnabled(True)
+        self.statusBar().showMessage(f"JSON 런 로드 완료: {replay_path}", 5000)
+        self._open_split_group_for_replay(replay_path)
+
+    def open_replay_json_dialog(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open Trench Replay JSON",
+            str(self._last_run_dir or DEFAULT_RUNS_ROOT),
+            "JSON (*.json);;All Files (*)",
+        )
+        if not path:
+            return
+        try:
+            self.load_replay_json(path)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Trench Depo Emulation", f"Failed to open replay JSON:\n{exc}")
+
+    def open_last_run_dir(self) -> None:
+        if self._last_run_dir is None:
+            return
+        run_dir = self._last_run_dir.resolve()
+        if not run_dir.exists():
+            QMessageBox.warning(self, "Trench Depo Emulation", f"Run folder not found:\n{run_dir}")
+            self.btn_open_run_dir.setEnabled(False)
+            return
+
+        if platform.system() == "Darwin":
+            try:
+                subprocess.run(["open", str(run_dir)], check=True)
+                return
+            except Exception:
+                pass
+
+        ok = QDesktopServices.openUrl(QUrl.fromLocalFile(str(run_dir)))
+        if not ok:
+            QMessageBox.warning(self, "Trench Depo Emulation", f"Failed to open run folder:\n{run_dir}")
+
+
+def main() -> int:
+    app = QApplication(sys.argv)
+    window = TrenchDepoWindow()
+    replay_arg: Optional[str] = None
+    args = list(sys.argv[1:])
+    idx = 0
+    while idx < len(args):
+        arg = args[idx]
+        if arg == "--emulator" and idx + 1 < len(args):
+            window.set_active_emulator_number(int(args[idx + 1]), run=False)
+            idx += 2
+            continue
+        if arg.startswith("--emulator="):
+            window.set_active_emulator_number(int(arg.split("=", 1)[1]), run=False)
+            idx += 1
+            continue
+        replay_arg = arg
+        idx += 1
+
+    if replay_arg:
+        try:
+            window.load_replay_json(replay_arg)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(window, "Trench Depo Emulation", f"Failed to open replay JSON:\n{exc}")
+    window.show()
+    return app.exec()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

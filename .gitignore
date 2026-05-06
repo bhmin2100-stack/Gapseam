@@ -1,5 +1,9 @@
 # Python virtual environment
 .venv/
+.build-venv/
+.miniconda/
+.local-python/
+.codex-cache/
 
 # Python cache
 __pycache__/
@@ -18,6 +22,7 @@ exports/
 archive/
 *.bak
 sources_dump.txt
+GFS.spec
 
 # OS files
 .DS_Store

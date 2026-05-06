@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 
+from pathlib import Path
 from PySide6.QtCore import QPointF, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
@@ -9,6 +10,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
+    QFileDialog,
     QFormLayout,
     QGraphicsEllipseItem,
     QGraphicsItem,
@@ -23,6 +25,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QSlider,
     QSpinBox,
     QSplitter,
     QVBoxLayout,
@@ -30,6 +33,7 @@ from PySide6.QtWidgets import (
 )
 
 from gapsim.prediction import Point, auto_anchor_spec, sanitize_anchor_spec
+from gapsim.ui_qt.calibrate_dialog import CalibrateDialog
 from gapsim.ui_qt.controllers.smoothing_ctrl import SmoothingController
 from gapsim.ui_qt.models.points_table import PointsTableModel
 from gapsim.ui_qt.models.points_table_view import PointsTableView
@@ -41,6 +45,12 @@ def _tx(lang: str, key: str) -> str:
         "post_editor.title": "POST DEPO 구조 입력",
         "post_editor.hint": "PRE 구조는 참조용으로 고정되고, POST 구조만 편집됩니다.",
         "post_editor.reset": "PRE 기준으로 초기화",
+        "post_editor.overlay_load": "이미지 불러오기",
+        "post_editor.overlay_clear": "이미지 제거",
+        "post_editor.overlay_move": "이미지 이동",
+        "post_editor.overlay_opacity": "배경 투명도",
+        "post_editor.overlay_invalid_scale": "보정된 스케일을 확인할 수 없습니다.",
+        "post_editor.overlay_load_failed": "이미지를 불러오지 못했습니다.",
         "post_editor.accept": "다음: POST smoothing",
         "post_editor.cancel": "취소",
         "post_smoothing.title": "POST DEPO smoothing",
@@ -78,6 +88,12 @@ def _tx(lang: str, key: str) -> str:
         "post_editor.title": "POST DEPO Profile",
         "post_editor.hint": "PRE stays read-only as reference while only the POST profile is editable.",
         "post_editor.reset": "Reset From PRE",
+        "post_editor.overlay_load": "Load image",
+        "post_editor.overlay_clear": "Clear image",
+        "post_editor.overlay_move": "Move image",
+        "post_editor.overlay_opacity": "Overlay opacity",
+        "post_editor.overlay_invalid_scale": "Could not read the calibrated scale.",
+        "post_editor.overlay_load_failed": "Failed to load image.",
         "post_editor.accept": "Next: POST smoothing",
         "post_editor.cancel": "Cancel",
         "post_smoothing.title": "POST DEPO Smoothing",
@@ -121,6 +137,7 @@ class EditableProfileWidget(QWidget):
         *,
         reference_points: List[Point],
         editable_points: List[Point],
+        reset_points: Optional[List[Point]] = None,
         lang: str,
         parent=None,
     ) -> None:
@@ -128,11 +145,17 @@ class EditableProfileWidget(QWidget):
         self.lang = lang
         self._reference_points = [(float(x), float(y)) for x, y in reference_points]
         self._default_points = [(float(x), float(y)) for x, y in (editable_points or reference_points)]
+        self._reset_points = [(float(x), float(y)) for x, y in (reset_points or reference_points)]
+        self._overlay_opacity = 0.35
         self._model_change_from_view = False
         self._dragging_point_idx: Optional[int] = None
         self._drag_points: Optional[List[Point]] = None
 
         root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        root.addWidget(splitter, 1)
+
         self.view = StructureView()
         self.view.set_profile_colors(
             current=QColor(220, 90, 45),
@@ -140,18 +163,49 @@ class EditableProfileWidget(QWidget):
         )
         self.view.set_reference_profiles_xy([self._reference_points])
         self.view.set_point_radius_px(4.0)
-        root.addWidget(self.view, 1)
+        splitter.addWidget(self.view)
+
+        side = QWidget()
+        side_layout = QVBoxLayout(side)
+        side_layout.setContentsMargins(8, 0, 0, 0)
+        side_layout.setSpacing(8)
 
         self.model = PointsTableModel()
         self.table = PointsTableView()
         self.table.setModel(self.model)
-        root.addWidget(self.table, 0)
+        side_layout.addWidget(self.table, 1)
 
         btn_row = QHBoxLayout()
         self.btn_reset = QPushButton(_tx(self.lang, "post_editor.reset"))
         btn_row.addWidget(self.btn_reset)
         btn_row.addStretch(1)
-        root.addLayout(btn_row)
+        side_layout.addLayout(btn_row)
+
+        overlay_row = QHBoxLayout()
+        overlay_btn_col = QVBoxLayout()
+        self.btn_load_overlay = QPushButton(_tx(self.lang, "post_editor.overlay_load"))
+        self.btn_clear_overlay = QPushButton(_tx(self.lang, "post_editor.overlay_clear"))
+        self.btn_move_overlay = QPushButton(_tx(self.lang, "post_editor.overlay_move"))
+        self.btn_move_overlay.setCheckable(True)
+        self.btn_move_overlay.setEnabled(False)
+        overlay_btn_col.addWidget(self.btn_load_overlay)
+        overlay_btn_col.addWidget(self.btn_clear_overlay)
+        overlay_btn_col.addWidget(self.btn_move_overlay)
+        overlay_row.addLayout(overlay_btn_col)
+        overlay_row.addSpacing(8)
+        overlay_row.addWidget(QLabel(_tx(self.lang, "post_editor.overlay_opacity")))
+        self.slider_overlay_opacity = QSlider(Qt.Orientation.Horizontal)
+        self.slider_overlay_opacity.setRange(0, 100)
+        self.slider_overlay_opacity.setValue(int(round(self._overlay_opacity * 100.0)))
+        self.slider_overlay_opacity.setFixedWidth(140)
+        overlay_row.addWidget(self.slider_overlay_opacity)
+        overlay_row.addStretch(1)
+        side_layout.addLayout(overlay_row)
+
+        splitter.addWidget(side)
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([760, 280])
 
         self.model.dataChanged.connect(self._sync_view_from_model)
         self.model.modelReset.connect(self._sync_view_from_model)
@@ -166,6 +220,10 @@ class EditableProfileWidget(QWidget):
         self.view.pointInserted.connect(self._on_view_point_inserted)
         self.view.pointDeleted.connect(self._on_view_point_deleted)
         self.btn_reset.clicked.connect(self._reset_from_reference)
+        self.btn_load_overlay.clicked.connect(self._load_overlay_image)
+        self.btn_clear_overlay.clicked.connect(self._clear_overlay_image)
+        self.btn_move_overlay.toggled.connect(self._on_overlay_move_toggled)
+        self.slider_overlay_opacity.valueChanged.connect(self._on_overlay_opacity_changed)
 
         self.model.set_points(self._default_points)
         self._sync_view_from_model()
@@ -174,7 +232,67 @@ class EditableProfileWidget(QWidget):
         return self.model.get_points()
 
     def _reset_from_reference(self) -> None:
-        self.model.set_points(self._reference_points)
+        self.model.set_points(self._reset_points)
+
+    def _set_overlay_opacity(self, opacity: float) -> None:
+        self._overlay_opacity = max(0.0, min(1.0, float(opacity)))
+        self.view.set_overlay_opacity(self._overlay_opacity)
+
+    def _on_overlay_opacity_changed(self, value: int) -> None:
+        self._set_overlay_opacity(float(value) / 100.0)
+
+    def _update_overlay_move_button_state(self) -> None:
+        has_overlay = self.view.get_overlay_state() is not None
+        self.btn_move_overlay.setEnabled(has_overlay)
+        if not has_overlay and self.btn_move_overlay.isChecked():
+            self.btn_move_overlay.blockSignals(True)
+            try:
+                self.btn_move_overlay.setChecked(False)
+            finally:
+                self.btn_move_overlay.blockSignals(False)
+        self.view.set_overlay_drag_enabled(has_overlay and self.btn_move_overlay.isChecked())
+
+    def _on_overlay_move_toggled(self, checked: bool) -> None:
+        has_overlay = self.view.get_overlay_state() is not None
+        if not has_overlay:
+            self.btn_move_overlay.blockSignals(True)
+            try:
+                self.btn_move_overlay.setChecked(False)
+            finally:
+                self.btn_move_overlay.blockSignals(False)
+            return
+        self.view.set_overlay_drag_enabled(bool(checked))
+
+    def _load_overlay_image(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            _tx(self.lang, "post_editor.overlay_load"),
+            "",
+            "Images (*.png *.jpg *.jpeg *.bmp *.tif *.tiff)",
+        )
+        if not path:
+            return
+        p = Path(path)
+        dlg = CalibrateDialog(p, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        scale = dlg.scale_a_per_px
+        if scale is None or scale <= 0.0:
+            QMessageBox.warning(self, self.windowTitle(), _tx(self.lang, "post_editor.overlay_invalid_scale"))
+            return
+        if not self.view.set_overlay_image(
+            str(p),
+            scale_a_per_px=float(scale),
+            opacity=self._overlay_opacity,
+            align_to_axes=True,
+        ):
+            QMessageBox.warning(self, self.windowTitle(), _tx(self.lang, "post_editor.overlay_load_failed"))
+            return
+        self._update_overlay_move_button_state()
+
+    def _clear_overlay_image(self) -> None:
+        self.view.clear_overlay_image()
+        self._update_overlay_move_button_state()
 
     def _sync_view_from_model(self, *_args) -> None:
         if self._model_change_from_view:
@@ -252,6 +370,7 @@ class PredictionPostEditorDialog(QDialog):
         *,
         pre_points: List[Point],
         initial_post_points: List[Point],
+        reset_points: Optional[List[Point]] = None,
         lang: str,
         parent=None,
     ) -> None:
@@ -268,6 +387,7 @@ class PredictionPostEditorDialog(QDialog):
         self.editor = EditableProfileWidget(
             reference_points=pre_points,
             editable_points=initial_post_points or pre_points,
+            reset_points=reset_points,
             lang=lang,
         )
         root.addWidget(self.editor, 1)

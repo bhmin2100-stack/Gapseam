@@ -1,0 +1,68 @@
+{
+  "model_01": {
+    "cycles": 8,
+    "sputter_active": true,
+    "reflected_ion_active": false,
+    "final_points": 4292
+  },
+  "model_03": {
+    "cycles": 8,
+    "sputter_active": true,
+    "reflected_ion_active": true,
+    "reflected_ion_model": "zone_weighted_one_bounce",
+    "reflected_direct_ratio_last": 0.22260633607628627,
+    "final_points": 4292
+  },
+  "zone_summary": {
+    "ion_factor": {
+      "top": 1.0,
+      "mid": 1.0,
+      "bottom": 1.0
+    },
+    "sputter_raw": {
+      "top": 0.04343191450837505,
+      "mid": 0.0685866699581246,
+      "bottom": 0.06382593272719427
+    },
+    "sputter_effective": {
+      "top": 0.04343191450837505,
+      "mid": 0.0685866699581246,
+      "bottom": 0.06382593272719427
+    },
+    "reflection_source": {
+      "top": 0.0,
+      "mid_sidewall": 0.04939028255700496,
+      "bottom_center": 0.0,
+      "bottom_corner": 0.0323252820699188
+    },
+    "reflected_ion": {
+      "top": 0.0,
+      "mid_sidewall": 0.022795100707744265,
+      "bottom_center": 0.0016077526491909766,
+      "bottom_corner": 0.017560799210535764
+    },
+    "total_etch": {
+      "top": 0.04669885298619503,
+      "mid": 0.09429777608740919,
+      "bottom": 0.07972512165130254
+    },
+    "net_growth": {
+      "top": -0.04669885298619503,
+      "mid": -0.09429777608740919,
+      "bottom": -0.07972512165130254
+    }
+  },
+  "debug_field_keys": [
+    "depo_field",
+    "direct_sputter_field",
+    "ion_factor_field",
+    "net_growth_field",
+    "reflected_ion_field",
+    "reflection_source_field",
+    "sputter_effective_field",
+    "sputter_raw_field",
+    "total_etch_field",
+    "x",
+    "y"
+  ]
+}

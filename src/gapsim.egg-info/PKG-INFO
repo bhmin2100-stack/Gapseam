@@ -1,7 +1,8 @@
 Metadata-Version: 2.4
 Name: gapsim
 Version: 0.0.0
-Summary: Gapfill simulator prototype (UI + engine scaffolding)
+Summary: GFS (GapFillSimulator) prototype (UI + engine scaffolding)
 Requires-Python: >=3.10
 Requires-Dist: PySide6>=6.5
 Requires-Dist: pillow>=10
+Requires-Dist: pyclipper>=1.3.0.post6
