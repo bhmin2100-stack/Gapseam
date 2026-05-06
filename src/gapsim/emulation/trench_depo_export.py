@@ -5,6 +5,7 @@ from io import BytesIO
 import json
 from pathlib import Path
 import re
+import sys
 from typing import Any, Dict, List, Sequence, Tuple
 
 from gapsim.emulation.trench_depo import (
@@ -19,7 +20,13 @@ from gapsim.ui_qt.views.result_vector_view import ResultVectorView
 
 Point = Tuple[float, float]
 
-DEFAULT_RUNS_ROOT = Path("runs") / "trench_depo_emulation"
+def _default_runs_root() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent / "runs" / "trench_depo_emulation"
+    return Path("runs") / "trench_depo_emulation"
+
+
+DEFAULT_RUNS_ROOT = _default_runs_root()
 _DEFAULT_PHYSICAL_MEMO = "라운드 conformal offset 기반 트렌치 증착"
 SPLIT_GROUP_MANIFEST_NAME = "스플릿묶음.json"
 _SPLIT_NOTE_RE = re.compile(

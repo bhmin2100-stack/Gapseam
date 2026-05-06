@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 import json
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, Optional
 
 
-DEFAULT_RESEARCH_ROOT = Path("emulator_research")
+def _default_research_root() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent / "emulator_research"
+    return Path("emulator_research")
+
+
+DEFAULT_RESEARCH_ROOT = _default_research_root()
 PRESENTATIONS_DIRNAME = "presentations"
 RESEARCH_MANIFEST_FILENAME = "research_manifest.json"
 MAX_EMULATOR_NUMBER = 10

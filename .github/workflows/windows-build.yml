@@ -36,11 +36,14 @@ jobs:
       - name: Build portable Windows package
         run: .\build_gfs_portable.bat
 
-      - name: Verify executable
+      - name: Verify executables
         shell: pwsh
         run: |
           if (!(Test-Path "dist/GFS/GFS.exe")) {
             throw "dist/GFS/GFS.exe was not created"
+          }
+          if (!(Test-Path "dist/GFS/GFS_Emulator.exe")) {
+            throw "dist/GFS/GFS_Emulator.exe was not created"
           }
           Get-ChildItem "dist" | Format-Table Name, Length
 

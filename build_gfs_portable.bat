@@ -21,16 +21,22 @@ if errorlevel 1 exit /b 1
 if errorlevel 1 exit /b 1
 
 echo [3/5] Cleaning old build artifacts...
+if exist "build\GapSim" rmdir /s /q "build\GapSim"
 if exist "build\GFS" rmdir /s /q "build\GFS"
 if exist "dist\GFS" rmdir /s /q "dist\GFS"
 del /q "dist\GFS_portable_*.zip" >nul 2>nul
 
-echo [4/5] Building GFS with PyInstaller...
+echo [4/5] Building GFS and mini emulator with PyInstaller...
 ".venv\Scripts\python.exe" -m PyInstaller --noconfirm "GapSim.spec"
 if errorlevel 1 exit /b 1
 
 if not exist "dist\GFS\GFS.exe" (
   echo dist\GFS\GFS.exe was not created
+  exit /b 1
+)
+
+if not exist "dist\GFS\GFS_Emulator.exe" (
+  echo dist\GFS\GFS_Emulator.exe was not created
   exit /b 1
 )
 
@@ -44,6 +50,11 @@ if exist "sample" (
   xcopy "sample" "dist\GFS\sample" /E /I /Y >nul
 )
 
+if exist "emulator_research" (
+  if exist "dist\GFS\emulator_research" rmdir /s /q "dist\GFS\emulator_research"
+  xcopy "emulator_research" "dist\GFS\emulator_research" /E /I /Y >nul
+)
+
 echo [5/5] Creating portable zip...
 for /f %%I in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd_HHmmss"') do set TS=%%I
 powershell -NoProfile -Command ^
@@ -54,5 +65,6 @@ powershell -NoProfile -Command ^
 if errorlevel 1 exit /b 1
 
 echo Done.
-echo Run dist\GFS\GFS.exe or send the generated dist\GFS_portable_*.zip.
+echo Run dist\GFS\GFS.exe for the main app or dist\GFS\GFS_Emulator.exe for the mini emulator.
+echo Send the generated dist\GFS_portable_*.zip.
 endlocal
