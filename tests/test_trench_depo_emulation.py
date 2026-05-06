@@ -19,6 +19,7 @@ from gapsim.emulation.trench_depo import (
     compute_depth_deposition_factors,
     compute_depth_deposition_ratio,
     compute_effective_aspect_ratio,
+    compute_inhibition_deposition_factors,
     compute_ion_transmission_factors,
     direct_sputter_angle_response,
     direct_sputter_incident_angles_deg,
@@ -737,6 +738,50 @@ class TrenchDepoEmulationTest(unittest.TestCase):
 
         self.assertLess(line_ear, hole_ear)
         self.assertGreaterEqual(line_factor, hole_factor)
+
+    def test_inhibition_deposition_suppresses_top_more_than_bottom(self) -> None:
+        factors = compute_inhibition_deposition_factors(
+            BOWED_JAR_TRENCH_POINTS,
+            process_model="hybrid",
+            inhibition_strength_pct=85.0,
+            inhibition_penetration_depth_a=1100.0,
+            inhibition_min_growth_ratio=0.08,
+            inhibition_smoothing_a=0.0,
+        )
+        paired = list(zip(BOWED_JAR_TRENCH_POINTS, factors))
+        top = [factor for (_x, y), factor in paired if y == 0.0]
+        bottom = [factor for (_x, y), factor in paired if y <= -4600.0]
+
+        self.assertTrue(top)
+        self.assertTrue(bottom)
+        self.assertLess(sum(top) / len(top), sum(bottom) / len(bottom))
+        self.assertGreaterEqual(min(factors), 0.08)
+
+    @unittest.skipIf(pyclipper is None, "pyclipper is not installed")
+    def test_inhibition_deposition_uses_smooth_depo_only_path(self) -> None:
+        result = run_trench_depo(
+            TrenchDepoConfig(
+                points=BOWED_JAR_TRENCH_POINTS,
+                cycles=2,
+                angstrom_per_cycle=10.0,
+                reparam_ds_a=8.0,
+                deposition_depth_enabled=True,
+                inhibition_enabled=True,
+                inhibition_strength_pct=85.0,
+                inhibition_penetration_depth_a=1100.0,
+                inhibition_min_growth_ratio=0.08,
+                inhibition_smoothing_a=45.0,
+            )
+        )
+        fields = result.meta["inhibition_debug_fields_last"]
+        summary = result.meta["inhibition_debug_summary_last"]["growth_ratio"]
+
+        self.assertTrue(result.meta["inhibition_active"])
+        self.assertFalse(result.meta["sputter_active"])
+        self.assertEqual(result.meta["growth_model"], "inhibition_weighted_deposition")
+        self.assertEqual(result.meta["propagation"], "vertex_normal_inhibition_depo_post_closure_fill")
+        self.assertTrue(fields["growth_ratio_field"])
+        self.assertLess(summary["top"], summary["bottom"])
 
     @unittest.skipIf(pyclipper is None, "pyclipper is not installed")
     def test_depth_deposition_closure_fill_budget_separates_hole_and_line(self) -> None:

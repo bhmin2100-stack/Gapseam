@@ -128,6 +128,15 @@ class TrenchDepoConfig:
     deposition_residual_fill_distribution: str = "exponential_from_closure"
     deposition_max_depo_per_cell_a: Optional[float] = None
     deposition_conserve_volume: bool = True
+    inhibition_enabled: bool = False
+    inhibition_process_model: str = "hybrid"
+    inhibition_strength_pct: float = 85.0
+    inhibition_penetration_depth_a: float = 1100.0
+    inhibition_decay_power: float = 1.2
+    inhibition_min_growth_ratio: float = 0.08
+    inhibition_bottom_boost_pct: float = 20.0
+    inhibition_peald_recombination_pct: float = 35.0
+    inhibition_smoothing_a: float = 45.0
 
 
 @dataclass(frozen=True)
@@ -197,6 +206,12 @@ SWEEP_PARAMETER_LABELS: Dict[str, str] = {
     "deposition_post_closure_fill_pct_line": "Line post-fill",
     "deposition_line_open_path_factor": "Line open path",
     "deposition_residual_fill_decay_length_a": "Residual decay",
+    "inhibition_strength_pct": "Inhibit %",
+    "inhibition_penetration_depth_a": "Inhibit depth",
+    "inhibition_min_growth_ratio": "Inhibit floor",
+    "inhibition_bottom_boost_pct": "Bottom boost",
+    "inhibition_peald_recombination_pct": "PEALD recomb",
+    "inhibition_smoothing_a": "Inhibit smooth",
 }
 
 _SPUTTER_SWEEP_PARAMETERS = frozenset(
@@ -251,6 +266,17 @@ _DEPTH_DEPOSITION_SWEEP_PARAMETERS = frozenset(
         "deposition_post_closure_fill_pct_line",
         "deposition_line_open_path_factor",
         "deposition_residual_fill_decay_length_a",
+    }
+)
+
+_INHIBITION_SWEEP_PARAMETERS = frozenset(
+    {
+        "inhibition_strength_pct",
+        "inhibition_penetration_depth_a",
+        "inhibition_min_growth_ratio",
+        "inhibition_bottom_boost_pct",
+        "inhibition_peald_recombination_pct",
+        "inhibition_smoothing_a",
     }
 )
 
@@ -621,6 +647,86 @@ def compute_depth_deposition_factors(
     return out
 
 
+def _inhibition_process_key(value: str) -> str:
+    raw = str(value or "hybrid").strip().lower().replace("-", "_")
+    if raw in {"pecvd", "pe_cvd", "cvd"}:
+        return "pecvd"
+    if raw in {"peald", "pe_ald", "ald"}:
+        return "peald"
+    return "hybrid"
+
+
+def compute_inhibition_deposition_factors(
+    points: Sequence[Point],
+    *,
+    process_model: str = "hybrid",
+    feature_type: str = "hole",
+    feature_width_a: float = 240.0,
+    feature_length_a: Optional[float] = None,
+    attenuation_model: str = "exponential",
+    depth_decay_k: float = 0.8,
+    depth_decay_power: float = 1.2,
+    min_depo_ratio: float = 0.03,
+    use_equivalent_aspect_ratio: bool = True,
+    inhibition_strength_pct: float = 85.0,
+    inhibition_penetration_depth_a: float = 1100.0,
+    inhibition_decay_power: float = 1.2,
+    inhibition_min_growth_ratio: float = 0.08,
+    inhibition_bottom_boost_pct: float = 20.0,
+    inhibition_peald_recombination_pct: float = 35.0,
+    inhibition_smoothing_a: float = 45.0,
+    reparam_ds_a: float = REPARAM_DS_A,
+) -> List[float]:
+    pts = [(float(x), float(y)) for x, y in points]
+    if not pts:
+        return []
+
+    process = _inhibition_process_key(process_model)
+    surface_y = max(y for _x, y in pts)
+    bottom_y = min(y for _x, y in pts)
+    depth_span = max(1e-9, surface_y - bottom_y)
+    penetration = _positive_or_default(inhibition_penetration_depth_a, depth_span * 0.25)
+    coverage_power = max(0.05, float(inhibition_decay_power))
+    strength = _clamp01(float(inhibition_strength_pct) / 100.0)
+    growth_floor = _clamp01(float(inhibition_min_growth_ratio))
+    bottom_boost = max(0.0, float(inhibition_bottom_boost_pct) / 100.0)
+    recomb_weight = _clamp01(float(inhibition_peald_recombination_pct) / 100.0)
+
+    radical_factors = compute_depth_deposition_factors(
+        pts,
+        feature_type=feature_type,
+        feature_width_a=feature_width_a,
+        feature_length_a=feature_length_a,
+        attenuation_model=attenuation_model,
+        depth_decay_k=depth_decay_k,
+        depth_decay_power=depth_decay_power,
+        min_depo_ratio=min_depo_ratio,
+        use_equivalent_aspect_ratio=use_equivalent_aspect_ratio,
+    )
+
+    ratios: List[float] = []
+    for (_x, y), radical_factor in zip(pts, radical_factors):
+        depth = max(0.0, surface_y - float(y))
+        depth_norm = _clamp01(depth / depth_span)
+        inhibitor_coverage = math.exp(-((depth / penetration) ** coverage_power))
+        inhibited = max(growth_floor, 1.0 - (strength * inhibitor_coverage))
+
+        recombination_loss = 0.0
+        if process == "peald":
+            recombination_loss = recomb_weight * (1.0 - _clamp01(radical_factor))
+        elif process == "hybrid":
+            recombination_loss = 0.5 * recomb_weight * (1.0 - _clamp01(radical_factor))
+        transport = max(growth_floor, 1.0 - recombination_loss)
+
+        boost = 1.0 + bottom_boost * (1.0 - inhibitor_coverage) * (depth_norm ** 0.7)
+        ratios.append(max(growth_floor, min(2.0, inhibited * transport * boost)))
+
+    radius_points = int(round(max(0.0, float(inhibition_smoothing_a)) / max(float(reparam_ds_a), 1e-9)))
+    if radius_points > 0:
+        ratios = _smooth_scalar_values(ratios, radius_points)
+    return [min(2.0, max(0.0, value)) for value in ratios]
+
+
 def detect_depth_deposition_closure(
     points: Sequence[Point],
     *,
@@ -732,6 +838,87 @@ class _DepthDependentDepositionFluxModel(FluxModel):
         }
         state.meta["depth_deposition_debug_summary_last"] = {
             "depth_ratio": _field_summary_by_depth(pts, ratios),
+            "depo": _field_summary_by_depth(pts, [float(dr) * float(v) for v in ratios]),
+        }
+        return ratios
+
+
+class _InhibitionDepositionFluxModel(FluxModel):
+    def __init__(
+        self,
+        *,
+        process_model: str,
+        feature_type: str,
+        feature_width_a: float,
+        feature_length_a: Optional[float],
+        attenuation_model: str,
+        depth_decay_k: float,
+        depth_decay_power: float,
+        min_depo_ratio: float,
+        use_equivalent_aspect_ratio: bool,
+        inhibition_strength_pct: float,
+        inhibition_penetration_depth_a: float,
+        inhibition_decay_power: float,
+        inhibition_min_growth_ratio: float,
+        inhibition_bottom_boost_pct: float,
+        inhibition_peald_recombination_pct: float,
+        inhibition_smoothing_a: float,
+        reparam_ds_a: float,
+    ) -> None:
+        self.process_model = _inhibition_process_key(process_model)
+        self.feature_type = _feature_type_key(feature_type)
+        self.feature_width_a = _positive_or_default(feature_width_a, 240.0)
+        self.feature_length_a = feature_length_a
+        self.attenuation_model = str(attenuation_model or "exponential")
+        self.depth_decay_k = max(0.0, float(depth_decay_k))
+        self.depth_decay_power = max(0.05, float(depth_decay_power))
+        self.min_depo_ratio = _clamp01(float(min_depo_ratio))
+        self.use_equivalent_aspect_ratio = bool(use_equivalent_aspect_ratio)
+        self.inhibition_strength_pct = max(0.0, min(100.0, float(inhibition_strength_pct)))
+        self.inhibition_penetration_depth_a = _positive_or_default(inhibition_penetration_depth_a, 1100.0)
+        self.inhibition_decay_power = max(0.05, float(inhibition_decay_power))
+        self.inhibition_min_growth_ratio = _clamp01(float(inhibition_min_growth_ratio))
+        self.inhibition_bottom_boost_pct = max(0.0, min(200.0, float(inhibition_bottom_boost_pct)))
+        self.inhibition_peald_recombination_pct = max(0.0, min(100.0, float(inhibition_peald_recombination_pct)))
+        self.inhibition_smoothing_a = max(0.0, float(inhibition_smoothing_a))
+        self.reparam_ds_a = max(0.5, float(reparam_ds_a))
+
+    def compute_flux(self, state: SimulationState) -> List[float]:
+        pts = [(float(x), float(y)) for x, y in state.surface.points]
+        if not pts:
+            return []
+        surface_y = max(y for _x, y in pts)
+        dr = max(0.0, float(state.meta.get("dr", 0.0) or 0.0))
+        ratios = compute_inhibition_deposition_factors(
+            pts,
+            process_model=self.process_model,
+            feature_type=self.feature_type,
+            feature_width_a=self.feature_width_a,
+            feature_length_a=self.feature_length_a,
+            attenuation_model=self.attenuation_model,
+            depth_decay_k=self.depth_decay_k,
+            depth_decay_power=self.depth_decay_power,
+            min_depo_ratio=self.min_depo_ratio,
+            use_equivalent_aspect_ratio=self.use_equivalent_aspect_ratio,
+            inhibition_strength_pct=self.inhibition_strength_pct,
+            inhibition_penetration_depth_a=self.inhibition_penetration_depth_a,
+            inhibition_decay_power=self.inhibition_decay_power,
+            inhibition_min_growth_ratio=self.inhibition_min_growth_ratio,
+            inhibition_bottom_boost_pct=self.inhibition_bottom_boost_pct,
+            inhibition_peald_recombination_pct=self.inhibition_peald_recombination_pct,
+            inhibition_smoothing_a=self.inhibition_smoothing_a,
+            reparam_ds_a=self.reparam_ds_a,
+        )
+        depths = [max(0.0, surface_y - float(y)) for _x, y in pts]
+        state.meta["inhibition_debug_fields_last"] = {
+            "x": [round(float(x), 6) for x, _y in pts],
+            "y": [round(float(y), 6) for _x, y in pts],
+            "depth_field": [round(float(v), 6) for v in depths],
+            "growth_ratio_field": [round(float(v), 6) for v in ratios],
+            "depo_field": [round(float(dr) * float(v), 6) for v in ratios],
+        }
+        state.meta["inhibition_debug_summary_last"] = {
+            "growth_ratio": _field_summary_by_depth(pts, ratios),
             "depo": _field_summary_by_depth(pts, [float(dr) * float(v) for v in ratios]),
         }
         return ratios
@@ -903,7 +1090,7 @@ def _apply_depth_post_closure_fill(
     nominal_depo_a: float,
     cycle_index: int,
 ) -> None:
-    if not bool(cfg.deposition_depth_enabled) or nominal_depo_a <= 0.0:
+    if not bool(cfg.deposition_depth_enabled or cfg.inhibition_enabled) or nominal_depo_a <= 0.0:
         return
     voids_i = OffsetBoolean.collect_void_air(state)
     if not voids_i:
@@ -988,6 +1175,65 @@ def _apply_depth_deposition_step(
         min_depo_ratio=cfg.deposition_min_ratio,
         use_equivalent_aspect_ratio=cfg.deposition_use_equivalent_ar,
         max_depo_per_cell_a=cfg.deposition_max_depo_per_cell_a,
+    )
+    pts = normalize_surface_order(state.surface.points)
+    if len(pts) < 2 or deposition_a <= 0.0:
+        state.surface.points = pts
+        return
+    flux = model.compute_flux(state)
+    if len(flux) != len(pts):
+        flux = [1.0 for _ in pts]
+    proposed = VertexNormalPropagator().advance(pts, flux, deposition_a)
+    positive = [max(0.0, float(v)) for v in flux]
+    mean_flux = sum(positive) / float(len(positive)) if positive else 1.0
+    solid_ref = OffsetBoolean.grow_solid_external_air_limited(state, dr_ref=deposition_a * mean_flux)
+    clean_surface, clean_solid = TopologyCleanup().cleanup(
+        proposed,
+        state,
+        solid_ref_paths_i=solid_ref,
+        solid_merge_mode="union",
+    )
+    state.surface.points = equal_arc_resample(clean_surface, reparam_ds_a)
+    if clean_solid:
+        state.solid_paths_i = clean_solid
+
+    closure_probe = detect_depth_deposition_closure(
+        state.surface.points,
+        closure_threshold_a=cfg.deposition_closure_threshold_a,
+        reparam_ds_a=reparam_ds_a,
+    )
+    state.meta["depth_closure_probe_last"] = closure_probe
+    _apply_depth_post_closure_fill(state, cfg, nominal_depo_a=deposition_a, cycle_index=cycle_index)
+
+
+def _apply_inhibition_deposition_step(
+    state: SimulationState,
+    cfg: TrenchDepoConfig,
+    *,
+    deposition_a: float,
+    reparam_ds_a: float,
+    cycle_index: int,
+) -> None:
+    state.meta["dr"] = float(deposition_a)
+    state.meta["reparam_ds"] = float(reparam_ds_a)
+    model = _InhibitionDepositionFluxModel(
+        process_model=cfg.inhibition_process_model,
+        feature_type=cfg.deposition_feature_type,
+        feature_width_a=cfg.deposition_feature_width_a,
+        feature_length_a=cfg.deposition_feature_length_a,
+        attenuation_model=cfg.deposition_attenuation_model,
+        depth_decay_k=cfg.deposition_depth_decay_k,
+        depth_decay_power=cfg.deposition_depth_decay_power,
+        min_depo_ratio=cfg.deposition_min_ratio,
+        use_equivalent_aspect_ratio=cfg.deposition_use_equivalent_ar,
+        inhibition_strength_pct=cfg.inhibition_strength_pct,
+        inhibition_penetration_depth_a=cfg.inhibition_penetration_depth_a,
+        inhibition_decay_power=cfg.inhibition_decay_power,
+        inhibition_min_growth_ratio=cfg.inhibition_min_growth_ratio,
+        inhibition_bottom_boost_pct=cfg.inhibition_bottom_boost_pct,
+        inhibition_peald_recombination_pct=cfg.inhibition_peald_recombination_pct,
+        inhibition_smoothing_a=cfg.inhibition_smoothing_a,
+        reparam_ds_a=reparam_ds_a,
     )
     pts = normalize_surface_order(state.surface.points)
     if len(pts) < 2 or deposition_a <= 0.0:
@@ -1846,6 +2092,24 @@ def _validate_sweep_value(parameter: str, value: float) -> float:
         return ratio
     if parameter in {"deposition_closure_threshold_a", "deposition_residual_fill_decay_length_a"}:
         return _coerce_non_negative_float(value, name=parameter)
+    if parameter in {
+        "inhibition_strength_pct",
+        "inhibition_bottom_boost_pct",
+        "inhibition_peald_recombination_pct",
+    }:
+        percent = _coerce_finite_float(value, name=parameter)
+        if percent < 0.0 or percent > 100.0:
+            raise ValueError(f"{parameter} must be between 0 and 100")
+        return percent
+    if parameter == "inhibition_penetration_depth_a":
+        return _coerce_positive_float(value, name=parameter)
+    if parameter == "inhibition_min_growth_ratio":
+        ratio = _coerce_finite_float(value, name=parameter)
+        if ratio < 0.0 or ratio > 1.0:
+            raise ValueError(f"{parameter} must be between 0 and 1")
+        return ratio
+    if parameter == "inhibition_smoothing_a":
+        return _coerce_non_negative_float(value, name=parameter)
     raise ValueError(f"unsupported sweep parameter: {parameter}")
 
 
@@ -1873,6 +2137,13 @@ def _replace_sweep_config(base_config: TrenchDepoConfig, parameter: str, value: 
         kwargs["reflected_ion_enabled"] = False
         kwargs["ion_transmission_enabled"] = False
         kwargs["deposition_depth_enabled"] = True
+    if parameter in _INHIBITION_SWEEP_PARAMETERS:
+        kwargs["sputter_enabled"] = False
+        kwargs["redepo_enabled"] = False
+        kwargs["reflected_ion_enabled"] = False
+        kwargs["ion_transmission_enabled"] = False
+        kwargs["deposition_depth_enabled"] = True
+        kwargs["inhibition_enabled"] = True
     return replace(base_config, **kwargs)
 
 
@@ -2125,10 +2396,50 @@ def run_trench_depo(
         if cfg.deposition_max_depo_per_cell_a is None
         else _coerce_non_negative_float(cfg.deposition_max_depo_per_cell_a, name="deposition_max_depo_per_cell_a")
     )
+    inhibition_process_model = _inhibition_process_key(cfg.inhibition_process_model)
+    inhibition_strength_pct = max(
+        0.0,
+        min(100.0, _coerce_finite_float(cfg.inhibition_strength_pct, name="inhibition_strength_pct")),
+    )
+    inhibition_penetration_depth_a = _coerce_positive_float(
+        cfg.inhibition_penetration_depth_a,
+        name="inhibition_penetration_depth_a",
+    )
+    inhibition_decay_power = max(
+        0.05,
+        min(8.0, _coerce_finite_float(cfg.inhibition_decay_power, name="inhibition_decay_power")),
+    )
+    inhibition_min_growth_ratio = _clamp01(
+        _coerce_finite_float(cfg.inhibition_min_growth_ratio, name="inhibition_min_growth_ratio")
+    )
+    inhibition_bottom_boost_pct = max(
+        0.0,
+        min(100.0, _coerce_finite_float(cfg.inhibition_bottom_boost_pct, name="inhibition_bottom_boost_pct")),
+    )
+    inhibition_peald_recombination_pct = max(
+        0.0,
+        min(
+            100.0,
+            _coerce_finite_float(
+                cfg.inhibition_peald_recombination_pct,
+                name="inhibition_peald_recombination_pct",
+            ),
+        ),
+    )
+    inhibition_smoothing_a = _coerce_non_negative_float(
+        cfg.inhibition_smoothing_a,
+        name="inhibition_smoothing_a",
+    )
     sputter_active = bool(cfg.sputter_enabled) and sputter_strength_a > 0.0
     reflected_ion_requested = bool(cfg.reflected_ion_enabled) and reflected_ion_strength_pct > 0.0
     redepo_active = bool(cfg.redepo_enabled) and sputter_active and redepo_efficiency_pct > 0.0
-    depth_deposition_active = bool(cfg.deposition_depth_enabled) and not sputter_active and angstrom_per_cycle > 0.0
+    inhibition_active = bool(cfg.inhibition_enabled) and not sputter_active and angstrom_per_cycle > 0.0
+    depth_deposition_active = (
+        bool(cfg.deposition_depth_enabled)
+        and not inhibition_active
+        and not sputter_active
+        and angstrom_per_cycle > 0.0
+    )
     initial_points = _coerce_points(cfg.points)
     depth_cfg = replace(
         cfg,
@@ -2147,6 +2458,14 @@ def run_trench_depo(
         deposition_residual_fill_decay_length_a=deposition_residual_fill_decay_length_a,
         deposition_residual_fill_distribution=deposition_residual_fill_distribution,
         deposition_max_depo_per_cell_a=deposition_max_depo_per_cell_a,
+        inhibition_process_model=inhibition_process_model,
+        inhibition_strength_pct=inhibition_strength_pct,
+        inhibition_penetration_depth_a=inhibition_penetration_depth_a,
+        inhibition_decay_power=inhibition_decay_power,
+        inhibition_min_growth_ratio=inhibition_min_growth_ratio,
+        inhibition_bottom_boost_pct=inhibition_bottom_boost_pct,
+        inhibition_peald_recombination_pct=inhibition_peald_recombination_pct,
+        inhibition_smoothing_a=inhibition_smoothing_a,
     )
 
     OffsetBoolean.require_backend()
@@ -2263,7 +2582,31 @@ def run_trench_depo(
                     state.meta["sputter_last_response_max"] = max(responses)
                 state.meta["sputter_etch_clamp_a_per_cycle"] = float(etch_clamp_a * substeps)
         else:
-            if depth_deposition_active:
+            if inhibition_active:
+                substeps = _depth_depo_internal_substeps(angstrom_per_cycle, reparam_ds_a)
+                state.meta["inhibition_internal_substeps"] = int(substeps)
+                deposition_sub_a = angstrom_per_cycle / float(substeps)
+                for substep_idx in range(substeps):
+                    if canceled():
+                        raise SimulationCanceled()
+                    _apply_inhibition_deposition_step(
+                        state,
+                        depth_cfg,
+                        deposition_a=deposition_sub_a,
+                        reparam_ds_a=reparam_ds_a,
+                        cycle_index=int(step + 1),
+                    )
+                    if detail_cb is not None:
+                        detail_cb(
+                            {
+                                "kind": "inhibition_deposition_substep",
+                                "step": int(step),
+                                "substep": int(substep_idx + 1),
+                                "substeps": int(substeps),
+                                "points": int(len(state.surface.points)),
+                            }
+                        )
+            elif depth_deposition_active:
                 substeps = _depth_depo_internal_substeps(angstrom_per_cycle, reparam_ds_a)
                 state.meta["depth_deposition_internal_substeps"] = int(substeps)
                 deposition_sub_a = angstrom_per_cycle / float(substeps)
@@ -2332,12 +2675,20 @@ def run_trench_depo(
         meta={
             "version": 1,
             "units": {"length": "A", "y_down_is_negative": True},
-            "growth_model": "depth_dependent_deposition" if depth_deposition_active else "conformal_offset",
+            "growth_model": (
+                "inhibition_weighted_deposition"
+                if inhibition_active
+                else "depth_dependent_deposition"
+                if depth_deposition_active
+                else "conformal_offset"
+            ),
             "propagation": (
                 "offset_boolean_plus_direct_angle_sputter_redepo"
                 if redepo_active
                 else "offset_boolean_plus_direct_angle_sputter"
                 if sputter_active
+                else "vertex_normal_inhibition_depo_post_closure_fill"
+                if inhibition_active
                 else "vertex_normal_depth_depo_post_closure_fill"
                 if depth_deposition_active
                 else "offset_boolean_external_air_limited"
@@ -2448,6 +2799,19 @@ def run_trench_depo(
             "deposition_depth_debug_fields_last": dict(state.meta.get("depth_deposition_debug_fields_last", {})),
             "deposition_depth_debug_summary_last": dict(state.meta.get("depth_deposition_debug_summary_last", {})),
             "deposition_depth_internal_substeps": int(state.meta.get("depth_deposition_internal_substeps", 1)),
+            "inhibition_enabled": bool(cfg.inhibition_enabled),
+            "inhibition_active": bool(inhibition_active),
+            "inhibition_process_model": str(inhibition_process_model),
+            "inhibition_strength_pct": float(inhibition_strength_pct),
+            "inhibition_penetration_depth_a": float(inhibition_penetration_depth_a),
+            "inhibition_decay_power": float(inhibition_decay_power),
+            "inhibition_min_growth_ratio": float(inhibition_min_growth_ratio),
+            "inhibition_bottom_boost_pct": float(inhibition_bottom_boost_pct),
+            "inhibition_peald_recombination_pct": float(inhibition_peald_recombination_pct),
+            "inhibition_smoothing_a": float(inhibition_smoothing_a),
+            "inhibition_debug_fields_last": dict(state.meta.get("inhibition_debug_fields_last", {})),
+            "inhibition_debug_summary_last": dict(state.meta.get("inhibition_debug_summary_last", {})),
+            "inhibition_internal_substeps": int(state.meta.get("inhibition_internal_substeps", 1)),
             "direct_sputter_internal_substeps": int(state.meta.get("direct_sputter_internal_substeps", 1)),
             "sputter_excluded_effects": sputter_excluded_effects,
             "initial_points": int(len(initial_points)),

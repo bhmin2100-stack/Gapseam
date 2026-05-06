@@ -23,7 +23,7 @@ class EmulationResearchRegistryTest(unittest.TestCase):
 
         self.assertEqual(numbers, list(range(0, 11)))
         self.assertEqual(len({slot.directory_name for slot in EMULATOR_RESEARCH_SLOTS}), 11)
-        self.assertEqual(DEFAULT_CREATED_EMULATOR_NUMBERS, (0, 1, 2, 3, 4, 5))
+        self.assertEqual(DEFAULT_CREATED_EMULATOR_NUMBERS, (0, 1, 2, 3, 4, 5, 6))
 
     def test_slot_zero_is_conformal_baseline(self) -> None:
         slot = get_emulator_research_slot(0)
@@ -74,6 +74,14 @@ class EmulationResearchRegistryTest(unittest.TestCase):
         self.assertIn("Depth-Dependent", slot.title_en)
         self.assertIn("에뮬레이터05", slot.presentation_filename)
 
+    def test_slot_six_is_inhibition_deposition_emulator(self) -> None:
+        slot = get_emulator_research_slot(6)
+
+        self.assertEqual(slot.module, "gapsim.emulation.trench_depo")
+        self.assertIn("인히비션", slot.title_ko)
+        self.assertIn("Inhibition", slot.title_en)
+        self.assertIn("에뮬레이터06", slot.presentation_filename)
+
     def test_invalid_slot_number_fails_clearly(self) -> None:
         with self.assertRaisesRegex(ValueError, "0 to 10"):
             get_emulator_research_slot(-1)
@@ -95,15 +103,15 @@ class EmulationResearchRegistryTest(unittest.TestCase):
 
     def test_created_emulator_numbers_roundtrip_through_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            self.assertEqual(load_created_emulator_numbers(root=tmp), [0, 1, 2, 3, 4, 5])
+            self.assertEqual(load_created_emulator_numbers(root=tmp), [0, 1, 2, 3, 4, 5, 6])
 
             manifest = save_created_emulator_numbers([0, 1, 2, 3, 4, 5], root=tmp)
 
             self.assertTrue(manifest.is_file())
-            self.assertEqual(load_created_emulator_numbers(root=tmp), [0, 1, 2, 3, 4, 5])
+            self.assertEqual(load_created_emulator_numbers(root=tmp), [0, 1, 2, 3, 4, 5, 6])
 
             save_created_emulator_numbers([2], root=tmp)
-            self.assertEqual(load_created_emulator_numbers(root=tmp), [0, 1, 2, 3, 4, 5])
+            self.assertEqual(load_created_emulator_numbers(root=tmp), [0, 1, 2, 3, 4, 5, 6])
 
     def test_ensure_single_slot_creates_only_requested_slot(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -127,13 +135,14 @@ class EmulationResearchRegistryTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             created = ensure_emulator_research_tree(root=tmp, numbers=DEFAULT_CREATED_EMULATOR_NUMBERS)
 
-            self.assertEqual(set(created), {0, 1, 2, 3, 4, 5})
+            self.assertEqual(set(created), {0, 1, 2, 3, 4, 5, 6})
             self.assertTrue(created[0]["updates_dir"].is_dir())
             self.assertTrue(created[1]["updates_dir"].is_dir())
             self.assertTrue(created[2]["updates_dir"].is_dir())
             self.assertTrue(created[3]["updates_dir"].is_dir())
             self.assertTrue(created[4]["updates_dir"].is_dir())
             self.assertTrue(created[5]["updates_dir"].is_dir())
+            self.assertTrue(created[6]["updates_dir"].is_dir())
             self.assertFalse((Path(tmp) / "emulator_06_unassigned").exists())
 
 

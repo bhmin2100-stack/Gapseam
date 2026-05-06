@@ -91,6 +91,7 @@ EMULATOR_MODE_TITLES = {
     3: "Discarded reflected ion etch",
     4: "Sputter redeposition",
     5: "Depth-dependent depo fill",
+    6: "Inhibition deposition fill",
 }
 
 
@@ -1923,7 +1924,7 @@ class TrenchDepoWindow(QMainWindow):
         return self.active_emulator_number() == 4
 
     def _active_emulator_supports_depth_deposition(self) -> bool:
-        return self.active_emulator_number() == 5
+        return self.active_emulator_number() in (5, 6)
 
     def _populate_split_parameters(self) -> None:
         previous = self.cmb_split_parameter.currentData()
@@ -1979,6 +1980,16 @@ class TrenchDepoWindow(QMainWindow):
                 ("Residual decay", "deposition_residual_fill_decay_length_a"),
                 *options,
             ]
+            if self.active_emulator_number() == 6:
+                options = [
+                    ("Inhibit %", "inhibition_strength_pct"),
+                    ("Inhibit depth", "inhibition_penetration_depth_a"),
+                    ("Inhibit floor", "inhibition_min_growth_ratio"),
+                    ("Bottom boost", "inhibition_bottom_boost_pct"),
+                    ("PEALD recomb", "inhibition_peald_recombination_pct"),
+                    ("Inhibit smooth", "inhibition_smoothing_a"),
+                    *options,
+                ]
 
         self.cmb_split_parameter.blockSignals(True)
         self.cmb_split_parameter.clear()
@@ -2056,8 +2067,16 @@ class TrenchDepoWindow(QMainWindow):
             if changed:
                 self.chk_depth_deposition.setChecked(True)
                 self.cmb_depth_feature_type.setCurrentIndex(0)
-            self.edit_request_note.setPlaceholderText("요청사항 / depth-dependent deposition과 closure 후 잔류 fill 메모를 적으면 run 파일명과 요약에 같이 들어갑니다.")
+            if number == 6:
+                self.chk_depth_deposition.setText("Inhibition deposition")
+                self.lbl_depth_depo_section.setText("6 Inhibition-weighted deposition")
+                self.edit_request_note.setPlaceholderText("Request note / PECVD-PEALD inhibition, top suppression, and smooth fill notes are saved with the run.")
+            else:
+                self.chk_depth_deposition.setText("Depth-dependent deposition")
+                self.lbl_depth_depo_section.setText("5 Depth-dependent deposition")
+                self.edit_request_note.setPlaceholderText("요청사항 / depth-dependent deposition과 closure 후 잔류 fill 메모를 적으면 run 파일명과 요약에 같이 들어갑니다.")
         else:
+            self.chk_depth_deposition.setText("Depth-dependent deposition")
             self.chk_sputter.setChecked(False)
             self.chk_ion_transmission.setChecked(False)
             self.chk_reflected_ion.setChecked(False)
@@ -2353,9 +2372,14 @@ class TrenchDepoWindow(QMainWindow):
         self.spin_depth_feature_width.setValue(240.0)
         self.spin_depth_feature_depth.setValue(4700.0)
         self.spin_depth_feature_length.setValue(0.0)
-        self.spin_depth_decay_k.setValue(0.8)
-        self.spin_depth_decay_power.setValue(1.2)
-        self.spin_depth_min_ratio_pct.setValue(3.0)
+        if self.active_emulator_number() == 6:
+            self.spin_depth_decay_k.setValue(0.35)
+            self.spin_depth_decay_power.setValue(1.2)
+            self.spin_depth_min_ratio_pct.setValue(8.0)
+        else:
+            self.spin_depth_decay_k.setValue(0.8)
+            self.spin_depth_decay_power.setValue(1.2)
+            self.spin_depth_min_ratio_pct.setValue(3.0)
         self.spin_depth_closure_threshold.setValue(8.0)
         self.spin_depth_post_fill_hole_pct.setValue(3.0)
         self.spin_depth_post_fill_line_pct.setValue(20.0)
@@ -2368,7 +2392,9 @@ class TrenchDepoWindow(QMainWindow):
         self.spin_sputter_smoothing.setValue(40.0)
         self._populate_split_parameters()
         self.sync_etch_control_availability()
-        if self.active_emulator_number() == 5:
+        if self.active_emulator_number() == 6:
+            self.edit_request_note.setPlainText("PECVD/PEALD inhibition-weighted deposition: top/opening growth suppression with smooth trench fill")
+        elif self.active_emulator_number() == 5:
             self.edit_request_note.setPlainText("길쭉한 항아리형 구조에서 depth-dependent depo와 closure 후 잔류 fill 검증")
         elif self.active_emulator_number() == 3:
             self.edit_request_note.setPlainText("1번 direct sputter 위에 reflected ion bowing/microtrenching 추가 검증")
@@ -2441,6 +2467,18 @@ class TrenchDepoWindow(QMainWindow):
             values = (0.0, 24.0, 6.0, 1, 0.0, 10000.0)
         elif parameter == "deposition_residual_fill_decay_length_a":
             values = (400.0, 2200.0, 600.0, 0, 1.0, 200000.0)
+        elif parameter == "inhibition_strength_pct":
+            values = (50.0, 95.0, 15.0, 1, 0.0, 100.0)
+        elif parameter == "inhibition_penetration_depth_a":
+            values = (400.0, 1800.0, 350.0, 0, 1.0, 200000.0)
+        elif parameter == "inhibition_min_growth_ratio":
+            values = (0.02, 0.20, 0.06, 2, 0.0, 1.0)
+        elif parameter == "inhibition_bottom_boost_pct":
+            values = (0.0, 40.0, 10.0, 1, 0.0, 100.0)
+        elif parameter == "inhibition_peald_recombination_pct":
+            values = (0.0, 60.0, 15.0, 1, 0.0, 100.0)
+        elif parameter == "inhibition_smoothing_a":
+            values = (0.0, 90.0, 30.0, 1, 0.0, 1000.0)
         else:
             values = (0.0, 16.0, 4.0, 3, 0.0, 100.0)
 
@@ -2470,7 +2508,7 @@ class TrenchDepoWindow(QMainWindow):
                 ION_TRANSMISSION_STEPPED_TRENCH_POINTS
                 if active_emulator == 2
                 else BOWED_JAR_TRENCH_POINTS
-                if active_emulator == 5
+                if active_emulator in (5, 6)
                 else TrenchDepoConfig().points
             ),
             cycles=int(self.spin_cycles.value()),
@@ -2548,6 +2586,17 @@ class TrenchDepoWindow(QMainWindow):
             deposition_residual_fill_decay_length_a=float(self.spin_depth_residual_decay.value()),
             deposition_residual_fill_distribution="exponential_from_closure",
             deposition_conserve_volume=True,
+            inhibition_enabled=bool(
+                active_emulator == 6 and supports_depth_deposition and self.chk_depth_deposition.isChecked()
+            ),
+            inhibition_process_model="hybrid",
+            inhibition_strength_pct=85.0,
+            inhibition_penetration_depth_a=max(80.0, float(self.spin_depth_feature_depth.value()) * 0.24),
+            inhibition_decay_power=float(self.spin_depth_decay_power.value()),
+            inhibition_min_growth_ratio=float(self.spin_depth_min_ratio_pct.value()) / 100.0,
+            inhibition_bottom_boost_pct=20.0,
+            inhibition_peald_recombination_pct=35.0,
+            inhibition_smoothing_a=45.0,
         )
 
     def current_etch_config(self) -> TrenchDepoConfig:
@@ -2664,6 +2713,15 @@ class TrenchDepoWindow(QMainWindow):
                 else float(config.deposition_max_depo_per_cell_a)
             ),
             bool(config.deposition_conserve_volume),
+            bool(config.inhibition_enabled),
+            str(config.inhibition_process_model),
+            float(config.inhibition_strength_pct),
+            float(config.inhibition_penetration_depth_a),
+            float(config.inhibition_decay_power),
+            float(config.inhibition_min_growth_ratio),
+            float(config.inhibition_bottom_boost_pct),
+            float(config.inhibition_peald_recombination_pct),
+            float(config.inhibition_smoothing_a),
         )
 
     def run_emulation(
@@ -2960,7 +3018,9 @@ class TrenchDepoWindow(QMainWindow):
         replay_path = Path(path).resolve()
         config, result, note = load_trench_depo_run(replay_path)
         replay_emulator = (
-            5
+            6
+            if bool(config.inhibition_enabled)
+            else 5
             if bool(config.deposition_depth_enabled)
             else (
                 4

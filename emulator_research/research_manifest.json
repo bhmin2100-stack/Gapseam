@@ -7,7 +7,8 @@
     2,
     3,
     4,
-    5
+    5,
+    6
   ],
   "presentation_policy": "각 에뮬레이터별 PPTX를 분리하고, 의미 있는 업데이트마다 해당 PPT에 슬라이드 1장을 추가한다.",
   "source_policy": "관련 논문, 리뷰, 공식 문서가 있으면 제목/연도/출처를 기록하고 물리 해석에 반영한다.",
@@ -69,12 +70,12 @@
     },
     {
       "number": 6,
-      "slug": "unassigned",
-      "title_ko": "연구슬롯 미정",
-      "title_en": "Unassigned Research Slot",
-      "status_ko": "대기중",
-      "module": null,
-      "presentation": "presentations/에뮬레이터06_연구슬롯_미정.pptx"
+      "slug": "inhibition_deposition_fill",
+      "title_ko": "인히비션 증착 필",
+      "title_en": "Inhibition Deposition Fill",
+      "status_ko": "진행중: PECVD/PEALD inhibition coverage field 기반 top/opening suppression fill",
+      "module": "gapsim.emulation.trench_depo",
+      "presentation": "presentations/에뮬레이터06_인히비션_증착_필.pptx"
     },
     {
       "number": 7,

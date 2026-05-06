@@ -17,7 +17,7 @@ DEFAULT_RESEARCH_ROOT = _default_research_root()
 PRESENTATIONS_DIRNAME = "presentations"
 RESEARCH_MANIFEST_FILENAME = "research_manifest.json"
 MAX_EMULATOR_NUMBER = 10
-DEFAULT_CREATED_EMULATOR_NUMBERS = (0, 1, 2, 3, 4, 5)
+DEFAULT_CREATED_EMULATOR_NUMBERS = (0, 1, 2, 3, 4, 5, 6)
 
 
 @dataclass(frozen=True)
@@ -87,7 +87,14 @@ EMULATOR_RESEARCH_SLOTS = (
         "진행중: etch/redepo 없이 depth-dependent deposition과 closure 후 내부 잔류 fill 검증",
         module="gapsim.emulation.trench_depo",
     ),
-    EmulatorResearchSlot(6, "unassigned", "연구슬롯_미정", "Unassigned Research Slot", "대기중"),
+    EmulatorResearchSlot(
+        6,
+        "inhibition_deposition_fill",
+        "인히비션_증착_필",
+        "Inhibition Deposition Fill",
+        "진행중: PECVD/PEALD inhibition coverage field 기반 top/opening suppression fill",
+        module="gapsim.emulation.trench_depo",
+    ),
     EmulatorResearchSlot(7, "unassigned", "연구슬롯_미정", "Unassigned Research Slot", "대기중"),
     EmulatorResearchSlot(8, "unassigned", "연구슬롯_미정", "Unassigned Research Slot", "대기중"),
     EmulatorResearchSlot(9, "unassigned", "연구슬롯_미정", "Unassigned Research Slot", "대기중"),
