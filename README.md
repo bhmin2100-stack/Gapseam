@@ -13,6 +13,12 @@ CI 또는 로컬 스크립트에서 pyproject 경로를 참조할 때는 항상 
 ## Windows 실행
 
 Python이 설치된 개발 PC에서는 루트의 `run_gapsim.bat`를 실행하면 됩니다.
+GitHub Desktop으로 clone한 소스 폴더에서는 아래 파일을 더블클릭해 각각 실행할 수 있습니다.
+
+- `run_simulator.bat`: GapSim 메인 시뮬레이터
+- `run_emulator.bat`: 미니 에뮬레이터
+
+첫 실행 때 `.venv` 가상환경과 Python 의존성을 자동으로 준비합니다. 소스 폴더에서 실행할 때는 Python 3.10 이상이 필요합니다.
 
 회사 PC처럼 Python 설치 없이 실행하려면 Windows 빌드 산출물인 `GFS_portable_*.zip`을 내려받아 압축을 풀고 아래 파일 중 필요한 것을 실행합니다.
 
