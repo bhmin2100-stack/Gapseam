@@ -9,6 +9,9 @@ COMMON_HIDDEN_IMPORTS = [
     'PIL.Image',
     'PIL.GifImagePlugin',
     'gapsim.ui_qt.launcher_window',
+    'gapsim.ui_qt.controllers.smoothing_ctrl',
+    'gapsim.ui_qt.views.structure_view',
+    'gapsim.ui_qt.views.result_vector_view',
 ]
 
 app = Analysis(

@@ -11,7 +11,13 @@ from PySide6.QtCore import QPointF
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QApplication
 
-from gapsim.emulation.trench_depo import BOWED_JAR_TRENCH_POINTS, TrenchDepoConfig, TrenchDepoResult, TrenchSweepResult
+from gapsim.emulation.trench_depo import (
+    BOWED_JAR_TRENCH_POINTS,
+    ION_TRANSMISSION_STEPPED_TRENCH_POINTS,
+    TrenchDepoConfig,
+    TrenchDepoResult,
+    TrenchSweepResult,
+)
 from gapsim.emulation.trench_depo_ui import (
     IonTransmissionEditor,
     RedepositionLobeEditor,
@@ -417,6 +423,65 @@ class SputterGaussianEditorTest(unittest.TestCase):
         finally:
             window.close()
 
+    def test_structure_editor_geometry_feeds_current_config_and_mode_defaults(self) -> None:
+        result = TrenchDepoResult(
+            frame_steps=[0],
+            frame_profiles=[[(0.0, 0.0), (1.0, 0.0)]],
+            frame_voids=[[]],
+            final_profile=[(0.0, 0.0), (1.0, 0.0)],
+            meta={"cycles": 0},
+        )
+        with (
+            mock.patch("gapsim.emulation.trench_depo_ui.run_trench_depo", return_value=result),
+            mock.patch("gapsim.emulation.trench_depo_ui.QTimer.singleShot"),
+        ):
+            window = TrenchDepoWindow()
+
+        try:
+            self.assertEqual(tuple(window.current_config().points), TrenchDepoConfig().points)
+
+            window.set_active_emulator_number(2, run=False)
+            self.assertEqual(tuple(window.current_config().points), ION_TRANSMISSION_STEPPED_TRENCH_POINTS)
+
+            custom_points = [(-300.0, 0.0), (-100.0, -250.0), (100.0, -250.0), (300.0, 0.0)]
+            window._set_structure_points(custom_points, fit=False)
+
+            self.assertEqual(tuple(window.current_config().points), tuple(custom_points))
+            self.assertIn("4 pts", window.lbl_geometry_source.text())
+        finally:
+            window.close()
+
+    def test_structure_smoothing_can_be_used_or_bypassed_as_run_geometry(self) -> None:
+        result = TrenchDepoResult(
+            frame_steps=[0],
+            frame_profiles=[[(0.0, 0.0), (1.0, 0.0)]],
+            frame_voids=[[]],
+            final_profile=[(0.0, 0.0), (1.0, 0.0)],
+            meta={"cycles": 0},
+        )
+        with (
+            mock.patch("gapsim.emulation.trench_depo_ui.run_trench_depo", return_value=result),
+            mock.patch("gapsim.emulation.trench_depo_ui.QTimer.singleShot"),
+        ):
+            window = TrenchDepoWindow()
+
+        try:
+            raw_points = [(-200.0, 0.0), (-120.0, -200.0), (0.0, -260.0), (120.0, -200.0), (200.0, 0.0)]
+            window._set_structure_points(raw_points, fit=False)
+            window.spin_smooth_segments.setValue(12)
+            window.spin_smooth_iterations.setValue(1)
+
+            window.apply_structure_smoothing()
+
+            self.assertTrue(window._use_smoothed_geometry)
+            self.assertGreater(len(window._smoothed_points), len(raw_points))
+            self.assertEqual(tuple(window.current_config().points), tuple(window._smoothed_points))
+
+            window.use_raw_geometry()
+            self.assertEqual(tuple(window.current_config().points), tuple(raw_points))
+        finally:
+            window.close()
+
     def test_window_starts_on_emulator_zero_with_only_existing_toggles(self) -> None:
         result = TrenchDepoResult(
             frame_steps=[0],
@@ -433,14 +498,15 @@ class SputterGaussianEditorTest(unittest.TestCase):
 
         try:
             self.assertEqual(window.active_emulator_number(), 0)
-            self.assertEqual(window._emulator_numbers, [0, 1, 2, 3, 4, 5])
-            self.assertEqual(sorted(window._emulator_buttons), [0, 1, 2, 3, 4, 5])
+            self.assertEqual(window._emulator_numbers, [0, 1, 2, 3, 4, 5, 6])
+            self.assertEqual(sorted(window._emulator_buttons), [0, 1, 2, 3, 4, 5, 6])
             self.assertTrue(window._emulator_buttons[0].isChecked())
             self.assertFalse(window._emulator_buttons[1].isChecked())
             self.assertFalse(window._emulator_buttons[2].isChecked())
             self.assertFalse(window._emulator_buttons[3].isChecked())
             self.assertFalse(window._emulator_buttons[4].isChecked())
             self.assertFalse(window._emulator_buttons[5].isChecked())
+            self.assertFalse(window._emulator_buttons[6].isChecked())
         finally:
             window.close()
 
@@ -463,11 +529,11 @@ class SputterGaussianEditorTest(unittest.TestCase):
             try:
                 window.create_new_emulator()
 
-                self.assertEqual(window.active_emulator_number(), 6)
-                self.assertEqual(window._emulator_numbers, [0, 1, 2, 3, 4, 5, 6])
-                self.assertTrue(window._emulator_buttons[6].isChecked())
-                ensure_slot.assert_called_once_with(6)
-                save_numbers.assert_called_once_with([0, 1, 2, 3, 4, 5, 6])
+                self.assertEqual(window.active_emulator_number(), 7)
+                self.assertEqual(window._emulator_numbers, [0, 1, 2, 3, 4, 5, 6, 7])
+                self.assertTrue(window._emulator_buttons[7].isChecked())
+                ensure_slot.assert_called_once_with(7)
+                save_numbers.assert_called_once_with([0, 1, 2, 3, 4, 5, 6, 7])
             finally:
                 window.close()
 

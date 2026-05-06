@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QStatusBar,
     QSplitter,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -59,7 +60,9 @@ from gapsim.emulation.trench_depo_export import (
     load_trench_depo_run,
     load_trench_depo_split_group,
 )
+from gapsim.ui_qt.controllers.smoothing_ctrl import SmoothingController
 from gapsim.ui_qt.views.result_vector_view import ResultVectorView
+from gapsim.ui_qt.views.structure_view import StructureView
 
 
 def _use_solid_playback(result: TrenchDepoResult) -> bool:
@@ -1149,6 +1152,21 @@ class TrenchDepoWindow(QMainWindow):
 
         self.view = ResultVectorView()
         self.view.setMinimumSize(560, 620)
+        self.structure_view = StructureView()
+        self.structure_view.setMinimumSize(560, 540)
+        self.structure_view.set_point_radius_px(4.5)
+        self.smoothing_view = StructureView()
+        self.smoothing_view.setMinimumSize(560, 540)
+        self.smoothing_view.set_point_radius_px(2.5)
+        self.smoothing_view.set_profile_colors(
+            current=QColor("#2563eb"),
+            reference=QColor(100, 116, 139, 180),
+        )
+        self.smoothing = SmoothingController()
+        self._structure_points: List[Tuple[float, float]] = []
+        self._smoothed_points: List[Tuple[float, float]] = []
+        self._use_smoothed_geometry = False
+        self._syncing_structure_view = False
         self.emulator_button_group = QButtonGroup(self)
         self.emulator_button_group.setExclusive(True)
         self.emulator_toggle_row = QHBoxLayout()
@@ -1417,11 +1435,75 @@ class TrenchDepoWindow(QMainWindow):
         run_row.addWidget(self.lbl_run_dir, 1)
         run_row.addWidget(self.btn_open_run_dir)
 
+        self.view_tabs = QTabWidget()
+        result_tab = QWidget()
+        result_layout = QVBoxLayout()
+        result_layout.setContentsMargins(0, 0, 0, 0)
+        result_layout.addWidget(self.view, 1)
+        result_tab.setLayout(result_layout)
+
+        self.btn_fit_structure = QPushButton("Fit")
+        self.btn_reset_structure = QPushButton("Default")
+        self.lbl_geometry_points = QLabel("Geometry: 0 pts")
+        self.lbl_geometry_source = QLabel("Input: raw")
+        self.lbl_geometry_source.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        structure_buttons = QHBoxLayout()
+        structure_buttons.setContentsMargins(0, 0, 0, 0)
+        structure_buttons.addWidget(self.btn_fit_structure)
+        structure_buttons.addWidget(self.btn_reset_structure)
+        structure_buttons.addWidget(self.lbl_geometry_points, 1)
+        structure_buttons.addWidget(self.lbl_geometry_source)
+
+        structure_tab = QWidget()
+        structure_layout = QVBoxLayout()
+        structure_layout.setContentsMargins(0, 0, 0, 0)
+        structure_layout.setSpacing(6)
+        structure_layout.addWidget(self.structure_view, 1)
+        structure_layout.addLayout(structure_buttons)
+        structure_tab.setLayout(structure_layout)
+
+        self.spin_smooth_segments = QSpinBox()
+        self.spin_smooth_segments.setRange(1, 5000)
+        self.spin_smooth_segments.setSingleStep(20)
+        self.spin_smooth_segments.setValue(240)
+        self.spin_smooth_iterations = QSpinBox()
+        self.spin_smooth_iterations.setRange(0, 200)
+        self.spin_smooth_iterations.setSingleStep(1)
+        self.spin_smooth_iterations.setValue(4)
+        self.btn_apply_smoothing = QPushButton("Smooth")
+        self.btn_use_smoothed_geometry = QPushButton("Use Smooth")
+        self.btn_use_raw_geometry = QPushButton("Use Raw")
+        self.lbl_smoothing_status = QLabel("Smooth: not applied")
+        smooth_grid = QGridLayout()
+        smooth_grid.setContentsMargins(0, 0, 0, 0)
+        smooth_grid.setHorizontalSpacing(8)
+        smooth_grid.setVerticalSpacing(6)
+        smooth_grid.addWidget(QLabel("Segments"), 0, 0)
+        smooth_grid.addWidget(self.spin_smooth_segments, 0, 1)
+        smooth_grid.addWidget(QLabel("Iters"), 0, 2)
+        smooth_grid.addWidget(self.spin_smooth_iterations, 0, 3)
+        smooth_grid.addWidget(self.btn_apply_smoothing, 0, 4)
+        smooth_grid.addWidget(self.btn_use_smoothed_geometry, 1, 0, 1, 2)
+        smooth_grid.addWidget(self.btn_use_raw_geometry, 1, 2, 1, 2)
+        smooth_grid.addWidget(self.lbl_smoothing_status, 1, 4)
+
+        smoothing_tab = QWidget()
+        smoothing_layout = QVBoxLayout()
+        smoothing_layout.setContentsMargins(0, 0, 0, 0)
+        smoothing_layout.setSpacing(6)
+        smoothing_layout.addWidget(self.smoothing_view, 1)
+        smoothing_layout.addLayout(smooth_grid)
+        smoothing_tab.setLayout(smoothing_layout)
+
+        self.view_tabs.addTab(result_tab, "Result")
+        self.view_tabs.addTab(structure_tab, "Structure")
+        self.view_tabs.addTab(smoothing_tab, "Smoothing")
+
         left_panel = QWidget()
         left_layout = QVBoxLayout()
         left_layout.setContentsMargins(8, 8, 6, 8)
         left_layout.setSpacing(8)
-        left_layout.addWidget(self.view, 1)
+        left_layout.addWidget(self.view_tabs, 1)
         left_layout.addLayout(controls)
         left_panel.setLayout(left_layout)
 
@@ -1837,10 +1919,166 @@ class TrenchDepoWindow(QMainWindow):
         self.slider_ion_aperture_shadow.valueChanged.connect(self.sync_ion_shadow_slider_labels)
         self.slider_ion_lateral_shadow.valueChanged.connect(self.sync_ion_shadow_slider_labels)
         self.slider_ion_edge_shadow.valueChanged.connect(self.sync_ion_shadow_slider_labels)
+        self.structure_view.pointMoved.connect(self._on_structure_point_moved)
+        self.structure_view.pointInserted.connect(self._on_structure_point_inserted)
+        self.structure_view.pointDeleted.connect(self._on_structure_point_deleted)
+        self.smoothing_view.pointMoved.connect(self._on_smoothed_point_moved)
+        self.smoothing_view.pointInserted.connect(self._on_smoothed_point_inserted)
+        self.smoothing_view.pointDeleted.connect(self._on_smoothed_point_deleted)
+        self.btn_fit_structure.clicked.connect(self._fit_structure_views)
+        self.btn_reset_structure.clicked.connect(self._reset_geometry_to_default)
+        self.btn_apply_smoothing.clicked.connect(self.apply_structure_smoothing)
+        self.btn_use_smoothed_geometry.clicked.connect(self.use_smoothed_geometry)
+        self.btn_use_raw_geometry.clicked.connect(self.use_raw_geometry)
         self.sync_ion_shadow_slider_labels()
         self.spin_ion_end_depth.valueChanged.connect(self.sync_ion_transmission_editor_from_spins)
 
         self.apply_emulator_mode(run=False)
+        self._reset_geometry_to_default()
+
+    def _default_points_for_active_emulator(self) -> List[Tuple[float, float]]:
+        number = self.active_emulator_number()
+        if number == 2:
+            return [(float(x), float(y)) for x, y in ION_TRANSMISSION_STEPPED_TRENCH_POINTS]
+        if number in (5, 6):
+            return [(float(x), float(y)) for x, y in BOWED_JAR_TRENCH_POINTS]
+        return [(float(x), float(y)) for x, y in TrenchDepoConfig().points]
+
+    def _set_structure_points(
+        self,
+        points: Sequence[Tuple[float, float]],
+        *,
+        clear_smoothing: bool = True,
+        fit: bool = True,
+    ) -> None:
+        pts = [(float(x), float(y)) for x, y in points]
+        self._structure_points = pts
+        self._syncing_structure_view = True
+        try:
+            self.structure_view.set_points_xy(list(pts))
+        finally:
+            self._syncing_structure_view = False
+        if clear_smoothing:
+            self._smoothed_points = []
+            self._use_smoothed_geometry = False
+            self.smoothing.revert()
+            self.smoothing_view.set_reference_profiles_xy([])
+            self.smoothing_view.set_points_xy(list(pts))
+        self._update_geometry_labels()
+        if fit:
+            QTimer.singleShot(0, self._fit_structure_views)
+
+    def _reset_geometry_to_default(self, _checked: bool = False) -> None:
+        self._set_structure_points(self._default_points_for_active_emulator())
+        self.statusBar().showMessage("Geometry reset to emulator default", 1800)
+
+    def _fit_structure_views(self, _checked: bool = False) -> None:
+        self.structure_view.fit_points()
+        self.smoothing_view.fit_points()
+
+    def _mark_structure_edited(self) -> None:
+        if self._smoothed_points or self._use_smoothed_geometry:
+            self._smoothed_points = []
+            self._use_smoothed_geometry = False
+            self.smoothing.revert()
+            self.smoothing_view.set_reference_profiles_xy([])
+            self.smoothing_view.set_points_xy(list(self._structure_points))
+        self._update_geometry_labels()
+
+    def _on_structure_point_moved(self, idx: int, x: float, y: float) -> None:
+        if self._syncing_structure_view:
+            return
+        if 0 <= int(idx) < len(self._structure_points):
+            self._structure_points[int(idx)] = (float(x), float(y))
+            self._mark_structure_edited()
+
+    def _on_structure_point_inserted(self, idx: int, x: float, y: float) -> None:
+        if self._syncing_structure_view:
+            return
+        insert_idx = max(0, min(int(idx), len(self._structure_points)))
+        self._structure_points.insert(insert_idx, (float(x), float(y)))
+        self._mark_structure_edited()
+
+    def _on_structure_point_deleted(self, idx: int) -> None:
+        if self._syncing_structure_view:
+            return
+        delete_idx = int(idx)
+        if 0 <= delete_idx < len(self._structure_points):
+            self._structure_points.pop(delete_idx)
+            self._mark_structure_edited()
+
+    def _on_smoothed_point_moved(self, idx: int, x: float, y: float) -> None:
+        if 0 <= int(idx) < len(self._smoothed_points):
+            self._smoothed_points[int(idx)] = (float(x), float(y))
+            self._use_smoothed_geometry = True
+            self._update_geometry_labels()
+
+    def _on_smoothed_point_inserted(self, idx: int, x: float, y: float) -> None:
+        if not self._smoothed_points:
+            return
+        insert_idx = max(0, min(int(idx), len(self._smoothed_points)))
+        self._smoothed_points.insert(insert_idx, (float(x), float(y)))
+        self._use_smoothed_geometry = True
+        self._update_geometry_labels()
+
+    def _on_smoothed_point_deleted(self, idx: int) -> None:
+        delete_idx = int(idx)
+        if 0 <= delete_idx < len(self._smoothed_points):
+            self._smoothed_points.pop(delete_idx)
+            self._use_smoothed_geometry = len(self._smoothed_points) >= 2
+            self._update_geometry_labels()
+
+    def apply_structure_smoothing(self, _checked: bool = False) -> None:
+        if len(self._structure_points) < 2:
+            QMessageBox.warning(self, "Structure Smoothing", "At least two geometry points are required.")
+            return
+        self.smoothing.set_base_points(list(self._structure_points))
+        self.smoothing.set_params(
+            int(self.spin_smooth_segments.value()),
+            int(self.spin_smooth_iterations.value()),
+        )
+        self._smoothed_points = [(float(x), float(y)) for x, y in self.smoothing.run()]
+        self._use_smoothed_geometry = True
+        self.smoothing_view.set_reference_profiles_xy([list(self._structure_points)])
+        self.smoothing_view.set_points_xy(list(self._smoothed_points))
+        self._update_geometry_labels()
+        QTimer.singleShot(0, self.smoothing_view.fit_points)
+        self.statusBar().showMessage(f"Smoothing applied: {len(self._smoothed_points)} points", 2500)
+
+    def use_smoothed_geometry(self, _checked: bool = False) -> None:
+        if not self._smoothed_points:
+            self.apply_structure_smoothing()
+            return
+        self._use_smoothed_geometry = True
+        self._update_geometry_labels()
+        self.statusBar().showMessage("Run input switched to smoothed geometry", 1800)
+
+    def use_raw_geometry(self, _checked: bool = False) -> None:
+        self._use_smoothed_geometry = False
+        self._update_geometry_labels()
+        self.statusBar().showMessage("Run input switched to raw geometry", 1800)
+
+    def _current_geometry_points(self) -> Tuple[Tuple[float, float], ...]:
+        if self._use_smoothed_geometry and len(self._smoothed_points) >= 2:
+            return tuple(self._smoothed_points)
+        if len(self._structure_points) >= 2:
+            return tuple(self._structure_points)
+        return tuple(self._default_points_for_active_emulator())
+
+    def _update_geometry_labels(self) -> None:
+        raw_count = len(self._structure_points)
+        smooth_count = len(self._smoothed_points)
+        input_count = smooth_count if self._use_smoothed_geometry and smooth_count >= 2 else raw_count
+        self.lbl_geometry_points.setText(f"Geometry: {raw_count} pts")
+        if self._use_smoothed_geometry and smooth_count >= 2:
+            source_text = f"Input: smooth ({input_count} pts)"
+        else:
+            source_text = f"Input: raw ({input_count} pts)"
+        self.lbl_geometry_source.setText(source_text)
+        self.lbl_smoothing_status.setText(
+            f"Smooth: {smooth_count} pts" if smooth_count else "Smooth: not applied"
+        )
+        self.btn_use_smoothed_geometry.setEnabled(smooth_count >= 2)
 
     def active_emulator_number(self) -> int:
         checked_id = self.emulator_button_group.checkedId()
@@ -2007,6 +2245,8 @@ class TrenchDepoWindow(QMainWindow):
         supports_sputter = self._active_emulator_supports_sputter()
 
         self.setWindowTitle(f"Trench Depo Emulation - Emulator {number:02d}")
+        if changed:
+            self._set_structure_points(self._default_points_for_active_emulator())
         if supports_sputter:
             if number == 2:
                 self.lbl_etch_section.setText("Etch switch (1번 direct + 2번 modifier)")
@@ -2408,6 +2648,7 @@ class TrenchDepoWindow(QMainWindow):
             self.edit_request_note.setPlainText("라운드 conformal offset 기반 트렌치 증착")
         else:
             self.edit_request_note.setPlainText("미배정 슬롯: 기본 conformal deposition만 실행")
+        self._set_structure_points(self._default_points_for_active_emulator())
         self.run_emulation(save_artifacts=False)
 
     def apply_split_parameter_defaults(self, _index: int = 0) -> None:
@@ -2504,13 +2745,7 @@ class TrenchDepoWindow(QMainWindow):
         etch_enabled = bool(supports_sputter and self.chk_sputter.isChecked())
         depth_feature_length = float(self.spin_depth_feature_length.value())
         return TrenchDepoConfig(
-            points=(
-                ION_TRANSMISSION_STEPPED_TRENCH_POINTS
-                if active_emulator == 2
-                else BOWED_JAR_TRENCH_POINTS
-                if active_emulator in (5, 6)
-                else TrenchDepoConfig().points
-            ),
+            points=self._current_geometry_points(),
             cycles=int(self.spin_cycles.value()),
             angstrom_per_cycle=float(self.spin_angstrom_per_cycle.value()),
             sputter_enabled=etch_enabled,
@@ -2776,6 +3011,7 @@ class TrenchDepoWindow(QMainWindow):
         self.slider_frame.setEnabled(max_idx > 0)
         self.slider_frame.blockSignals(False)
         self.show_frame(max_idx)
+        self.view_tabs.setCurrentIndex(0)
         QTimer.singleShot(0, self.view.fit_content)
         if run_dir is not None:
             self._set_run_dir_label(self._last_run_dir)
@@ -3033,6 +3269,7 @@ class TrenchDepoWindow(QMainWindow):
             )
         )
         self.set_active_emulator_number(replay_emulator, run=False)
+        self._set_structure_points(config.points)
         self.spin_cycles.setValue(int(config.cycles))
         self.spin_angstrom_per_cycle.setValue(float(config.angstrom_per_cycle))
         self.chk_sputter.setChecked(bool(config.sputter_enabled))
@@ -3098,6 +3335,7 @@ class TrenchDepoWindow(QMainWindow):
         self.slider_frame.setEnabled(max_idx > 0)
         self.slider_frame.blockSignals(False)
         self.show_frame(max_idx)
+        self.view_tabs.setCurrentIndex(0)
         QTimer.singleShot(0, self.view.fit_content)
         self._set_run_dir_label(self._last_run_dir)
         self.btn_open_run_dir.setEnabled(True)
