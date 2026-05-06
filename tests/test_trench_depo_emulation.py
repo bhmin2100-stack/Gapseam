@@ -402,6 +402,82 @@ class TrenchDepoEmulationTest(unittest.TestCase):
             1e-9,
         )
 
+    def test_model4_redeposition_lateral_spread_smooths_sidewall_dh(self) -> None:
+        points = equal_arc_resample(DEFAULT_TRENCH_POINTS, 40.0)
+        normals = vertex_air_normals(points)
+        etch = [
+            5.0 if abs(nx) > 0.2 and y < -500.0 else 0.0
+            for (x, y), (nx, _ny) in zip(points, normals)
+        ]
+
+        def sidewall_dh_roughness(values) -> float:
+            deltas = []
+            for idx in range(len(values) - 1):
+                x0, _y0 = points[idx]
+                x1, _y1 = points[idx + 1]
+                nx0, _ny0 = normals[idx]
+                nx1, _ny1 = normals[idx + 1]
+                if abs(nx0) >= 0.18 and abs(nx1) >= 0.18 and x0 * x1 > 0.0:
+                    deltas.append(abs(values[idx + 1] - values[idx]))
+            return sum(deltas) / max(1, len(deltas))
+
+        unsmoothed = compute_redeposition(
+            points,
+            normals,
+            etch,
+            Model4RedepositionParams(redepo_efficiency=0.5, lateral_spread_a=0.0),
+        )
+        smoothed = compute_redeposition(
+            points,
+            normals,
+            etch,
+            Model4RedepositionParams(redepo_efficiency=0.5, lateral_spread_a=55.0),
+        )
+
+        self.assertEqual(unsmoothed.debug_summary["redepo_spread_radius_points"], 0)
+        self.assertGreater(smoothed.debug_summary["redepo_spread_radius_points"], 0)
+        self.assertLess(
+            sidewall_dh_roughness(smoothed.dh_redepo),
+            sidewall_dh_roughness(unsmoothed.dh_redepo),
+        )
+        self.assertAlmostEqual(
+            smoothed.debug_summary["total_redepo_mass"],
+            unsmoothed.debug_summary["total_redepo_mass"],
+            places=9,
+        )
+
+    @unittest.skipIf(pyclipper is None, "pyclipper is not installed")
+    def test_model4_redeposition_regularizes_profile_delta(self) -> None:
+        result = run_trench_depo(
+            TrenchDepoConfig(
+                cycles=2,
+                angstrom_per_cycle=10.0,
+                sputter_enabled=True,
+                sputter_strength_a_per_cycle=12.0,
+                sputter_smoothing_a=40.0,
+                redepo_enabled=True,
+                redepo_efficiency_pct=25.0,
+            )
+        )
+        fields = result.meta["redepo_debug_fields_last"]
+        raw_delta = [
+            float(redepo) - float(etch)
+            for redepo, etch in zip(fields["redepo_field"], fields["sputter_effective_field"])
+        ]
+        regularized_delta = [float(v) for v in fields["profile_delta_field"]]
+
+        def adjacent_roughness(values) -> float:
+            return sum(
+                abs(float(values[idx + 1]) - float(values[idx]))
+                for idx in range(len(values) - 1)
+            ) / max(1, len(values) - 1)
+
+        self.assertGreater(
+            result.meta["redepo_debug_summary_last"]["redepo"]["profile_smooth_radius_points"],
+            0,
+        )
+        self.assertLess(adjacent_roughness(regularized_delta), adjacent_roughness(raw_delta))
+
     @unittest.skipIf(pyclipper is None, "pyclipper is not installed")
     def test_reflected_ion_off_and_zero_strength_match_emulator_one(self) -> None:
         base = TrenchDepoConfig(

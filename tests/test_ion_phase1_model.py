@@ -311,6 +311,21 @@ class IonPhase1ModelTest(unittest.TestCase):
                     msg=f"pair mismatch for ({i}, {j})",
                 )
 
+    def test_path_los_soft_visibility_fractionalizes_blocker_edge(self) -> None:
+        pts = [
+            (0.0, 0.0),
+            (0.0, -10.0),
+            (5.0, -1.0),
+            (5.0, 1.0),
+            (10.0, 0.0),
+        ]
+        los = PathLOS(pts)
+
+        self.assertFalse(los.visible_indices(0, 4))
+        soft_visibility = los.soft_visibility_indices(0, 4, 2.0)
+        self.assertGreater(soft_visibility, 0.0)
+        self.assertLess(soft_visibility, 1.0)
+
     def test_path_los_visible_set_matches_legacy_for_representative_geometry(self) -> None:
         base = [
             (-250.0, 0.0),

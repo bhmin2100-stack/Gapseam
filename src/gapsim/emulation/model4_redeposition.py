@@ -23,6 +23,7 @@ class Model4RedepositionParams:
     max_transport_sources: int = 64
     max_los_candidates_per_source: int = 256
     los_candidate_weight_fraction: float = 0.990
+    soft_los_radius_points: int = 0
     eps: float = 1e-9
 
 
@@ -208,45 +209,65 @@ def _symmetrize_mass_field(
     return out
 
 
-def _smooth_sidewall_mass(
+def _smooth_exposed_surface_mass(
     points: Sequence[Point],
     normals: Sequence[Point],
     masses: Sequence[float],
     *,
     radius_points: int,
-    center_x: float,
 ) -> List[float]:
     vals = [max(0.0, float(v)) for v in masses]
     if radius_points <= 0 or len(vals) <= 2:
         return vals
     pts = [(float(x), float(y)) for x, y in points]
     normal_values = [(float(nx), float(ny)) for nx, ny in normals]
-    side = [
-        -1 if x < center_x else (1 if x > center_x else 0)
-        for x, _y in pts
+    areas = compute_arc_weights(pts)
+    top_y = max(y for _x, y in pts)
+    typical_ds = _median_positive(
+        areas,
+        fallback=max(1.0, _geometry_diagonal(pts) / max(1, len(pts) - 1)),
+    )
+    top_tol = max(1e-6, typical_ds * 0.5)
+    exposed_trench = [
+        (y < top_y - top_tol) or abs(nx) >= 0.18
+        for (_x, y), (nx, _ny) in zip(pts, normal_values)
     ]
-    sidewall = [abs(nx) >= 0.18 for nx, _ny in normal_values]
     radius = min(int(radius_points), max(1, len(vals) // 4))
-    out = [0.0 for _ in vals]
-    for idx, value in enumerate(vals):
-        if value <= _EPS:
+    out = list(vals)
+    idx = 0
+    while idx < len(vals):
+        if not exposed_trench[idx]:
+            idx += 1
             continue
-        left = max(0, idx - radius)
-        right = min(len(vals) - 1, idx + radius)
-        targets: List[Tuple[int, float]] = []
-        for j in range(left, right + 1):
-            if not sidewall[j] or side[j] == 0 or side[j] != side[idx]:
-                continue
-            weight = float(radius + 1 - abs(j - idx))
-            if weight > 0.0:
-                targets.append((j, weight))
-        weight_sum = sum(weight for _j, weight in targets)
-        if weight_sum <= _EPS:
-            out[idx] += value
+        start = idx
+        while idx < len(vals) and exposed_trench[idx]:
+            idx += 1
+        stop = idx
+        if stop - start <= 2:
             continue
-        scale = value / weight_sum
-        for j, weight in targets:
-            out[j] += scale * weight
+        dh_values = [
+            vals[j] / max(float(areas[j]), _EPS)
+            for j in range(start, stop)
+        ]
+        smoothed_dh: List[float] = []
+        for local_idx in range(stop - start):
+            left = max(0, local_idx - radius)
+            right = min((stop - start) - 1, local_idx + radius)
+            weight_sum = 0.0
+            value_sum = 0.0
+            for local_j in range(left, right + 1):
+                weight = float(radius + 1 - abs(local_j - local_idx))
+                weight_sum += weight
+                value_sum += dh_values[local_j] * weight
+            smoothed_dh.append(value_sum / max(weight_sum, _EPS))
+        original_mass = sum(vals[j] for j in range(start, stop))
+        smoothed_mass = sum(
+            smoothed_dh[local_idx] * areas[start + local_idx]
+            for local_idx in range(stop - start)
+        )
+        scale = original_mass / max(smoothed_mass, _EPS) if original_mass > _EPS else 0.0
+        for local_idx, dh in enumerate(smoothed_dh):
+            out[start + local_idx] = max(0.0, dh * areas[start + local_idx] * scale)
     return out
 
 
@@ -256,6 +277,35 @@ def _line_of_sight_engine(points: Sequence[Point], normals: Sequence[Point]) -> 
 
 def line_of_sight(points: Sequence[Point], normals: Sequence[Point], i: int, j: int) -> bool:
     return _line_of_sight_engine(points, normals).visible_indices(int(i), int(j))
+
+
+def _soft_los_weight(
+    los: PathLOS,
+    source_index: int,
+    target_index: int,
+    *,
+    point_count: int,
+    width_a: float,
+) -> Tuple[float, int]:
+    hard_visible = los.visible_indices(source_index, target_index)
+    width = max(0.0, float(width_a))
+    if width <= _EPS:
+        return (1.0 if hard_visible else 0.0), 1
+
+    hard_samples = 1
+    near_boundary = False
+    for offset in (-1, 1):
+        sample_index = target_index + offset
+        if sample_index < 0 or sample_index >= point_count or sample_index == source_index:
+            continue
+        sample_visible = los.visible_indices(source_index, sample_index)
+        hard_samples += 1
+        if sample_visible != hard_visible:
+            near_boundary = True
+
+    if not near_boundary:
+        return (1.0 if hard_visible else 0.0), hard_samples
+    return los.soft_visibility_indices(source_index, target_index, width), hard_samples + 3
 
 
 def compute_redeposition(
@@ -324,7 +374,10 @@ def compute_redeposition(
     depth_span = max(surface_y - bottom_y, _EPS)
     max_transport_sources = max(16, min(256, int(cfg.max_transport_sources)))
     if len(raw_source_indices) <= max_transport_sources:
-        transport_sources = [(idx, removed_mass[idx]) for idx in raw_source_indices]
+        transport_sources = [
+            (idx, removed_mass[idx], pts[idx], _reflection_axis(normal_values[idx]))
+            for idx in raw_source_indices
+        ]
     else:
         bins_per_group = max(1, int(math.floor(max_transport_sources / 3)))
         buckets: Dict[Tuple[int, int], List[int]] = {}
@@ -338,7 +391,7 @@ def compute_redeposition(
             bin_idx = min(bins_per_group - 1, int(math.floor(depth * bins_per_group)))
             buckets.setdefault((side, bin_idx), []).append(idx)
 
-        transport_sources: List[Tuple[int, float]] = []
+        transport_sources: List[Tuple[int, float, Point, Point]] = []
         for key in sorted(buckets):
             indices = buckets[key]
             total_mass = sum(removed_mass[idx] for idx in indices)
@@ -353,10 +406,19 @@ def compute_redeposition(
                     + ((pts[idx][1] - y_centroid) / max(diag, 1.0)) ** 2
                 ),
             )
-            transport_sources.append((representative, total_mass))
-    transported_removed_mass = float(sum(mass for _idx, mass in transport_sources))
+            nx_centroid = sum(normal_values[idx][0] * removed_mass[idx] for idx in indices) / total_mass
+            ny_centroid = sum(normal_values[idx][1] * removed_mass[idx] for idx in indices) / total_mass
+            source_axis = _reflection_axis(
+                _normalize_vec(nx_centroid, ny_centroid, normal_values[representative])
+            )
+            transport_sources.append(
+                (representative, total_mass, (x_centroid, y_centroid), source_axis)
+            )
+    transported_removed_mass = float(
+        sum(mass for _idx, mass, _source, _axis in transport_sources)
+    )
     transported_source_mass_field = [0.0 for _ in pts]
-    for idx, mass in transport_sources:
+    for idx, mass, _source, _axis in transport_sources:
         transported_source_mass_field[idx] += float(mass)
     active_source_count = 0
     total_valid_target_count = 0
@@ -369,10 +431,16 @@ def compute_redeposition(
     cone_cut_deg = max(18.0, min(89.0, 4.0 * sigma))
     max_los_candidates = max(0, int(cfg.max_los_candidates_per_source))
     los_weight_fraction = _clamp01(float(cfg.los_candidate_weight_fraction))
+    soft_los_radius = max(0, min(2, int(cfg.soft_los_radius_points)))
+    typical_los_ds = _median_positive(area, fallback=max(1.0, diag / max(1, n - 1)))
+    soft_los_width_a = (
+        float(soft_los_radius)
+        * min(8.0, max(0.5, typical_los_ds * 0.25))
+    )
+    total_soft_los_sample_count = 0
+    total_soft_los_partial_count = 0
 
-    for i, mass_i in transport_sources:
-        source = pts[i]
-        axis = _reflection_axis(normal_values[i])
+    for i, mass_i, source, axis in transport_sources:
         rough_targets: List[Tuple[int, float]] = []
         for j, target in enumerate(pts):
             if j == i or abs(j - i) <= neighbor_exclusion:
@@ -421,8 +489,18 @@ def compute_redeposition(
 
         valid_targets: List[Tuple[int, float]] = []
         for j, weight in los_candidates:
-            if los.visible_indices(i, j):
-                valid_targets.append((j, weight))
+            visibility, soft_sample_count = _soft_los_weight(
+                los,
+                i,
+                j,
+                point_count=n,
+                width_a=soft_los_width_a,
+            )
+            total_soft_los_sample_count += soft_sample_count
+            if _EPS < visibility < (1.0 - _EPS):
+                total_soft_los_partial_count += 1
+            if visibility > _EPS:
+                valid_targets.append((j, weight * visibility))
         weight_sum = sum(weight for _j, weight in valid_targets)
         if weight_sum <= _EPS:
             continue
@@ -434,6 +512,17 @@ def compute_redeposition(
         scale = source_mass / weight_sum
         for j, weight in valid_targets:
             mass_to_target[j] += scale * weight
+
+    spread_a = max(0.0, float(cfg.lateral_spread_a))
+    typical_ds = _median_positive(area, fallback=max(1.0, diag / max(1, n - 1)))
+    spread_radius = int(round(spread_a / max(typical_ds, eps)))
+    if spread_radius > 0:
+        mass_to_target = _smooth_exposed_surface_mass(
+            pts,
+            normal_values,
+            mass_to_target,
+            radius_points=spread_radius,
+        )
 
     symmetry_pairs = _symmetric_vertex_pairs(pts, center_x)
     symmetry_preserved = _source_field_is_symmetric(symmetry_pairs, removed_mass)
@@ -457,12 +546,17 @@ def compute_redeposition(
         "transport_source_count": int(len(transport_sources)),
         "transport_source_stride": 0,
         "transport_model": "gapsim_binned_lobe_los",
+        "transport_source_position_model": "mass_centroid_lobe",
         "max_transport_sources": int(max_transport_sources),
         "redepo_lobe_sigma_deg": float(sigma),
         "redepo_cone_cut_deg": float(cone_cut_deg),
         "redepo_max_distance_a": float(max_dist),
         "max_los_candidates_per_source": int(max_los_candidates),
         "los_candidate_weight_fraction": float(los_weight_fraction),
+        "soft_los_radius_points": int(soft_los_radius),
+        "soft_los_width_a": float(soft_los_width_a),
+        "soft_los_candidate_samples": int(total_soft_los_sample_count),
+        "soft_los_partial_candidate_count": int(total_soft_los_partial_count),
         "mean_rough_targets_per_source": (
             float(total_rough_target_count / len(transport_sources))
             if transport_sources
@@ -474,7 +568,8 @@ def compute_redeposition(
             else 0.0
         ),
         "distance_power_ignored": float(cfg.distance_power),
-        "lateral_spread_ignored_a": float(cfg.lateral_spread_a),
+        "redepo_lateral_spread_a": float(spread_a),
+        "redepo_spread_radius_points": int(max(0, spread_radius)),
         "redepo_cap_ignored_ratio": float(cfg.max_redepo_to_etch_ratio),
         "symmetry_preserved": bool(symmetry_preserved),
         "symmetry_pair_count": int(len(symmetry_pairs)),
@@ -492,8 +587,6 @@ def compute_redeposition(
         "max_dh_etch": max_dh_etch,
         "max_dh_redepo": max(dh_redepo, default=0.0),
         "mean_dh_redepo": float(sum(dh_redepo) / n) if n > 0 else 0.0,
-        "redepo_lateral_spread_a": 0.0,
-        "redepo_spread_radius_points": 0,
         "redepo_cap_a": 0.0,
         **_mass_summary_by_source_zone(pts, transported_source_mass_field),
     }

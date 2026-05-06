@@ -109,6 +109,7 @@ class TrenchDepoConfig:
     redepo_distance_power: float = 1.0
     redepo_neighbor_exclusion: int = 2
     redepo_max_distance_a: float = 1800.0
+    redepo_soft_los_radius_points: int = 0
     deposition_depth_enabled: bool = False
     deposition_feature_type: str = "hole"
     deposition_feature_width_a: float = 240.0
@@ -187,6 +188,7 @@ SWEEP_PARAMETER_LABELS: Dict[str, str] = {
     "redepo_distance_power": "Distance power",
     "redepo_neighbor_exclusion": "Neighbor skip",
     "redepo_max_distance_a": "Redepo range",
+    "redepo_soft_los_radius_points": "Soft LOS",
     "deposition_depth_decay_k": "Depth decay",
     "deposition_depth_decay_power": "Depth power",
     "deposition_min_ratio": "Min depo ratio",
@@ -235,6 +237,7 @@ _REDEPO_SWEEP_PARAMETERS = frozenset(
         "redepo_distance_power",
         "redepo_neighbor_exclusion",
         "redepo_max_distance_a",
+        "redepo_soft_los_radius_points",
     }
 )
 
@@ -1569,6 +1572,7 @@ def _apply_model4_redeposition_step(
     redepo_distance_power: float,
     redepo_neighbor_exclusion: int,
     redepo_max_distance_a: float,
+    redepo_soft_los_radius_points: int,
     ion_transmission_start_depth_pct: float = 0.0,
     ion_transmission_end_depth_pct: float = 100.0,
     ion_transmission_decay_strength_pct: float = 100.0,
@@ -1632,20 +1636,37 @@ def _apply_model4_redeposition_step(
             distance_power=max(0.0, float(redepo_distance_power)),
             neighbor_exclusion=max(0, int(redepo_neighbor_exclusion)),
             max_redepo_distance=max(0.0, float(redepo_max_distance_a)),
+            soft_los_radius_points=max(0, int(redepo_soft_los_radius_points)),
         ),
     )
     dh_redepo = redepo.dh_redepo if len(redepo.dh_redepo) == len(grown_surface) else [0.0 for _ in grown_surface]
+    raw_profile_delta = [
+        max(0.0, float(dh_redepo[idx])) - max(0.0, float(dh_etch[idx]))
+        for idx in range(len(grown_surface))
+    ]
+    profile_smooth_radius = max(0, min(24, smooth_radius))
+    if profile_smooth_radius > 0 and len(raw_profile_delta) == len(grown_surface):
+        top_y = max((float(y) for _x, y in grown_surface), default=0.0)
+        active = [
+            (float(y) < top_y - max(1e-6, float(reparam_ds_a) * 0.5))
+            or abs(float(normals[idx][0])) >= 0.18
+            for idx, (_x, y) in enumerate(grown_surface)
+        ]
+        profile_delta = _smooth_active_scalar_values(raw_profile_delta, profile_smooth_radius, active)
+    else:
+        profile_delta = list(raw_profile_delta)
     proposed: List[Point] = []
     has_negative_net = False
     for idx, (x, y) in enumerate(grown_surface):
         nx, ny = normals[idx] if idx < len(normals) else (0.0, 1.0)
         etch_a = max(0.0, float(dh_etch[idx]))
         redepo_a = max(0.0, float(dh_redepo[idx]))
-        net_from_previous = float(deposition_a) - etch_a + redepo_a
+        move_delta = float(profile_delta[idx]) if idx < len(profile_delta) else (redepo_a - etch_a)
+        net_from_previous = float(deposition_a) + move_delta
         if net_from_previous < 0.0:
             has_negative_net = True
-        x2 = float(x + (redepo_a - etch_a) * nx)
-        y2 = float(y + (redepo_a - etch_a) * ny)
+        x2 = float(x + move_delta * nx)
+        y2 = float(y + move_delta * ny)
         if idx == 0 or idx == (len(grown_surface) - 1):
             x2 = float(x)
         proposed.append((x2, y2))
@@ -1668,17 +1689,19 @@ def _apply_model4_redeposition_step(
     fields["redepo_field"] = [round(float(v), 6) for v in dh_redepo]
     fields["redepo_mass_field"] = list(redepo.debug_fields.get("redepo_mass_field", []))
     fields["removed_mass_field"] = list(redepo.debug_fields.get("removed_mass_field", []))
+    fields["profile_delta_field"] = [round(float(v), 6) for v in profile_delta]
     fields["total_etch_field"] = [round(float(v), 6) for v in total_etch]
     fields["net_growth_field"] = [
-        round(float(deposition_a) - float(etch) + float(redepo_a), 6)
-        for etch, redepo_a in zip(dh_etch, dh_redepo)
+        round(float(deposition_a) + float(delta), 6)
+        for delta in profile_delta
     ]
     summary = dict(source_state.meta.get("direct_sputter_debug_summary_last", {}))
     summary["redepo"] = dict(redepo.debug_summary)
+    summary["redepo"]["profile_smooth_radius_points"] = int(profile_smooth_radius)
     summary["total_etch"] = _field_summary_by_depth(grown_surface, total_etch)
     summary["net_growth"] = _field_summary_by_depth(
         grown_surface,
-        [float(deposition_a) - float(etch) + float(redepo_a) for etch, redepo_a in zip(dh_etch, dh_redepo)],
+        [float(deposition_a) + float(delta) for delta in profile_delta],
     )
     state.meta["direct_sputter_debug_fields_last"] = fields
     state.meta["direct_sputter_debug_summary_last"] = summary
@@ -1802,6 +1825,8 @@ def _validate_sweep_value(parameter: str, value: float) -> float:
         return float(_coerce_cycles(value))
     if parameter == "redepo_max_distance_a":
         return _coerce_non_negative_float(value, name="redepo_max_distance_a")
+    if parameter == "redepo_soft_los_radius_points":
+        return float(max(0, min(2, _coerce_cycles(value))))
     if parameter == "deposition_depth_decay_k":
         return _coerce_non_negative_float(value, name="deposition_depth_decay_k")
     if parameter == "deposition_depth_decay_power":
@@ -2040,6 +2065,7 @@ def run_trench_depo(
     redepo_distance_power = _coerce_non_negative_float(cfg.redepo_distance_power, name="redepo_distance_power")
     redepo_neighbor_exclusion = _coerce_cycles(cfg.redepo_neighbor_exclusion)
     redepo_max_distance_a = _coerce_non_negative_float(cfg.redepo_max_distance_a, name="redepo_max_distance_a")
+    redepo_soft_los_radius_points = max(0, min(2, _coerce_cycles(cfg.redepo_soft_los_radius_points)))
     deposition_feature_type = _feature_type_key(cfg.deposition_feature_type)
     deposition_feature_width_a = _coerce_positive_float(
         cfg.deposition_feature_width_a,
@@ -2184,6 +2210,7 @@ def run_trench_depo(
                         redepo_distance_power=redepo_distance_power,
                         redepo_neighbor_exclusion=redepo_neighbor_exclusion,
                         redepo_max_distance_a=redepo_max_distance_a,
+                        redepo_soft_los_radius_points=redepo_soft_los_radius_points,
                         ion_transmission_start_depth_pct=ion_transmission_start_depth_pct,
                         ion_transmission_end_depth_pct=ion_transmission_end_depth_pct,
                         ion_transmission_decay_strength_pct=ion_transmission_decay_strength_pct,
@@ -2366,6 +2393,7 @@ def run_trench_depo(
             "redepo_distance_power": float(redepo_distance_power),
             "redepo_neighbor_exclusion": int(redepo_neighbor_exclusion),
             "redepo_max_distance_a": float(redepo_max_distance_a),
+            "redepo_soft_los_radius_points": int(redepo_soft_los_radius_points),
             "redepo_debug_fields_last": dict(state.meta.get("model4_redepo_debug_fields_last", {})),
             "redepo_debug_summary_last": redepo_summary,
             "redepo_total_removed_mass_last": float(redepo_total_removed_mass),

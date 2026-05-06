@@ -390,6 +390,8 @@ class PathLOS:
             )
         self._grid_index = self._build_grid_index()
         self._pair_cache: Dict[Tuple[int, int], bool] = {}
+        self._offset_pair_cache: Dict[Tuple[int, int, int], bool] = {}
+        self._soft_pair_cache: Dict[Tuple[int, int, int], float] = {}
 
     def _build_grid_index(self) -> Optional[_GridIndex]:
         return _build_segment_grid_index(self.segments, eps_air=self.eps_air)
@@ -473,6 +475,22 @@ class PathLOS:
                 return (p[0] + (self.eps_air * nx / nl), p[1] + (self.eps_air * ny / nl))
         return p
 
+    def _visible_points(self, p: Point, q: Point, ignore: set[int]) -> bool:
+        min_x = min(p[0], q[0]) - self.eps_air
+        max_x = max(p[0], q[0]) + self.eps_air
+        min_y = min(p[1], q[1]) - self.eps_air
+        max_y = max(p[1], q[1]) + self.eps_air
+
+        for seg_index in self._candidate_segment_indices(p, q):
+            seg = self.segments[seg_index]
+            if seg.index in ignore:
+                continue
+            if seg.max_x < min_x or seg.min_x > max_x or seg.max_y < min_y or seg.min_y > max_y:
+                continue
+            if _segment_intersects(p, q, seg.a, seg.b, eps=self.eps_air):
+                return False
+        return True
+
     def visible_indices(self, i: int, j: int) -> bool:
         if i == j:
             return False
@@ -502,6 +520,55 @@ class PathLOS:
                 return False
         self._pair_cache[key] = True
         return True
+
+    def visible_indices_offset(self, i: int, j: int, offset_a: float) -> bool:
+        if i == j:
+            return False
+        if i < 0 or j < 0 or i >= len(self.points) or j >= len(self.points):
+            return False
+        offset = float(offset_a)
+        if abs(offset) <= self.eps_air:
+            return self.visible_indices(i, j)
+        offset_key = int(round(offset / max(self.eps_air, 1e-9)))
+        key = (int(i), int(j), offset_key)
+        cached = self._offset_pair_cache.get(key)
+        if cached is not None:
+            return cached
+
+        p = self._offset_point(i)
+        q = self._offset_point(j)
+        dx = float(q[0] - p[0])
+        dy = float(q[1] - p[1])
+        length = math.hypot(dx, dy)
+        if length <= _EPS:
+            return False
+        px = -dy / length
+        py = dx / length
+        p_shift = (p[0] + offset * px, p[1] + offset * py)
+        q_shift = (q[0] + offset * px, q[1] + offset * py)
+        visible = self._visible_points(p_shift, q_shift, {i - 1, i, j - 1, j})
+        self._offset_pair_cache[key] = visible
+        return visible
+
+    def soft_visibility_indices(self, i: int, j: int, width_a: float) -> float:
+        width = max(0.0, float(width_a))
+        if width <= self.eps_air:
+            return 1.0 if self.visible_indices(i, j) else 0.0
+        width_key = int(round(width / max(self.eps_air, 1e-9)))
+        key = (int(i), int(j), width_key)
+        cached = self._soft_pair_cache.get(key)
+        if cached is not None:
+            return cached
+
+        total = 0.0
+        weight_sum = 0.0
+        for offset, weight in ((-width, 1.0), (0.0, 2.0), (width, 1.0)):
+            weight_sum += weight
+            if self.visible_indices_offset(i, j, offset):
+                total += weight
+        visibility = _clamp01(total / max(weight_sum, _EPS))
+        self._soft_pair_cache[key] = visibility
+        return visibility
 
     def los_indices(self, i: int, j: int) -> int:
         return 1 if self.visible_indices(i, j) else 0

@@ -1255,6 +1255,11 @@ class TrenchDepoWindow(QMainWindow):
         self.spin_redepo_distance_power.setDecimals(2)
         self.spin_redepo_distance_power.setSingleStep(0.1)
         self.spin_redepo_distance_power.setValue(1.0)
+        self.spin_redepo_soft_los = QSpinBox()
+        self.spin_redepo_soft_los.setRange(0, 2)
+        self.spin_redepo_soft_los.setSingleStep(1)
+        self.spin_redepo_soft_los.setValue(0)
+        self.spin_redepo_soft_los.setToolTip("0=fast hard LOS, 1=soft shadow edge, 2=stronger/slow quality.")
         self.chk_depth_deposition = QCheckBox("Depth-dependent deposition")
         self.chk_depth_deposition.setToolTip("5번은 etch/redeposition 없이 기본 deposition에만 깊이 감쇠를 적용합니다.")
         self.chk_depth_deposition.setChecked(False)
@@ -1538,6 +1543,7 @@ class TrenchDepoWindow(QMainWindow):
         self.lbl_redepo_efficiency = QLabel("Redepo %")
         self.lbl_redepo_emit_power = QLabel("Emit power")
         self.lbl_redepo_distance_power = QLabel("Dist power")
+        self.lbl_redepo_soft_los = QLabel("Soft LOS")
         params_grid.addWidget(self.lbl_redepo_source, 30, 0)
         params_grid.addWidget(self.cmb_redepo_source_model, 30, 1)
         params_grid.addWidget(self.lbl_redepo_efficiency, 31, 0)
@@ -1546,14 +1552,16 @@ class TrenchDepoWindow(QMainWindow):
         params_grid.addWidget(self.spin_redepo_emit_power, 32, 1)
         params_grid.addWidget(self.lbl_redepo_distance_power, 33, 0)
         params_grid.addWidget(self.spin_redepo_distance_power, 33, 1)
+        params_grid.addWidget(self.lbl_redepo_soft_los, 34, 0)
+        params_grid.addWidget(self.spin_redepo_soft_los, 34, 1)
         self.lbl_depth_depo_section = self._make_parameter_section(
             "5번 Depth depo only",
             color="#166534",
             background="#f0fdf4",
             border="#bbf7d0",
         )
-        params_grid.addWidget(self.lbl_depth_depo_section, 34, 0, 1, 2)
-        params_grid.addWidget(self.chk_depth_deposition, 35, 0, 1, 2)
+        params_grid.addWidget(self.lbl_depth_depo_section, 35, 0, 1, 2)
+        params_grid.addWidget(self.chk_depth_deposition, 36, 0, 1, 2)
         self.lbl_depth_feature_type = QLabel("Feature")
         self.lbl_depth_feature_width = QLabel("Width A")
         self.lbl_depth_feature_depth = QLabel("Depth A")
@@ -1572,31 +1580,31 @@ class TrenchDepoWindow(QMainWindow):
         self.lbl_depth_post_fill_line = QLabel("Line fill %")
         self.lbl_depth_line_open_path = QLabel("Line open")
         self.lbl_depth_residual_decay = QLabel("Decay len A")
-        params_grid.addWidget(self.lbl_depth_feature_type, 36, 0)
-        params_grid.addWidget(self.cmb_depth_feature_type, 36, 1)
-        params_grid.addWidget(self.lbl_depth_feature_width, 37, 0)
-        params_grid.addWidget(self.spin_depth_feature_width, 37, 1)
-        params_grid.addWidget(self.lbl_depth_feature_depth, 38, 0)
-        params_grid.addWidget(self.spin_depth_feature_depth, 38, 1)
-        params_grid.addWidget(self.lbl_depth_feature_length, 39, 0)
-        params_grid.addWidget(self.spin_depth_feature_length, 39, 1)
-        params_grid.addWidget(self.lbl_depth_decay_k, 40, 0)
-        params_grid.addWidget(self.spin_depth_decay_k, 40, 1)
-        params_grid.addWidget(self.lbl_depth_decay_power, 41, 0)
-        params_grid.addWidget(self.spin_depth_decay_power, 41, 1)
-        params_grid.addWidget(self.lbl_depth_min_ratio, 42, 0)
-        params_grid.addWidget(self.spin_depth_min_ratio_pct, 42, 1)
-        params_grid.addWidget(self.lbl_depth_closure_section, 43, 0, 1, 2)
-        params_grid.addWidget(self.lbl_depth_closure_threshold, 44, 0)
-        params_grid.addWidget(self.spin_depth_closure_threshold, 44, 1)
-        params_grid.addWidget(self.lbl_depth_post_fill_hole, 45, 0)
-        params_grid.addWidget(self.spin_depth_post_fill_hole_pct, 45, 1)
-        params_grid.addWidget(self.lbl_depth_post_fill_line, 46, 0)
-        params_grid.addWidget(self.spin_depth_post_fill_line_pct, 46, 1)
-        params_grid.addWidget(self.lbl_depth_line_open_path, 47, 0)
-        params_grid.addWidget(self.spin_depth_line_open_path, 47, 1)
-        params_grid.addWidget(self.lbl_depth_residual_decay, 48, 0)
-        params_grid.addWidget(self.spin_depth_residual_decay, 48, 1)
+        params_grid.addWidget(self.lbl_depth_feature_type, 37, 0)
+        params_grid.addWidget(self.cmb_depth_feature_type, 37, 1)
+        params_grid.addWidget(self.lbl_depth_feature_width, 38, 0)
+        params_grid.addWidget(self.spin_depth_feature_width, 38, 1)
+        params_grid.addWidget(self.lbl_depth_feature_depth, 39, 0)
+        params_grid.addWidget(self.spin_depth_feature_depth, 39, 1)
+        params_grid.addWidget(self.lbl_depth_feature_length, 40, 0)
+        params_grid.addWidget(self.spin_depth_feature_length, 40, 1)
+        params_grid.addWidget(self.lbl_depth_decay_k, 41, 0)
+        params_grid.addWidget(self.spin_depth_decay_k, 41, 1)
+        params_grid.addWidget(self.lbl_depth_decay_power, 42, 0)
+        params_grid.addWidget(self.spin_depth_decay_power, 42, 1)
+        params_grid.addWidget(self.lbl_depth_min_ratio, 43, 0)
+        params_grid.addWidget(self.spin_depth_min_ratio_pct, 43, 1)
+        params_grid.addWidget(self.lbl_depth_closure_section, 44, 0, 1, 2)
+        params_grid.addWidget(self.lbl_depth_closure_threshold, 45, 0)
+        params_grid.addWidget(self.spin_depth_closure_threshold, 45, 1)
+        params_grid.addWidget(self.lbl_depth_post_fill_hole, 46, 0)
+        params_grid.addWidget(self.spin_depth_post_fill_hole_pct, 46, 1)
+        params_grid.addWidget(self.lbl_depth_post_fill_line, 47, 0)
+        params_grid.addWidget(self.spin_depth_post_fill_line_pct, 47, 1)
+        params_grid.addWidget(self.lbl_depth_line_open_path, 48, 0)
+        params_grid.addWidget(self.spin_depth_line_open_path, 48, 1)
+        params_grid.addWidget(self.lbl_depth_residual_decay, 49, 0)
+        params_grid.addWidget(self.spin_depth_residual_decay, 49, 1)
         params_group.setLayout(params_grid)
 
         self.redepo_lobe_group = QGroupBox("4 Redeposition Lobe")
@@ -1718,6 +1726,8 @@ class TrenchDepoWindow(QMainWindow):
             self.spin_redepo_emit_power,
             self.lbl_redepo_distance_power,
             self.spin_redepo_distance_power,
+            self.lbl_redepo_soft_los,
+            self.spin_redepo_soft_los,
             self.redepo_lobe_group,
         ]
         self._depth_deposition_widgets = [
@@ -1954,6 +1964,7 @@ class TrenchDepoWindow(QMainWindow):
                 ("Redepo %", "redepo_efficiency_pct"),
                 ("Emit power", "redepo_emit_power"),
                 ("Dist power", "redepo_distance_power"),
+                ("Soft LOS", "redepo_soft_los_radius_points"),
                 *options,
             ]
         if self._active_emulator_supports_depth_deposition():
@@ -2269,6 +2280,8 @@ class TrenchDepoWindow(QMainWindow):
             self.spin_redepo_emit_power,
             self.lbl_redepo_distance_power,
             self.spin_redepo_distance_power,
+            self.lbl_redepo_soft_los,
+            self.spin_redepo_soft_los,
             self.redepo_lobe_group,
         ]:
             widget.setEnabled(redepo_enabled)
@@ -2335,6 +2348,7 @@ class TrenchDepoWindow(QMainWindow):
         self.spin_redepo_efficiency.setValue(25.0)
         self.spin_redepo_emit_power.setValue(1.0)
         self.spin_redepo_distance_power.setValue(1.0)
+        self.spin_redepo_soft_los.setValue(0)
         self.cmb_depth_feature_type.setCurrentIndex(0)
         self.spin_depth_feature_width.setValue(240.0)
         self.spin_depth_feature_depth.setValue(4700.0)
@@ -2410,6 +2424,8 @@ class TrenchDepoWindow(QMainWindow):
             values = (0.0, 50.0, 10.0, 1, 0.0, 100.0)
         elif parameter in {"redepo_emit_power", "redepo_distance_power"}:
             values = (0.5, 2.0, 0.5, 2, 0.0, 8.0)
+        elif parameter == "redepo_soft_los_radius_points":
+            values = (0.0, 2.0, 1.0, 0, 0.0, 2.0)
         elif parameter == "deposition_depth_decay_k":
             values = (0.2, 1.4, 0.3, 2, 0.0, 20.0)
         elif parameter == "deposition_depth_decay_power":
@@ -2512,6 +2528,7 @@ class TrenchDepoWindow(QMainWindow):
             ),
             redepo_emit_power=float(self.spin_redepo_emit_power.value()),
             redepo_distance_power=float(self.spin_redepo_distance_power.value()),
+            redepo_soft_los_radius_points=int(self.spin_redepo_soft_los.value()),
             deposition_depth_enabled=bool(
                 supports_depth_deposition and self.chk_depth_deposition.isChecked()
             ),
@@ -2570,6 +2587,7 @@ class TrenchDepoWindow(QMainWindow):
             redepo_distance_power=cfg.redepo_distance_power,
             redepo_neighbor_exclusion=cfg.redepo_neighbor_exclusion,
             redepo_max_distance_a=cfg.redepo_max_distance_a,
+            redepo_soft_los_radius_points=cfg.redepo_soft_los_radius_points,
         )
 
     def _set_run_dir_label(self, run_dir: Optional[Path]) -> None:
@@ -2619,6 +2637,7 @@ class TrenchDepoWindow(QMainWindow):
             float(config.redepo_distance_power),
             int(config.redepo_neighbor_exclusion),
             float(config.redepo_max_distance_a),
+            int(config.redepo_soft_los_radius_points),
             bool(config.deposition_depth_enabled),
             str(config.deposition_feature_type),
             float(config.deposition_feature_width_a),
@@ -2978,6 +2997,7 @@ class TrenchDepoWindow(QMainWindow):
         self.spin_redepo_efficiency.setValue(float(config.redepo_efficiency_pct))
         self.spin_redepo_emit_power.setValue(float(config.redepo_emit_power))
         self.spin_redepo_distance_power.setValue(float(config.redepo_distance_power))
+        self.spin_redepo_soft_los.setValue(int(config.redepo_soft_los_radius_points))
         self.chk_depth_deposition.setChecked(bool(config.deposition_depth_enabled))
         feature_index = self.cmb_depth_feature_type.findData(str(config.deposition_feature_type))
         self.cmb_depth_feature_type.setCurrentIndex(feature_index if feature_index >= 0 else 0)
