@@ -18,6 +18,7 @@ from gapsim.prediction import (
     estimate_fast_prediction_params,
     recipe_with_switch_state,
 )
+from gapsim.ui_qt import main_window as main_window_module
 from gapsim.ui_qt.main_window import MainWindow
 from gapsim.ui_qt.prediction_worker import ParameterPredictionWorker
 from gapsim.ui_qt.switch_schema import default_switch_state
@@ -27,6 +28,15 @@ class MainWindowProjectResultsTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls._app = QApplication.instance() or QApplication([])
+
+    def test_runs_root_uses_executable_folder_when_frozen(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            exe_path = Path(tmpdir) / "GFS.exe"
+            with (
+                mock.patch.object(main_window_module.sys, "frozen", True, create=True),
+                mock.patch.object(main_window_module.sys, "executable", str(exe_path)),
+            ):
+                self.assertEqual(MainWindow._runs_root_dir(), exe_path.resolve().parent / "runs")
 
     def _wait_for_result_load(self, win: MainWindow, timeout_s: float = 3.0) -> None:
         deadline = time.monotonic() + timeout_s

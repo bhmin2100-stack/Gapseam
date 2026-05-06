@@ -11,8 +11,13 @@ from PySide6.QtCore import QPointF
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QApplication
 
-from gapsim.emulation.trench_depo import TrenchDepoConfig, TrenchDepoResult, TrenchSweepResult
-from gapsim.emulation.trench_depo_ui import IonTransmissionEditor, SputterGaussianEditor, TrenchDepoWindow
+from gapsim.emulation.trench_depo import BOWED_JAR_TRENCH_POINTS, TrenchDepoConfig, TrenchDepoResult, TrenchSweepResult
+from gapsim.emulation.trench_depo_ui import (
+    IonTransmissionEditor,
+    RedepositionLobeEditor,
+    SputterGaussianEditor,
+    TrenchDepoWindow,
+)
 
 
 class SputterGaussianEditorTest(unittest.TestCase):
@@ -83,6 +88,44 @@ class SputterGaussianEditorTest(unittest.TestCase):
         editor = IonTransmissionEditor()
         editor.resize(420, 170)
         editor.set_parameters(20.0, 90.0, 65.0, 15.0, 1.4)
+        pixmap = QPixmap(editor.size())
+
+        editor.render(pixmap)
+
+        self.assertFalse(pixmap.isNull())
+
+    def test_redeposition_lobe_editor_drags_density_emit_and_distance(self) -> None:
+        editor = RedepositionLobeEditor()
+        editor.resize(420, 150)
+        seen = []
+        editor.parametersChanged.connect(lambda eff, emit, dist: seen.append((eff, emit, dist)))
+
+        editor._apply_drag(
+            "efficiency",
+            QPointF(editor._amount_bar_rect().center().x(), editor._y_for_efficiency_pct(70.0)),
+        )
+        self.assertAlmostEqual(editor.parameters()[0], 70.0, places=6)
+
+        source = editor._source_point()
+        emit_point = editor._point_from_polar(editor._axis_angle_deg() + 30.0, editor._max_radius() * 0.85)
+        editor._apply_drag("emit_right", emit_point)
+        expected_emit = editor._half_angle_to_emit(30.0)
+        self.assertAlmostEqual(editor.parameters()[1], expected_emit, places=6)
+
+        axis_dx, axis_dy = editor._axis_vec()
+        dist_t = 0.45
+        dist_point = QPointF(
+            source.x() + (axis_dx * editor._max_radius() * dist_t),
+            source.y() + (axis_dy * editor._max_radius() * dist_t),
+        )
+        editor._apply_drag("distance", dist_point)
+        self.assertAlmostEqual(editor.parameters()[2], editor._distance_from_t(dist_t), places=6)
+        self.assertTrue(seen)
+
+    def test_redeposition_lobe_editor_renders_cone(self) -> None:
+        editor = RedepositionLobeEditor()
+        editor.resize(420, 150)
+        editor.set_parameters(45.0, 2.0, 1.5)
         pixmap = QPixmap(editor.size())
 
         editor.render(pixmap)
@@ -261,18 +304,27 @@ class SputterGaussianEditorTest(unittest.TestCase):
             self.assertFalse(window._active_emulator_supports_reflected_ion())
             self.assertFalse(window.gaussian_group.isHidden())
             self.assertEqual(window.btn_compare_gapsim_angle.text(), "Compare Emulator 01")
-            self.assertEqual(window.lbl_etch_section.text(), "Etch switch (1번 direct + 4번 redepo)")
+            self.assertEqual(window.lbl_etch_section.text(), "Etch switch (2번 source + 4번 redepo)")
             self.assertEqual(window.lbl_sputter_section.text(), "기존 1번 Direct sputter kernel")
             self.assertTrue(all(not widget.isHidden() for widget in window._sputter_widgets))
             self.assertTrue(all(not widget.isHidden() for widget in window._redeposition_widgets))
+            self.assertFalse(window.redepo_lobe_group.isHidden())
             self.assertTrue(all(widget.isHidden() for widget in window._ion_transmission_widgets))
             self.assertTrue(all(widget.isHidden() for widget in window._reflected_ion_widgets))
 
             config = window.current_config()
             self.assertTrue(config.sputter_enabled)
             self.assertTrue(config.redepo_enabled)
-            self.assertEqual(config.redepo_source_model, "model1")
+            self.assertEqual(window.cmb_redepo_source_model.count(), 1)
+            self.assertEqual(config.redepo_source_model, "model2")
             self.assertAlmostEqual(config.redepo_efficiency_pct, 25.0, places=6)
+            self.assertAlmostEqual(window.redepo_lobe_editor.parameters()[0], 25.0, places=6)
+            window.spin_redepo_efficiency.setValue(40.0)
+            self.assertAlmostEqual(window.redepo_lobe_editor.parameters()[0], 40.0, places=6)
+            window.apply_redepo_lobe_parameters(55.0, 2.0, 3.0)
+            self.assertAlmostEqual(window.spin_redepo_efficiency.value(), 55.0, places=6)
+            self.assertAlmostEqual(window.spin_redepo_emit_power.value(), 2.0, places=6)
+            self.assertAlmostEqual(window.spin_redepo_distance_power.value(), 3.0, places=6)
             self.assertFalse(config.ion_transmission_enabled)
             self.assertFalse(config.reflected_ion_enabled)
             self.assertAlmostEqual(config.sputter_strength_a_per_cycle, 4.0, places=6)
@@ -288,6 +340,80 @@ class SputterGaussianEditorTest(unittest.TestCase):
             self.assertIn("redepo_distance_power", split_keys)
             self.assertNotIn("ion_transmission_decay_strength_pct", split_keys)
             self.assertNotIn("reflected_ion_strength_pct", split_keys)
+        finally:
+            window.close()
+
+    def test_etch_dominant_run_uses_mixed_history_view(self) -> None:
+        result = TrenchDepoResult(
+            frame_steps=[0, 1],
+            frame_profiles=[
+                [(-10.0, 0.0), (10.0, 0.0)],
+                [(-12.0, 0.0), (8.0, 0.0)],
+            ],
+            frame_voids=[[], []],
+            final_profile=[(-12.0, 0.0), (8.0, 0.0)],
+            meta={
+                "cycles": 1,
+                "sputter_active": True,
+                "angstrom_per_cycle": 10.0,
+                "sputter_strength_a_per_cycle": 12.0,
+            },
+        )
+        with (
+            mock.patch("gapsim.emulation.trench_depo_ui.run_trench_depo", return_value=result),
+            mock.patch("gapsim.emulation.trench_depo_ui.QTimer.singleShot"),
+        ):
+            window = TrenchDepoWindow()
+            try:
+                window.set_active_emulator_number(4, run=False)
+                window.run_emulation(save_artifacts=False)
+
+                self.assertTrue(window.view._dynamic_substrate_fill)
+                self.assertEqual(window.view._history_mode, "mixed_etch")
+            finally:
+                window.close()
+
+    def test_emulator_five_is_depth_deposition_only_with_bowed_jar_geometry(self) -> None:
+        result = TrenchDepoResult(
+            frame_steps=[0],
+            frame_profiles=[[(0.0, 0.0), (1.0, 0.0)]],
+            frame_voids=[[]],
+            final_profile=[(0.0, 0.0), (1.0, 0.0)],
+            meta={"cycles": 0},
+        )
+        with (
+            mock.patch("gapsim.emulation.trench_depo_ui.run_trench_depo", return_value=result),
+            mock.patch("gapsim.emulation.trench_depo_ui.QTimer.singleShot"),
+        ):
+            window = TrenchDepoWindow()
+
+        try:
+            window.set_active_emulator_number(5, run=False)
+
+            self.assertFalse(window._active_emulator_supports_sputter())
+            self.assertTrue(window._active_emulator_supports_depth_deposition())
+            self.assertTrue(all(not widget.isHidden() for widget in window._depth_deposition_widgets))
+            self.assertTrue(all(widget.isHidden() for widget in window._sputter_widgets))
+            self.assertTrue(all(widget.isHidden() for widget in window._redeposition_widgets))
+            self.assertTrue(window.chk_depth_deposition.isChecked())
+
+            config = window.current_config()
+            self.assertEqual(tuple(config.points), BOWED_JAR_TRENCH_POINTS)
+            self.assertTrue(config.deposition_depth_enabled)
+            self.assertFalse(config.sputter_enabled)
+            self.assertFalse(config.redepo_enabled)
+            self.assertEqual(config.deposition_feature_type, "hole")
+            self.assertAlmostEqual(config.deposition_min_ratio, 0.03, places=6)
+            self.assertAlmostEqual(config.deposition_post_closure_fill_pct_hole, 0.03, places=6)
+
+            split_keys = {
+                window.cmb_split_parameter.itemData(idx)
+                for idx in range(window.cmb_split_parameter.count())
+            }
+            self.assertIn("deposition_depth_decay_k", split_keys)
+            self.assertIn("deposition_post_closure_fill_pct_line", split_keys)
+            self.assertNotIn("sputter_strength_a_per_cycle", split_keys)
+            self.assertNotIn("redepo_efficiency_pct", split_keys)
         finally:
             window.close()
 
@@ -307,13 +433,14 @@ class SputterGaussianEditorTest(unittest.TestCase):
 
         try:
             self.assertEqual(window.active_emulator_number(), 0)
-            self.assertEqual(window._emulator_numbers, [0, 1, 2, 3, 4])
-            self.assertEqual(sorted(window._emulator_buttons), [0, 1, 2, 3, 4])
+            self.assertEqual(window._emulator_numbers, [0, 1, 2, 3, 4, 5])
+            self.assertEqual(sorted(window._emulator_buttons), [0, 1, 2, 3, 4, 5])
             self.assertTrue(window._emulator_buttons[0].isChecked())
             self.assertFalse(window._emulator_buttons[1].isChecked())
             self.assertFalse(window._emulator_buttons[2].isChecked())
             self.assertFalse(window._emulator_buttons[3].isChecked())
             self.assertFalse(window._emulator_buttons[4].isChecked())
+            self.assertFalse(window._emulator_buttons[5].isChecked())
         finally:
             window.close()
 
@@ -336,11 +463,11 @@ class SputterGaussianEditorTest(unittest.TestCase):
             try:
                 window.create_new_emulator()
 
-                self.assertEqual(window.active_emulator_number(), 5)
-                self.assertEqual(window._emulator_numbers, [0, 1, 2, 3, 4, 5])
-                self.assertTrue(window._emulator_buttons[5].isChecked())
-                ensure_slot.assert_called_once_with(5)
-                save_numbers.assert_called_once_with([0, 1, 2, 3, 4, 5])
+                self.assertEqual(window.active_emulator_number(), 6)
+                self.assertEqual(window._emulator_numbers, [0, 1, 2, 3, 4, 5, 6])
+                self.assertTrue(window._emulator_buttons[6].isChecked())
+                ensure_slot.assert_called_once_with(6)
+                save_numbers.assert_called_once_with([0, 1, 2, 3, 4, 5, 6])
             finally:
                 window.close()
 

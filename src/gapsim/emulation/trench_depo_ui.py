@@ -43,6 +43,7 @@ from gapsim.emulation.research_registry import (
     save_created_emulator_numbers,
 )
 from gapsim.emulation.trench_depo import (
+    BOWED_JAR_TRENCH_POINTS,
     ION_TRANSMISSION_STEPPED_TRENCH_POINTS,
     TrenchDepoConfig,
     TrenchDepoResult,
@@ -89,6 +90,7 @@ EMULATOR_MODE_TITLES = {
     2: "Ion transmission shadowing",
     3: "Discarded reflected ion etch",
     4: "Sputter redeposition",
+    5: "Depth-dependent depo fill",
 }
 
 
@@ -622,6 +624,306 @@ class IonTransmissionEditor(QWidget):
         painter.drawText(QPointF(rect.right() - 42.0, rect.bottom() + 18.0), "factor")
 
 
+class RedepositionLobeEditor(QWidget):
+    parametersChanged = Signal(float, float, float)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._efficiency_pct = 25.0
+        self._emit_power = 1.0
+        self._distance_power = 1.0
+        self._drag_handle: Optional[str] = None
+        self.setMinimumHeight(142)
+        self.setMaximumHeight(172)
+        self.setMouseTracking(True)
+        self.setToolTip(
+            "Drag the density handle for redeposition amount, cone edge handles for emit, and axis handle for distance fade."
+        )
+
+    def parameters(self) -> Tuple[float, float, float]:
+        return (float(self._efficiency_pct), float(self._emit_power), float(self._distance_power))
+
+    def set_parameters(self, efficiency_pct: float, emit_power: float, distance_power: float) -> None:
+        eff_f = self._clamp(float(efficiency_pct), 0.0, 100.0)
+        emit_f = self._clamp(float(emit_power), 0.0, 8.0)
+        dist_f = self._clamp(float(distance_power), 0.0, 4.0)
+        changed = (
+            abs(eff_f - self._efficiency_pct) > 1e-9
+            or abs(emit_f - self._emit_power) > 1e-9
+            or abs(dist_f - self._distance_power) > 1e-9
+        )
+        self._efficiency_pct = eff_f
+        self._emit_power = emit_f
+        self._distance_power = dist_f
+        if changed:
+            self.update()
+
+    @staticmethod
+    def _clamp(value: float, low: float, high: float) -> float:
+        return max(float(low), min(float(high), float(value)))
+
+    def _canvas_rect(self) -> QRectF:
+        return QRectF(18.0, 24.0, max(120.0, float(self.width()) - 36.0), max(70.0, float(self.height()) - 52.0))
+
+    def _amount_bar_rect(self) -> QRectF:
+        rect = self._canvas_rect()
+        return QRectF(rect.left() + 8.0, rect.top() + 10.0, 12.0, max(30.0, rect.height() - 20.0))
+
+    def _source_point(self) -> QPointF:
+        rect = self._canvas_rect()
+        return QPointF(rect.left() + 48.0, rect.center().y() + 10.0)
+
+    def _axis_angle_deg(self) -> float:
+        return 17.0
+
+    def _axis_vec(self) -> Tuple[float, float]:
+        angle = math.radians(self._axis_angle_deg())
+        return (math.cos(angle), math.sin(angle))
+
+    def _emit_to_half_angle(self, emit_power: float) -> float:
+        return 10.0 + (52.0 / (1.0 + (0.9 * self._clamp(float(emit_power), 0.0, 8.0))))
+
+    def _half_angle_to_emit(self, half_angle_deg: float) -> float:
+        half = self._clamp(float(half_angle_deg), 12.0, 62.0)
+        return self._clamp(((52.0 / max(0.1, half - 10.0)) - 1.0) / 0.9, 0.0, 8.0)
+
+    def _distance_handle_t(self) -> float:
+        return 0.90 - (0.68 * self._clamp(self._distance_power, 0.0, 4.0) / 4.0)
+
+    def _distance_from_t(self, t: float) -> float:
+        return self._clamp((0.90 - self._clamp(float(t), 0.22, 0.90)) * 4.0 / 0.68, 0.0, 4.0)
+
+    def _radius_limit_for_angle(self, angle_deg: float) -> float:
+        rect = self._canvas_rect()
+        source = self._source_point()
+        dx = math.cos(math.radians(angle_deg))
+        dy = math.sin(math.radians(angle_deg))
+        limits: List[float] = []
+        pad = 8.0
+        if dx > 1e-9:
+            limits.append((rect.right() - pad - source.x()) / dx)
+        elif dx < -1e-9:
+            limits.append((rect.left() + pad - source.x()) / dx)
+        if dy > 1e-9:
+            limits.append((rect.bottom() - pad - source.y()) / dy)
+        elif dy < -1e-9:
+            limits.append((rect.top() + pad - source.y()) / dy)
+        positive = [value for value in limits if value > 1.0]
+        return min(positive) if positive else max(70.0, rect.width() * 0.6)
+
+    def _max_radius(self, half_angle_deg: Optional[float] = None) -> float:
+        half = self._emit_to_half_angle(self._emit_power) if half_angle_deg is None else float(half_angle_deg)
+        axis = self._axis_angle_deg()
+        return max(
+            72.0,
+            min(
+                self._radius_limit_for_angle(axis),
+                self._radius_limit_for_angle(axis - half),
+                self._radius_limit_for_angle(axis + half),
+            ),
+        )
+
+    def _point_from_polar(self, angle_deg: float, radius: float) -> QPointF:
+        source = self._source_point()
+        angle = math.radians(float(angle_deg))
+        return QPointF(source.x() + (math.cos(angle) * float(radius)), source.y() + (math.sin(angle) * float(radius)))
+
+    def _y_for_efficiency_pct(self, efficiency_pct: float) -> float:
+        bar = self._amount_bar_rect()
+        t = self._clamp(float(efficiency_pct) / 100.0, 0.0, 1.0)
+        return bar.bottom() - (bar.height() * t)
+
+    def _efficiency_pct_for_y(self, y: float) -> float:
+        bar = self._amount_bar_rect()
+        if bar.height() <= 1e-9:
+            return 0.0
+        t = self._clamp((bar.bottom() - float(y)) / bar.height(), 0.0, 1.0)
+        return 100.0 * t
+
+    @staticmethod
+    def _angle_delta_deg(angle_deg: float, reference_deg: float) -> float:
+        delta = float(angle_deg) - float(reference_deg)
+        while delta > 180.0:
+            delta -= 360.0
+        while delta < -180.0:
+            delta += 360.0
+        return delta
+
+    def _handle_points(self) -> dict[str, QPointF]:
+        half = self._emit_to_half_angle(self._emit_power)
+        radius = self._max_radius(half) * 0.92
+        axis = self._axis_angle_deg()
+        axis_dx, axis_dy = self._axis_vec()
+        source = self._source_point()
+        distance_radius = self._max_radius(half) * self._distance_handle_t()
+        return {
+            "efficiency": QPointF(self._amount_bar_rect().center().x(), self._y_for_efficiency_pct(self._efficiency_pct)),
+            "emit_left": self._point_from_polar(axis - half, radius),
+            "emit_right": self._point_from_polar(axis + half, radius),
+            "distance": QPointF(source.x() + (axis_dx * distance_radius), source.y() + (axis_dy * distance_radius)),
+        }
+
+    def _hit_handle(self, pos: QPointF) -> Optional[str]:
+        best_name: Optional[str] = None
+        best_dist_sq = 12.0 * 12.0
+        for name, hp in self._handle_points().items():
+            dx = float(pos.x() - hp.x())
+            dy = float(pos.y() - hp.y())
+            dist_sq = (dx * dx) + (dy * dy)
+            if dist_sq <= best_dist_sq:
+                best_name = name
+                best_dist_sq = dist_sq
+        return best_name
+
+    def _emit_parameters_changed(self) -> None:
+        self.parametersChanged.emit(float(self._efficiency_pct), float(self._emit_power), float(self._distance_power))
+
+    def _apply_drag(self, handle: str, pos: QPointF) -> None:
+        if handle == "efficiency":
+            self._efficiency_pct = self._efficiency_pct_for_y(pos.y())
+        elif handle in {"emit_left", "emit_right"}:
+            source = self._source_point()
+            angle = math.degrees(math.atan2(float(pos.y() - source.y()), float(pos.x() - source.x())))
+            half = abs(self._angle_delta_deg(angle, self._axis_angle_deg()))
+            self._emit_power = self._half_angle_to_emit(half)
+        elif handle == "distance":
+            source = self._source_point()
+            axis_dx, axis_dy = self._axis_vec()
+            projection = ((float(pos.x() - source.x()) * axis_dx) + (float(pos.y() - source.y()) * axis_dy))
+            t = projection / max(1.0, self._max_radius())
+            self._distance_power = self._distance_from_t(t)
+        else:
+            return
+        self.update()
+        self._emit_parameters_changed()
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if event.button() != Qt.MouseButton.LeftButton:
+            super().mousePressEvent(event)
+            return
+        pos = event.position()
+        handle = self._hit_handle(pos)
+        if handle is None and self._amount_bar_rect().adjusted(-8.0, -4.0, 8.0, 4.0).contains(pos):
+            handle = "efficiency"
+        if handle is None and self._canvas_rect().contains(pos):
+            handle = "distance"
+        if handle is None:
+            super().mousePressEvent(event)
+            return
+        self._drag_handle = handle
+        self._apply_drag(handle, pos)
+        event.accept()
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        pos = event.position()
+        if self._drag_handle is not None:
+            self._apply_drag(self._drag_handle, pos)
+            event.accept()
+            return
+        handle = self._hit_handle(pos)
+        if handle == "efficiency":
+            self.setCursor(Qt.CursorShape.SizeVerCursor)
+        elif handle in {"emit_left", "emit_right"}:
+            self.setCursor(Qt.CursorShape.SizeAllCursor)
+        elif handle == "distance":
+            self.setCursor(Qt.CursorShape.SizeHorCursor)
+        else:
+            self.unsetCursor()
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton and self._drag_handle is not None:
+            self._drag_handle = None
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802, ANN001
+        if self._drag_handle is None:
+            self.unsetCursor()
+        super().leaveEvent(event)
+
+    def paintEvent(self, event) -> None:  # noqa: N802, ANN001
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        rect = self._canvas_rect()
+        painter.fillRect(self.rect(), QColor(248, 250, 252))
+        painter.setPen(QPen(QColor(203, 213, 225), 1.0))
+        painter.setBrush(QColor(255, 255, 255))
+        painter.drawRoundedRect(rect, 5.0, 5.0)
+
+        bar = self._amount_bar_rect()
+        for idx in range(22):
+            t0 = idx / 22.0
+            t1 = (idx + 1) / 22.0
+            alpha = int(18 + (190 * t1))
+            y0 = bar.bottom() - (bar.height() * t1)
+            y1 = bar.bottom() - (bar.height() * t0)
+            painter.fillRect(QRectF(bar.left(), y0, bar.width(), max(1.0, y1 - y0)), QColor(249, 115, 22, alpha))
+        painter.setPen(QPen(QColor(124, 45, 18), 1.0))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(bar, 3.0, 3.0)
+
+        half = self._emit_to_half_angle(self._emit_power)
+        axis = self._axis_angle_deg()
+        radius = self._max_radius(half)
+        source = self._source_point()
+        base_alpha = int(18 + (self._clamp(self._efficiency_pct, 0.0, 100.0) * 1.95))
+        segments = 18
+        painter.setPen(Qt.PenStyle.NoPen)
+        for idx in range(segments, 0, -1):
+            r0 = radius * (idx - 1) / float(segments)
+            r1 = radius * idx / float(segments)
+            t = (idx - 0.5) / float(segments)
+            fade = max(0.035, (1.0 - t) ** (0.45 + (self._distance_power * 1.1)))
+            alpha = max(4, min(230, int(base_alpha * fade)))
+            p0 = self._point_from_polar(axis - half, r0)
+            p1 = self._point_from_polar(axis - half, r1)
+            p2 = self._point_from_polar(axis + half, r1)
+            p3 = self._point_from_polar(axis + half, r0)
+            cone = QPainterPath()
+            cone.moveTo(p0)
+            cone.lineTo(p1)
+            cone.lineTo(p2)
+            cone.lineTo(p3)
+            cone.closeSubpath()
+            painter.fillPath(cone, QColor(249, 115, 22, alpha))
+
+        painter.setPen(QPen(QColor(100, 116, 139), 2.0))
+        trench = QPainterPath()
+        trench.moveTo(QPointF(source.x() - 22.0, source.y() - 58.0))
+        trench.lineTo(source)
+        trench.lineTo(QPointF(source.x() + 28.0, source.y() + 56.0))
+        trench.lineTo(QPointF(rect.right() - 12.0, source.y() + 56.0))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawPath(trench)
+
+        painter.setPen(QPen(QColor(124, 45, 18, 95), 1.2, Qt.PenStyle.DashLine))
+        painter.drawLine(source, self._point_from_polar(axis, radius))
+        painter.setPen(QPen(QColor(124, 45, 18, 130), 1.4))
+        painter.drawLine(source, self._point_from_polar(axis - half, radius * 0.92))
+        painter.drawLine(source, self._point_from_polar(axis + half, radius * 0.92))
+
+        handles = self._handle_points()
+        painter.setPen(QPen(QColor(124, 45, 18), 1.4))
+        painter.setBrush(QColor(254, 215, 170))
+        for name in ("emit_left", "emit_right", "distance"):
+            painter.drawEllipse(handles[name], 5.8, 5.8)
+        painter.setBrush(QColor(249, 115, 22, max(70, min(230, base_alpha))))
+        painter.drawEllipse(source, 7.0, 7.0)
+        painter.setPen(QPen(QColor(124, 45, 18), 1.4))
+        painter.setBrush(QColor(255, 237, 213))
+        painter.drawEllipse(handles["efficiency"], 5.8, 5.8)
+
+        painter.setPen(QPen(QColor(15, 23, 42), 1.0))
+        painter.drawText(
+            QPointF(rect.left(), 17.0),
+            f"Redepo {self._efficiency_pct:.1f}%    Cone {2.0 * half:.0f} deg    Dist {self._distance_power:.2f}",
+        )
+
+
 class SplitTestWindow(QMainWindow):
     def __init__(self, cases: Sequence[TrenchSweepResult]) -> None:
         super().__init__()
@@ -834,6 +1136,7 @@ class TrenchDepoWindow(QMainWindow):
         self._split_windows: List[SplitTestWindow] = []
         self._syncing_sputter_curve = False
         self._syncing_ion_curve = False
+        self._syncing_redepo_lobe = False
         self._active_emulator_number = 0
         self._emulator_numbers = load_created_emulator_numbers()
         self._emulator_buttons: dict[int, QPushButton] = {}
@@ -934,9 +1237,9 @@ class TrenchDepoWindow(QMainWindow):
         self.chk_redepo = QCheckBox("Redepo enabled")
         self.chk_redepo.setChecked(False)
         self.cmb_redepo_source_model = QComboBox()
-        self.cmb_redepo_source_model.addItem("Model1", "model1")
-        self.cmb_redepo_source_model.addItem("Model2", "model2")
+        self.cmb_redepo_source_model.addItem("Model2 ion source", "model2")
         self.cmb_redepo_source_model.setCurrentIndex(0)
+        self.cmb_redepo_source_model.setToolTip("4번 redeposition source는 Model2 ion transmission 경로로 고정됩니다.")
         self.spin_redepo_efficiency = QDoubleSpinBox()
         self.spin_redepo_efficiency.setRange(0.0, 100.0)
         self.spin_redepo_efficiency.setDecimals(1)
@@ -952,6 +1255,69 @@ class TrenchDepoWindow(QMainWindow):
         self.spin_redepo_distance_power.setDecimals(2)
         self.spin_redepo_distance_power.setSingleStep(0.1)
         self.spin_redepo_distance_power.setValue(1.0)
+        self.chk_depth_deposition = QCheckBox("Depth-dependent deposition")
+        self.chk_depth_deposition.setToolTip("5번은 etch/redeposition 없이 기본 deposition에만 깊이 감쇠를 적용합니다.")
+        self.chk_depth_deposition.setChecked(False)
+        self.cmb_depth_feature_type = QComboBox()
+        self.cmb_depth_feature_type.addItem("Hole", "hole")
+        self.cmb_depth_feature_type.addItem("Line", "line")
+        self.cmb_depth_feature_type.setCurrentIndex(0)
+        self.spin_depth_feature_width = QDoubleSpinBox()
+        self.spin_depth_feature_width.setRange(1.0, 100000.0)
+        self.spin_depth_feature_width.setDecimals(1)
+        self.spin_depth_feature_width.setSingleStep(10.0)
+        self.spin_depth_feature_width.setValue(240.0)
+        self.spin_depth_feature_depth = QDoubleSpinBox()
+        self.spin_depth_feature_depth.setRange(1.0, 200000.0)
+        self.spin_depth_feature_depth.setDecimals(1)
+        self.spin_depth_feature_depth.setSingleStep(100.0)
+        self.spin_depth_feature_depth.setValue(4700.0)
+        self.spin_depth_feature_length = QDoubleSpinBox()
+        self.spin_depth_feature_length.setRange(0.0, 1000000.0)
+        self.spin_depth_feature_length.setDecimals(1)
+        self.spin_depth_feature_length.setSingleStep(1000.0)
+        self.spin_depth_feature_length.setSpecialValueText("Auto/open")
+        self.spin_depth_feature_length.setValue(0.0)
+        self.spin_depth_decay_k = QDoubleSpinBox()
+        self.spin_depth_decay_k.setRange(0.0, 20.0)
+        self.spin_depth_decay_k.setDecimals(3)
+        self.spin_depth_decay_k.setSingleStep(0.1)
+        self.spin_depth_decay_k.setValue(0.8)
+        self.spin_depth_decay_power = QDoubleSpinBox()
+        self.spin_depth_decay_power.setRange(0.05, 8.0)
+        self.spin_depth_decay_power.setDecimals(2)
+        self.spin_depth_decay_power.setSingleStep(0.1)
+        self.spin_depth_decay_power.setValue(1.2)
+        self.spin_depth_min_ratio_pct = QDoubleSpinBox()
+        self.spin_depth_min_ratio_pct.setRange(0.0, 100.0)
+        self.spin_depth_min_ratio_pct.setDecimals(1)
+        self.spin_depth_min_ratio_pct.setSingleStep(1.0)
+        self.spin_depth_min_ratio_pct.setValue(3.0)
+        self.spin_depth_closure_threshold = QDoubleSpinBox()
+        self.spin_depth_closure_threshold.setRange(0.0, 10000.0)
+        self.spin_depth_closure_threshold.setDecimals(1)
+        self.spin_depth_closure_threshold.setSingleStep(1.0)
+        self.spin_depth_closure_threshold.setValue(8.0)
+        self.spin_depth_post_fill_hole_pct = QDoubleSpinBox()
+        self.spin_depth_post_fill_hole_pct.setRange(0.0, 100.0)
+        self.spin_depth_post_fill_hole_pct.setDecimals(1)
+        self.spin_depth_post_fill_hole_pct.setSingleStep(1.0)
+        self.spin_depth_post_fill_hole_pct.setValue(3.0)
+        self.spin_depth_post_fill_line_pct = QDoubleSpinBox()
+        self.spin_depth_post_fill_line_pct.setRange(0.0, 100.0)
+        self.spin_depth_post_fill_line_pct.setDecimals(1)
+        self.spin_depth_post_fill_line_pct.setSingleStep(2.5)
+        self.spin_depth_post_fill_line_pct.setValue(20.0)
+        self.spin_depth_line_open_path = QDoubleSpinBox()
+        self.spin_depth_line_open_path.setRange(0.0, 1.0)
+        self.spin_depth_line_open_path.setDecimals(2)
+        self.spin_depth_line_open_path.setSingleStep(0.05)
+        self.spin_depth_line_open_path.setValue(1.0)
+        self.spin_depth_residual_decay = QDoubleSpinBox()
+        self.spin_depth_residual_decay.setRange(1.0, 200000.0)
+        self.spin_depth_residual_decay.setDecimals(1)
+        self.spin_depth_residual_decay.setSingleStep(100.0)
+        self.spin_depth_residual_decay.setValue(1175.0)
         self.spin_sputter_strength = QDoubleSpinBox()
         self.spin_sputter_strength.setRange(0.0, 100.0)
         self.spin_sputter_strength.setDecimals(3)
@@ -991,6 +1357,12 @@ class TrenchDepoWindow(QMainWindow):
             float(self.spin_ion_decay_strength.value()),
             float(self.spin_ion_floor.value()),
             float(self.spin_ion_curve_power.value()),
+        )
+        self.redepo_lobe_editor = RedepositionLobeEditor()
+        self.redepo_lobe_editor.set_parameters(
+            float(self.spin_redepo_efficiency.value()),
+            float(self.spin_redepo_emit_power.value()),
+            float(self.spin_redepo_distance_power.value()),
         )
 
         self.btn_run = QPushButton("Run")
@@ -1162,7 +1534,7 @@ class TrenchDepoWindow(QMainWindow):
         )
         params_grid.addWidget(self.lbl_redepo_section, 28, 0, 1, 2)
         params_grid.addWidget(self.chk_redepo, 29, 0, 1, 2)
-        self.lbl_redepo_source = QLabel("Source")
+        self.lbl_redepo_source = QLabel("Source fixed")
         self.lbl_redepo_efficiency = QLabel("Redepo %")
         self.lbl_redepo_emit_power = QLabel("Emit power")
         self.lbl_redepo_distance_power = QLabel("Dist power")
@@ -1174,7 +1546,64 @@ class TrenchDepoWindow(QMainWindow):
         params_grid.addWidget(self.spin_redepo_emit_power, 32, 1)
         params_grid.addWidget(self.lbl_redepo_distance_power, 33, 0)
         params_grid.addWidget(self.spin_redepo_distance_power, 33, 1)
+        self.lbl_depth_depo_section = self._make_parameter_section(
+            "5번 Depth depo only",
+            color="#166534",
+            background="#f0fdf4",
+            border="#bbf7d0",
+        )
+        params_grid.addWidget(self.lbl_depth_depo_section, 34, 0, 1, 2)
+        params_grid.addWidget(self.chk_depth_deposition, 35, 0, 1, 2)
+        self.lbl_depth_feature_type = QLabel("Feature")
+        self.lbl_depth_feature_width = QLabel("Width A")
+        self.lbl_depth_feature_depth = QLabel("Depth A")
+        self.lbl_depth_feature_length = QLabel("Length A")
+        self.lbl_depth_decay_k = QLabel("Decay K")
+        self.lbl_depth_decay_power = QLabel("Power")
+        self.lbl_depth_min_ratio = QLabel("Min %")
+        self.lbl_depth_closure_section = self._make_parameter_section(
+            "Closure residual fill",
+            color="#3f6212",
+            background="#f7fee7",
+            border="#d9f99d",
+        )
+        self.lbl_depth_closure_threshold = QLabel("Close A")
+        self.lbl_depth_post_fill_hole = QLabel("Hole fill %")
+        self.lbl_depth_post_fill_line = QLabel("Line fill %")
+        self.lbl_depth_line_open_path = QLabel("Line open")
+        self.lbl_depth_residual_decay = QLabel("Decay len A")
+        params_grid.addWidget(self.lbl_depth_feature_type, 36, 0)
+        params_grid.addWidget(self.cmb_depth_feature_type, 36, 1)
+        params_grid.addWidget(self.lbl_depth_feature_width, 37, 0)
+        params_grid.addWidget(self.spin_depth_feature_width, 37, 1)
+        params_grid.addWidget(self.lbl_depth_feature_depth, 38, 0)
+        params_grid.addWidget(self.spin_depth_feature_depth, 38, 1)
+        params_grid.addWidget(self.lbl_depth_feature_length, 39, 0)
+        params_grid.addWidget(self.spin_depth_feature_length, 39, 1)
+        params_grid.addWidget(self.lbl_depth_decay_k, 40, 0)
+        params_grid.addWidget(self.spin_depth_decay_k, 40, 1)
+        params_grid.addWidget(self.lbl_depth_decay_power, 41, 0)
+        params_grid.addWidget(self.spin_depth_decay_power, 41, 1)
+        params_grid.addWidget(self.lbl_depth_min_ratio, 42, 0)
+        params_grid.addWidget(self.spin_depth_min_ratio_pct, 42, 1)
+        params_grid.addWidget(self.lbl_depth_closure_section, 43, 0, 1, 2)
+        params_grid.addWidget(self.lbl_depth_closure_threshold, 44, 0)
+        params_grid.addWidget(self.spin_depth_closure_threshold, 44, 1)
+        params_grid.addWidget(self.lbl_depth_post_fill_hole, 45, 0)
+        params_grid.addWidget(self.spin_depth_post_fill_hole_pct, 45, 1)
+        params_grid.addWidget(self.lbl_depth_post_fill_line, 46, 0)
+        params_grid.addWidget(self.spin_depth_post_fill_line_pct, 46, 1)
+        params_grid.addWidget(self.lbl_depth_line_open_path, 47, 0)
+        params_grid.addWidget(self.spin_depth_line_open_path, 47, 1)
+        params_grid.addWidget(self.lbl_depth_residual_decay, 48, 0)
+        params_grid.addWidget(self.spin_depth_residual_decay, 48, 1)
         params_group.setLayout(params_grid)
+
+        self.redepo_lobe_group = QGroupBox("4 Redeposition Lobe")
+        redepo_lobe_layout = QVBoxLayout()
+        redepo_lobe_layout.setContentsMargins(8, 8, 8, 8)
+        redepo_lobe_layout.addWidget(self.redepo_lobe_editor)
+        self.redepo_lobe_group.setLayout(redepo_lobe_layout)
 
         action_group = QGroupBox("Run")
         action_layout = QVBoxLayout()
@@ -1289,6 +1718,36 @@ class TrenchDepoWindow(QMainWindow):
             self.spin_redepo_emit_power,
             self.lbl_redepo_distance_power,
             self.spin_redepo_distance_power,
+            self.redepo_lobe_group,
+        ]
+        self._depth_deposition_widgets = [
+            self.lbl_depth_depo_section,
+            self.chk_depth_deposition,
+            self.lbl_depth_feature_type,
+            self.cmb_depth_feature_type,
+            self.lbl_depth_feature_width,
+            self.spin_depth_feature_width,
+            self.lbl_depth_feature_depth,
+            self.spin_depth_feature_depth,
+            self.lbl_depth_feature_length,
+            self.spin_depth_feature_length,
+            self.lbl_depth_decay_k,
+            self.spin_depth_decay_k,
+            self.lbl_depth_decay_power,
+            self.spin_depth_decay_power,
+            self.lbl_depth_min_ratio,
+            self.spin_depth_min_ratio_pct,
+            self.lbl_depth_closure_section,
+            self.lbl_depth_closure_threshold,
+            self.spin_depth_closure_threshold,
+            self.lbl_depth_post_fill_hole,
+            self.spin_depth_post_fill_hole_pct,
+            self.lbl_depth_post_fill_line,
+            self.spin_depth_post_fill_line_pct,
+            self.lbl_depth_line_open_path,
+            self.spin_depth_line_open_path,
+            self.lbl_depth_residual_decay,
+            self.spin_depth_residual_decay,
         ]
 
         right_top_content = QWidget()
@@ -1317,6 +1776,7 @@ class TrenchDepoWindow(QMainWindow):
         right_layout.addWidget(right_top_scroll, 1)
         right_layout.addWidget(ion_map_group)
         right_layout.addWidget(gaussian_group)
+        right_layout.addWidget(self.redepo_lobe_group)
         right_panel.setLayout(right_layout)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -1348,6 +1808,7 @@ class TrenchDepoWindow(QMainWindow):
         self.chk_ion_transmission.toggled.connect(self.sync_etch_control_availability)
         self.chk_reflected_ion.toggled.connect(self.sync_etch_control_availability)
         self.chk_redepo.toggled.connect(self.sync_etch_control_availability)
+        self.chk_depth_deposition.toggled.connect(self.sync_etch_control_availability)
         self.spin_sputter_strength.valueChanged.connect(self.sync_sputter_curve_cap_from_spin)
         self.spin_sputter_peak_pct.valueChanged.connect(self.sync_sputter_curve_from_spins)
         self.spin_sputter_peak.valueChanged.connect(self.sync_sputter_curve_from_spins)
@@ -1358,6 +1819,10 @@ class TrenchDepoWindow(QMainWindow):
         self.spin_ion_floor.valueChanged.connect(self.sync_ion_transmission_editor_from_spins)
         self.spin_ion_curve_power.valueChanged.connect(self.sync_ion_transmission_editor_from_spins)
         self.ion_transmission_editor.parametersChanged.connect(self.apply_ion_transmission_editor_parameters)
+        self.spin_redepo_efficiency.valueChanged.connect(self.sync_redepo_lobe_from_spins)
+        self.spin_redepo_emit_power.valueChanged.connect(self.sync_redepo_lobe_from_spins)
+        self.spin_redepo_distance_power.valueChanged.connect(self.sync_redepo_lobe_from_spins)
+        self.redepo_lobe_editor.parametersChanged.connect(self.apply_redepo_lobe_parameters)
         self.slider_ion_aperture_shadow.valueChanged.connect(self.sync_ion_shadow_slider_labels)
         self.slider_ion_lateral_shadow.valueChanged.connect(self.sync_ion_shadow_slider_labels)
         self.slider_ion_edge_shadow.valueChanged.connect(self.sync_ion_shadow_slider_labels)
@@ -1447,6 +1912,9 @@ class TrenchDepoWindow(QMainWindow):
     def _active_emulator_supports_redeposition(self) -> bool:
         return self.active_emulator_number() == 4
 
+    def _active_emulator_supports_depth_deposition(self) -> bool:
+        return self.active_emulator_number() == 5
+
     def _populate_split_parameters(self) -> None:
         previous = self.cmb_split_parameter.currentData()
         options = [
@@ -1488,6 +1956,18 @@ class TrenchDepoWindow(QMainWindow):
                 ("Dist power", "redepo_distance_power"),
                 *options,
             ]
+        if self._active_emulator_supports_depth_deposition():
+            options = [
+                ("Depth decay", "deposition_depth_decay_k"),
+                ("Depth power", "deposition_depth_decay_power"),
+                ("Min depo ratio", "deposition_min_ratio"),
+                ("Closure threshold", "deposition_closure_threshold_a"),
+                ("Hole post-fill", "deposition_post_closure_fill_pct_hole"),
+                ("Line post-fill", "deposition_post_closure_fill_pct_line"),
+                ("Line open path", "deposition_line_open_path_factor"),
+                ("Residual decay", "deposition_residual_fill_decay_length_a"),
+                *options,
+            ]
 
         self.cmb_split_parameter.blockSignals(True)
         self.cmb_split_parameter.clear()
@@ -1511,7 +1991,7 @@ class TrenchDepoWindow(QMainWindow):
             elif number == 3:
                 self.lbl_etch_section.setText("Etch switch (1번 direct + 3번 reflected)")
             elif number == 4:
-                self.lbl_etch_section.setText("Etch switch (1번 direct + 4번 redepo)")
+                self.lbl_etch_section.setText("Etch switch (2번 source + 4번 redepo)")
             else:
                 self.lbl_etch_section.setText("Etch switch (1번 direct)")
             self.lbl_sputter_section.setText(
@@ -1522,12 +2002,15 @@ class TrenchDepoWindow(QMainWindow):
         supports_ion_transmission = self._active_emulator_supports_ion_transmission()
         supports_reflected_ion = self._active_emulator_supports_reflected_ion()
         supports_redeposition = self._active_emulator_supports_redeposition()
+        supports_depth_deposition = self._active_emulator_supports_depth_deposition()
         for widget in self._ion_transmission_widgets:
             widget.setVisible(supports_ion_transmission)
         for widget in self._reflected_ion_widgets:
             widget.setVisible(supports_reflected_ion)
         for widget in self._redeposition_widgets:
             widget.setVisible(supports_redeposition)
+        for widget in self._depth_deposition_widgets:
+            widget.setVisible(supports_depth_deposition)
         self.gaussian_group.setVisible(supports_sputter)
         self.btn_compare_gapsim_angle.setVisible(supports_sputter)
         self.btn_compare_gapsim_angle.setEnabled(supports_sputter)
@@ -1540,6 +2023,7 @@ class TrenchDepoWindow(QMainWindow):
         self.gaussian_group.setTitle("1 Direct Sputter Gaussian")
 
         if supports_sputter:
+            self.chk_depth_deposition.setChecked(False)
             if changed:
                 self.chk_sputter.setChecked(True)
                 self.chk_ion_transmission.setChecked(supports_ion_transmission)
@@ -1553,11 +2037,21 @@ class TrenchDepoWindow(QMainWindow):
                 self.edit_request_note.setPlaceholderText("요청사항 / redeposition 결합 가설과 비교 메모를 적으면 run 파일명과 요약에 같이 들어갑니다.")
             else:
                 self.edit_request_note.setPlaceholderText("요청사항 / etch 물리 메모를 적으면 run 파일명과 요약에 같이 들어갑니다.")
+        elif supports_depth_deposition:
+            self.chk_sputter.setChecked(False)
+            self.chk_ion_transmission.setChecked(False)
+            self.chk_reflected_ion.setChecked(False)
+            self.chk_redepo.setChecked(False)
+            if changed:
+                self.chk_depth_deposition.setChecked(True)
+                self.cmb_depth_feature_type.setCurrentIndex(0)
+            self.edit_request_note.setPlaceholderText("요청사항 / depth-dependent deposition과 closure 후 잔류 fill 메모를 적으면 run 파일명과 요약에 같이 들어갑니다.")
         else:
             self.chk_sputter.setChecked(False)
             self.chk_ion_transmission.setChecked(False)
             self.chk_reflected_ion.setChecked(False)
             self.chk_redepo.setChecked(False)
+            self.chk_depth_deposition.setChecked(False)
             if number == 0:
                 self.edit_request_note.setPlaceholderText("요청사항 / conformal depo 메모를 적으면 run 파일명과 요약에 같이 들어갑니다.")
             else:
@@ -1651,6 +2145,35 @@ class TrenchDepoWindow(QMainWindow):
         finally:
             self._syncing_ion_curve = False
 
+    def sync_redepo_lobe_from_spins(self, _value: float = 0.0) -> None:
+        if self._syncing_redepo_lobe:
+            return
+        self._syncing_redepo_lobe = True
+        try:
+            self.redepo_lobe_editor.set_parameters(
+                float(self.spin_redepo_efficiency.value()),
+                float(self.spin_redepo_emit_power.value()),
+                float(self.spin_redepo_distance_power.value()),
+            )
+        finally:
+            self._syncing_redepo_lobe = False
+
+    def apply_redepo_lobe_parameters(self, efficiency_pct: float, emit_power: float, distance_power: float) -> None:
+        if self._syncing_redepo_lobe:
+            return
+        self._syncing_redepo_lobe = True
+        try:
+            self.spin_redepo_efficiency.setValue(float(efficiency_pct))
+            self.spin_redepo_emit_power.setValue(float(emit_power))
+            self.spin_redepo_distance_power.setValue(float(distance_power))
+            self.redepo_lobe_editor.set_parameters(
+                float(self.spin_redepo_efficiency.value()),
+                float(self.spin_redepo_emit_power.value()),
+                float(self.spin_redepo_distance_power.value()),
+            )
+        finally:
+            self._syncing_redepo_lobe = False
+
     def sync_ion_shadow_slider_labels(self, _value: int = 0) -> None:
         self.lbl_ion_aperture_shadow_value.setText(f"{int(self.slider_ion_aperture_shadow.value())}%")
         self.lbl_ion_lateral_shadow_value.setText(f"{int(self.slider_ion_lateral_shadow.value())}%")
@@ -1661,6 +2184,7 @@ class TrenchDepoWindow(QMainWindow):
         supports_ion_transmission = self._active_emulator_supports_ion_transmission()
         supports_reflected_ion = self._active_emulator_supports_reflected_ion()
         supports_redeposition = self._active_emulator_supports_redeposition()
+        supports_depth_deposition = self._active_emulator_supports_depth_deposition()
         etch_enabled = bool(supports_sputter and self.chk_sputter.isChecked())
 
         direct_sputter_detail_widgets = [
@@ -1745,20 +2269,55 @@ class TrenchDepoWindow(QMainWindow):
             self.spin_redepo_emit_power,
             self.lbl_redepo_distance_power,
             self.spin_redepo_distance_power,
+            self.redepo_lobe_group,
         ]:
             widget.setEnabled(redepo_enabled)
+
+        self.chk_depth_deposition.setEnabled(supports_depth_deposition)
+        depth_enabled = bool(supports_depth_deposition and self.chk_depth_deposition.isChecked())
+        for widget in [
+            self.lbl_depth_depo_section,
+            self.lbl_depth_feature_type,
+            self.cmb_depth_feature_type,
+            self.lbl_depth_feature_width,
+            self.spin_depth_feature_width,
+            self.lbl_depth_feature_depth,
+            self.spin_depth_feature_depth,
+            self.lbl_depth_feature_length,
+            self.spin_depth_feature_length,
+            self.lbl_depth_decay_k,
+            self.spin_depth_decay_k,
+            self.lbl_depth_decay_power,
+            self.spin_depth_decay_power,
+            self.lbl_depth_min_ratio,
+            self.spin_depth_min_ratio_pct,
+            self.lbl_depth_closure_section,
+            self.lbl_depth_closure_threshold,
+            self.spin_depth_closure_threshold,
+            self.lbl_depth_post_fill_hole,
+            self.spin_depth_post_fill_hole_pct,
+            self.lbl_depth_post_fill_line,
+            self.spin_depth_post_fill_line_pct,
+            self.lbl_depth_line_open_path,
+            self.spin_depth_line_open_path,
+            self.lbl_depth_residual_decay,
+            self.spin_depth_residual_decay,
+        ]:
+            widget.setEnabled(depth_enabled)
 
     def reset_defaults(self) -> None:
         supports_sputter = self._active_emulator_supports_sputter()
         supports_ion_transmission = self._active_emulator_supports_ion_transmission()
         supports_reflected_ion = self._active_emulator_supports_reflected_ion()
         supports_redeposition = self._active_emulator_supports_redeposition()
+        supports_depth_deposition = self._active_emulator_supports_depth_deposition()
         self.spin_cycles.setValue(20)
         self.spin_angstrom_per_cycle.setValue(10.0)
         self.chk_sputter.setChecked(supports_sputter)
         self.chk_ion_transmission.setChecked(supports_ion_transmission)
         self.chk_reflected_ion.setChecked(supports_reflected_ion)
         self.chk_redepo.setChecked(supports_redeposition)
+        self.chk_depth_deposition.setChecked(supports_depth_deposition)
         self.spin_ion_start_depth.setValue(0.0)
         self.spin_ion_end_depth.setValue(100.0)
         self.spin_ion_decay_strength.setValue(100.0)
@@ -1772,10 +2331,22 @@ class TrenchDepoWindow(QMainWindow):
         self.spin_reflected_bowing.setValue(0.75)
         self.spin_reflected_microtrench.setValue(1.0)
         self.spin_reflected_range.setValue(1600.0)
-        self.cmb_redepo_source_model.setCurrentIndex(max(0, self.cmb_redepo_source_model.findData("model1")))
+        self.cmb_redepo_source_model.setCurrentIndex(0)
         self.spin_redepo_efficiency.setValue(25.0)
         self.spin_redepo_emit_power.setValue(1.0)
         self.spin_redepo_distance_power.setValue(1.0)
+        self.cmb_depth_feature_type.setCurrentIndex(0)
+        self.spin_depth_feature_width.setValue(240.0)
+        self.spin_depth_feature_depth.setValue(4700.0)
+        self.spin_depth_feature_length.setValue(0.0)
+        self.spin_depth_decay_k.setValue(0.8)
+        self.spin_depth_decay_power.setValue(1.2)
+        self.spin_depth_min_ratio_pct.setValue(3.0)
+        self.spin_depth_closure_threshold.setValue(8.0)
+        self.spin_depth_post_fill_hole_pct.setValue(3.0)
+        self.spin_depth_post_fill_line_pct.setValue(20.0)
+        self.spin_depth_line_open_path.setValue(1.0)
+        self.spin_depth_residual_decay.setValue(1175.0)
         self.spin_sputter_strength.setValue(4.0)
         self.spin_sputter_peak_pct.setValue(100.0)
         self.spin_sputter_peak.setValue(55.0)
@@ -1783,10 +2354,12 @@ class TrenchDepoWindow(QMainWindow):
         self.spin_sputter_smoothing.setValue(40.0)
         self._populate_split_parameters()
         self.sync_etch_control_availability()
-        if self.active_emulator_number() == 3:
+        if self.active_emulator_number() == 5:
+            self.edit_request_note.setPlainText("길쭉한 항아리형 구조에서 depth-dependent depo와 closure 후 잔류 fill 검증")
+        elif self.active_emulator_number() == 3:
             self.edit_request_note.setPlainText("1번 direct sputter 위에 reflected ion bowing/microtrenching 추가 검증")
         elif self.active_emulator_number() == 4:
-            self.edit_request_note.setPlainText("1번 direct sputter 위에 single-bounce LOS redeposition 결합 검증")
+            self.edit_request_note.setPlainText("2번 source 기반 GapSim-style binned lobe LOS redeposition 결합 검증")
         elif self.active_emulator_number() == 2:
             self.edit_request_note.setPlainText("계단식 넓은 트렌치에서 ion transmission shadowing 검증")
         elif self.active_emulator_number() == 1:
@@ -1837,6 +2410,21 @@ class TrenchDepoWindow(QMainWindow):
             values = (0.0, 50.0, 10.0, 1, 0.0, 100.0)
         elif parameter in {"redepo_emit_power", "redepo_distance_power"}:
             values = (0.5, 2.0, 0.5, 2, 0.0, 8.0)
+        elif parameter == "deposition_depth_decay_k":
+            values = (0.2, 1.4, 0.3, 2, 0.0, 20.0)
+        elif parameter == "deposition_depth_decay_power":
+            values = (0.8, 2.0, 0.4, 2, 0.05, 8.0)
+        elif parameter in {
+            "deposition_min_ratio",
+            "deposition_post_closure_fill_pct_hole",
+            "deposition_post_closure_fill_pct_line",
+            "deposition_line_open_path_factor",
+        }:
+            values = (0.0, 1.0, 0.25, 2, 0.0, 1.0)
+        elif parameter == "deposition_closure_threshold_a":
+            values = (0.0, 24.0, 6.0, 1, 0.0, 10000.0)
+        elif parameter == "deposition_residual_fill_decay_length_a":
+            values = (400.0, 2200.0, 600.0, 0, 1.0, 200000.0)
         else:
             values = (0.0, 16.0, 4.0, 3, 0.0, 100.0)
 
@@ -1858,11 +2446,15 @@ class TrenchDepoWindow(QMainWindow):
         supports_ion_transmission = self._active_emulator_supports_ion_transmission()
         supports_reflected_ion = self._active_emulator_supports_reflected_ion()
         supports_redeposition = self._active_emulator_supports_redeposition()
+        supports_depth_deposition = self._active_emulator_supports_depth_deposition()
         etch_enabled = bool(supports_sputter and self.chk_sputter.isChecked())
+        depth_feature_length = float(self.spin_depth_feature_length.value())
         return TrenchDepoConfig(
             points=(
                 ION_TRANSMISSION_STEPPED_TRENCH_POINTS
                 if active_emulator == 2
+                else BOWED_JAR_TRENCH_POINTS
+                if active_emulator == 5
                 else TrenchDepoConfig().points
             ),
             cycles=int(self.spin_cycles.value()),
@@ -1914,12 +2506,31 @@ class TrenchDepoWindow(QMainWindow):
             redepo_enabled=bool(
                 etch_enabled and supports_redeposition and self.chk_redepo.isChecked()
             ),
-            redepo_source_model=str(self.cmb_redepo_source_model.currentData() or "model1"),
+            redepo_source_model=str(self.cmb_redepo_source_model.currentData() or "model2"),
             redepo_efficiency_pct=(
                 float(self.spin_redepo_efficiency.value()) if supports_redeposition else 0.0
             ),
             redepo_emit_power=float(self.spin_redepo_emit_power.value()),
             redepo_distance_power=float(self.spin_redepo_distance_power.value()),
+            deposition_depth_enabled=bool(
+                supports_depth_deposition and self.chk_depth_deposition.isChecked()
+            ),
+            deposition_feature_type=str(self.cmb_depth_feature_type.currentData() or "hole"),
+            deposition_feature_width_a=float(self.spin_depth_feature_width.value()),
+            deposition_feature_depth_a=float(self.spin_depth_feature_depth.value()),
+            deposition_feature_length_a=None if depth_feature_length <= 0.0 else depth_feature_length,
+            deposition_attenuation_model="exponential",
+            deposition_depth_decay_k=float(self.spin_depth_decay_k.value()),
+            deposition_depth_decay_power=float(self.spin_depth_decay_power.value()),
+            deposition_min_ratio=float(self.spin_depth_min_ratio_pct.value()) / 100.0,
+            deposition_use_equivalent_ar=True,
+            deposition_closure_threshold_a=float(self.spin_depth_closure_threshold.value()),
+            deposition_post_closure_fill_pct_hole=float(self.spin_depth_post_fill_hole_pct.value()) / 100.0,
+            deposition_post_closure_fill_pct_line=float(self.spin_depth_post_fill_line_pct.value()) / 100.0,
+            deposition_line_open_path_factor=float(self.spin_depth_line_open_path.value()),
+            deposition_residual_fill_decay_length_a=float(self.spin_depth_residual_decay.value()),
+            deposition_residual_fill_distribution="exponential_from_closure",
+            deposition_conserve_volume=True,
         )
 
     def current_etch_config(self) -> TrenchDepoConfig:
@@ -2008,6 +2619,32 @@ class TrenchDepoWindow(QMainWindow):
             float(config.redepo_distance_power),
             int(config.redepo_neighbor_exclusion),
             float(config.redepo_max_distance_a),
+            bool(config.deposition_depth_enabled),
+            str(config.deposition_feature_type),
+            float(config.deposition_feature_width_a),
+            float(config.deposition_feature_depth_a),
+            (
+                None
+                if config.deposition_feature_length_a is None
+                else float(config.deposition_feature_length_a)
+            ),
+            str(config.deposition_attenuation_model),
+            float(config.deposition_depth_decay_k),
+            float(config.deposition_depth_decay_power),
+            float(config.deposition_min_ratio),
+            bool(config.deposition_use_equivalent_ar),
+            float(config.deposition_closure_threshold_a),
+            float(config.deposition_post_closure_fill_pct_hole),
+            float(config.deposition_post_closure_fill_pct_line),
+            float(config.deposition_line_open_path_factor),
+            float(config.deposition_residual_fill_decay_length_a),
+            str(config.deposition_residual_fill_distribution),
+            (
+                None
+                if config.deposition_max_depo_per_cell_a is None
+                else float(config.deposition_max_depo_per_cell_a)
+            ),
+            bool(config.deposition_conserve_volume),
         )
 
     def run_emulation(
@@ -2047,11 +2684,13 @@ class TrenchDepoWindow(QMainWindow):
 
         self._result = result
         self._last_run_dir = run_dir.resolve() if run_dir is not None else None
+        solid_playback = _use_solid_playback(result)
         self.view.set_frames(
             result.frame_profiles,
             voids=result.frame_voids,
             void_mode="current",
-            dynamic_substrate_fill=_use_solid_playback(result),
+            dynamic_substrate_fill=solid_playback,
+            history_mode="mixed_etch" if solid_playback else "film",
         )
         max_idx = max(0, len(result.frame_profiles) - 1)
         self.slider_frame.blockSignals(True)
@@ -2302,12 +2941,16 @@ class TrenchDepoWindow(QMainWindow):
         replay_path = Path(path).resolve()
         config, result, note = load_trench_depo_run(replay_path)
         replay_emulator = (
-            4
-            if bool(config.redepo_enabled)
+            5
+            if bool(config.deposition_depth_enabled)
             else (
-                3
-                if bool(config.reflected_ion_enabled)
-                else (2 if bool(config.ion_transmission_enabled) else (1 if bool(config.sputter_enabled) else 0))
+                4
+                if bool(config.redepo_enabled)
+                else (
+                    3
+                    if bool(config.reflected_ion_enabled)
+                    else (2 if bool(config.ion_transmission_enabled) else (1 if bool(config.sputter_enabled) else 0))
+                )
             )
         )
         self.set_active_emulator_number(replay_emulator, run=False)
@@ -2335,6 +2978,22 @@ class TrenchDepoWindow(QMainWindow):
         self.spin_redepo_efficiency.setValue(float(config.redepo_efficiency_pct))
         self.spin_redepo_emit_power.setValue(float(config.redepo_emit_power))
         self.spin_redepo_distance_power.setValue(float(config.redepo_distance_power))
+        self.chk_depth_deposition.setChecked(bool(config.deposition_depth_enabled))
+        feature_index = self.cmb_depth_feature_type.findData(str(config.deposition_feature_type))
+        self.cmb_depth_feature_type.setCurrentIndex(feature_index if feature_index >= 0 else 0)
+        self.spin_depth_feature_width.setValue(float(config.deposition_feature_width_a))
+        self.spin_depth_feature_depth.setValue(float(config.deposition_feature_depth_a))
+        self.spin_depth_feature_length.setValue(
+            0.0 if config.deposition_feature_length_a is None else float(config.deposition_feature_length_a)
+        )
+        self.spin_depth_decay_k.setValue(float(config.deposition_depth_decay_k))
+        self.spin_depth_decay_power.setValue(float(config.deposition_depth_decay_power))
+        self.spin_depth_min_ratio_pct.setValue(float(config.deposition_min_ratio) * 100.0)
+        self.spin_depth_closure_threshold.setValue(float(config.deposition_closure_threshold_a))
+        self.spin_depth_post_fill_hole_pct.setValue(float(config.deposition_post_closure_fill_pct_hole) * 100.0)
+        self.spin_depth_post_fill_line_pct.setValue(float(config.deposition_post_closure_fill_pct_line) * 100.0)
+        self.spin_depth_line_open_path.setValue(float(config.deposition_line_open_path_factor))
+        self.spin_depth_residual_decay.setValue(float(config.deposition_residual_fill_decay_length_a))
         self.spin_sputter_strength.setValue(float(config.sputter_strength_a_per_cycle))
         self.spin_sputter_peak_pct.setValue(float(config.sputter_peak_pct))
         self.spin_sputter_peak.setValue(float(config.sputter_peak_angle_deg))
@@ -2344,11 +3003,13 @@ class TrenchDepoWindow(QMainWindow):
         self.edit_request_note.setPlainText(note)
         self._result = result
         self._last_run_dir = replay_path.parent
+        solid_playback = _use_solid_playback(result)
         self.view.set_frames(
             result.frame_profiles,
             voids=result.frame_voids,
             void_mode="current",
-            dynamic_substrate_fill=_use_solid_playback(result),
+            dynamic_substrate_fill=solid_playback,
+            history_mode="mixed_etch" if solid_playback else "film",
         )
         max_idx = max(0, len(result.frame_profiles) - 1)
         self.slider_frame.blockSignals(True)

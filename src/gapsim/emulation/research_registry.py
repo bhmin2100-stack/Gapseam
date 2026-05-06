@@ -17,7 +17,7 @@ DEFAULT_RESEARCH_ROOT = _default_research_root()
 PRESENTATIONS_DIRNAME = "presentations"
 RESEARCH_MANIFEST_FILENAME = "research_manifest.json"
 MAX_EMULATOR_NUMBER = 10
-DEFAULT_CREATED_EMULATOR_NUMBERS = (0, 1, 2, 3, 4)
+DEFAULT_CREATED_EMULATOR_NUMBERS = (0, 1, 2, 3, 4, 5)
 
 
 @dataclass(frozen=True)
@@ -79,7 +79,14 @@ EMULATOR_RESEARCH_SLOTS = (
         status_ko="진행중: 1번 direct sputter 출력 위에 single-bounce LOS redeposition 결합",
         module="gapsim.emulation.trench_depo",
     ),
-    EmulatorResearchSlot(5, "unassigned", "연구슬롯_미정", "Unassigned Research Slot", "대기중"),
+    EmulatorResearchSlot(
+        5,
+        "depth_dependent_depo_fill",
+        "깊이감쇠_데포_잔류충전",
+        "Depth-Dependent Deposition Fill",
+        "진행중: etch/redepo 없이 depth-dependent deposition과 closure 후 내부 잔류 fill 검증",
+        module="gapsim.emulation.trench_depo",
+    ),
     EmulatorResearchSlot(6, "unassigned", "연구슬롯_미정", "Unassigned Research Slot", "대기중"),
     EmulatorResearchSlot(7, "unassigned", "연구슬롯_미정", "Unassigned Research Slot", "대기중"),
     EmulatorResearchSlot(8, "unassigned", "연구슬롯_미정", "Unassigned Research Slot", "대기중"),

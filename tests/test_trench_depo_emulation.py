@@ -7,13 +7,18 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from gapsim.engine.deposition_pipeline import equal_arc_resample
 from gapsim.emulation.trench_depo import (
+    BOWED_JAR_TRENCH_POINTS,
     DEFAULT_TRENCH_POINTS,
     ION_TRANSMISSION_STEPPED_TRENCH_POINTS,
     TrenchDepoConfig,
     TrenchDepoResult,
     TrenchSweepResult,
     build_trench_depo_sweep_configs,
+    compute_depth_deposition_factors,
+    compute_depth_deposition_ratio,
+    compute_effective_aspect_ratio,
     compute_ion_transmission_factors,
     direct_sputter_angle_response,
     direct_sputter_incident_angles_deg,
@@ -59,6 +64,14 @@ class TrenchDepoEmulationTest(unittest.TestCase):
 
     def y_near(self, profile, target_x: float) -> float:
         return min(profile, key=lambda p: abs(float(p[0]) - target_x))[1]
+
+    def polygon_area(self, polygon) -> float:
+        if len(polygon) < 3:
+            return 0.0
+        area2 = 0.0
+        for (x1, y1), (x2, y2) in zip(polygon, polygon[1:] + polygon[:1]):
+            area2 += float(x1) * float(y2) - float(x2) * float(y1)
+        return abs(area2) * 0.5
 
     def test_default_config_uses_10a_per_cycle_and_sample_trench(self) -> None:
         config = TrenchDepoConfig()
@@ -318,6 +331,77 @@ class TrenchDepoEmulationTest(unittest.TestCase):
 
         self.assertAlmostEqual(self.y_near(result.final_profile, 0.0), -4000.0, delta=0.5)
 
+    def test_model4_redeposition_reflection_lobe_can_target_bottom(self) -> None:
+        points = equal_arc_resample(DEFAULT_TRENCH_POINTS, 25.0)
+        normals = vertex_air_normals(points)
+        surface_y = max(y for _x, y in points)
+        bottom_y = min(y for _x, y in points)
+        depth_span = surface_y - bottom_y
+        source_candidates = [
+            idx
+            for idx, (x, y) in enumerate(points)
+            if x < 0.0 and 0.55 <= ((surface_y - y) / depth_span) <= 0.70
+        ]
+        source_idx = max(source_candidates, key=lambda idx: abs(normals[idx][0]))
+        etch = [0.0 for _ in points]
+        etch[source_idx] = 10.0
+
+        redepo = compute_redeposition(
+            points,
+            normals,
+            etch,
+            Model4RedepositionParams(
+                redepo_efficiency=1.0,
+                distance_power=0.0,
+                max_redepo_distance=0.0,
+                lateral_spread_a=0.0,
+                max_redepo_to_etch_ratio=0.0,
+            ),
+        )
+
+        bottom_redepo = sum(
+            redepo.dh_redepo[idx]
+            for idx, (_x, y) in enumerate(points)
+            if abs(y - bottom_y) < 1e-6
+        )
+
+        self.assertEqual(redepo.debug_summary["transport_model"], "gapsim_binned_lobe_los")
+        self.assertGreater(bottom_redepo, 0.0)
+        self.assertGreater(redepo.debug_summary["active_source_count"], 0)
+
+    def test_model4_redeposition_preserves_symmetric_source_field(self) -> None:
+        points = equal_arc_resample(DEFAULT_TRENCH_POINTS, 40.0)
+        normals = vertex_air_normals(points)
+        etch = [
+            5.0 if abs(nx) > 0.2 and y < -500.0 else 0.0
+            for (x, y), (nx, _ny) in zip(points, normals)
+        ]
+
+        redepo = compute_redeposition(
+            points,
+            normals,
+            etch,
+            Model4RedepositionParams(redepo_efficiency=0.5),
+        )
+
+        mirrored_pairs = []
+        for idx, (x, y) in enumerate(points):
+            if x >= -1e-6:
+                continue
+            mirror_idx = min(
+                range(len(points)),
+                key=lambda j: abs(points[j][0] + x) + abs(points[j][1] - y),
+            )
+            if abs(points[mirror_idx][0] + x) < 1e-6 and abs(points[mirror_idx][1] - y) < 1e-6:
+                mirrored_pairs.append((idx, mirror_idx))
+
+        self.assertTrue(mirrored_pairs)
+        self.assertTrue(redepo.debug_summary["symmetry_preserved"])
+        self.assertLessEqual(
+            max(abs(redepo.dh_redepo[i] - redepo.dh_redepo[j]) for i, j in mirrored_pairs),
+            1e-9,
+        )
+
     @unittest.skipIf(pyclipper is None, "pyclipper is not installed")
     def test_reflected_ion_off_and_zero_strength_match_emulator_one(self) -> None:
         base = TrenchDepoConfig(
@@ -425,7 +509,7 @@ class TrenchDepoEmulationTest(unittest.TestCase):
         self.assertAlmostEqual(result.dh_redepo[2], result.dh_redepo[5], places=9)
 
     @unittest.skipIf(pyclipper is None, "pyclipper is not installed")
-    def test_model4_zero_efficiency_matches_model_one_wrapper_source(self) -> None:
+    def test_model4_zero_efficiency_matches_direct_sputter(self) -> None:
         base = TrenchDepoConfig(
             cycles=2,
             angstrom_per_cycle=0.0,
@@ -440,7 +524,7 @@ class TrenchDepoEmulationTest(unittest.TestCase):
                 **{
                     **base.__dict__,
                     "redepo_enabled": True,
-                    "redepo_source_model": "model1",
+                    "redepo_source_model": "model2",
                     "redepo_efficiency_pct": 0.0,
                 }
             )
@@ -448,6 +532,7 @@ class TrenchDepoEmulationTest(unittest.TestCase):
 
         self.assertProfilesAlmostEqual(model_one.frame_profiles, model_four_zero.frame_profiles)
         self.assertFalse(model_four_zero.meta["redepo_active"])
+        self.assertEqual(model_four_zero.meta["redepo_source_model"], "model2")
         self.assertEqual(model_four_zero.meta["redepo_total_mass_last"], 0.0)
 
     @unittest.skipIf(pyclipper is None, "pyclipper is not installed")
@@ -460,7 +545,7 @@ class TrenchDepoEmulationTest(unittest.TestCase):
                 sputter_strength_a_per_cycle=8.0,
                 sputter_smoothing_a=40.0,
                 redepo_enabled=True,
-                redepo_source_model="model1",
+                redepo_source_model="model2",
                 redepo_efficiency_pct=25.0,
             )
         )
@@ -470,12 +555,173 @@ class TrenchDepoEmulationTest(unittest.TestCase):
         summary = result.meta["redepo_debug_summary_last"]["redepo"]
 
         self.assertTrue(result.meta["redepo_active"])
-        self.assertEqual(result.meta["redepo_model"], "single_bounce_normal_lobe_los")
+        self.assertEqual(result.meta["redepo_model"], "gapsim_binned_lobe_los")
         self.assertGreater(removed, 0.0)
         self.assertGreater(redepo, 0.0)
         self.assertLessEqual(redepo, 0.25 * removed + 1e-6)
         self.assertGreater(summary["active_source_count"], 0)
         self.assertGreater(summary["active_target_count"], 0)
+
+    @unittest.skipIf(pyclipper is None, "pyclipper is not installed")
+    def test_model4_legacy_model_one_source_is_coerced_to_model_two(self) -> None:
+        base = dict(
+            cycles=1,
+            angstrom_per_cycle=0.0,
+            sputter_enabled=True,
+            sputter_strength_a_per_cycle=8.0,
+            sputter_smoothing_a=40.0,
+            redepo_enabled=True,
+            redepo_efficiency_pct=25.0,
+        )
+        legacy = run_trench_depo(TrenchDepoConfig(**base, redepo_source_model="model1"))
+        current = run_trench_depo(TrenchDepoConfig(**base, redepo_source_model="model2"))
+
+        self.assertEqual(legacy.meta["redepo_source_model"], "model2")
+        self.assertProfilesAlmostEqual(legacy.frame_profiles, current.frame_profiles)
+
+    @unittest.skipIf(pyclipper is None, "pyclipper is not installed")
+    def test_model4_redeposition_does_not_refill_sealed_void_after_pinch_off(self) -> None:
+        points = [
+            (-200.0, 0.0),
+            (-40.0, 0.0),
+            (-25.0, -120.0),
+            (-80.0, -260.0),
+            (-80.0, -420.0),
+            (80.0, -420.0),
+            (80.0, -260.0),
+            (25.0, -120.0),
+            (40.0, 0.0),
+            (200.0, 0.0),
+        ]
+
+        result = run_trench_depo(
+            TrenchDepoConfig(
+                points=points,
+                cycles=60,
+                angstrom_per_cycle=3.0,
+                reparam_ds_a=8.0,
+                sputter_enabled=True,
+                sputter_strength_a_per_cycle=1.0,
+                redepo_enabled=True,
+                redepo_efficiency_pct=25.0,
+            )
+        )
+
+        void_areas = [
+            sum(self.polygon_area(poly) for poly in frame_voids)
+            for frame_voids in result.frame_voids
+        ]
+        first_void = next((idx for idx, area in enumerate(void_areas) if area > 0.0), None)
+
+        self.assertIsNotNone(first_void)
+        if first_void is not None:
+            initial_area = void_areas[first_void]
+            self.assertGreater(initial_area, 0.0)
+            self.assertTrue(all(area > 0.0 for area in void_areas[first_void:]))
+            self.assertGreaterEqual(min(void_areas[first_void:]), initial_area * 0.99)
+
+    def test_depth_deposition_factor_decreases_with_effective_ar(self) -> None:
+        top = compute_depth_deposition_ratio(
+            compute_effective_aspect_ratio(0.0, "hole", 200.0),
+            depth_decay_k=0.8,
+            depth_decay_power=1.2,
+            min_depo_ratio=0.03,
+        )
+        middle = compute_depth_deposition_ratio(
+            compute_effective_aspect_ratio(1000.0, "hole", 200.0),
+            depth_decay_k=0.8,
+            depth_decay_power=1.2,
+            min_depo_ratio=0.03,
+        )
+        bottom = compute_depth_deposition_ratio(
+            compute_effective_aspect_ratio(3000.0, "hole", 200.0),
+            depth_decay_k=0.8,
+            depth_decay_power=1.2,
+            min_depo_ratio=0.03,
+        )
+
+        self.assertAlmostEqual(top, 1.0, places=9)
+        self.assertGreater(top, middle)
+        self.assertGreater(middle, bottom)
+        self.assertGreaterEqual(bottom, 0.03)
+
+    def test_depth_deposition_line_has_lower_ear_than_hole(self) -> None:
+        hole_ear = compute_effective_aspect_ratio(2000.0, "hole", 250.0)
+        line_ear = compute_effective_aspect_ratio(2000.0, "line", 250.0)
+        hole_factor = compute_depth_deposition_factors(
+            [(0.0, 0.0), (0.0, -2000.0)],
+            feature_type="hole",
+            feature_width_a=250.0,
+        )[-1]
+        line_factor = compute_depth_deposition_factors(
+            [(0.0, 0.0), (0.0, -2000.0)],
+            feature_type="line",
+            feature_width_a=250.0,
+        )[-1]
+
+        self.assertLess(line_ear, hole_ear)
+        self.assertGreaterEqual(line_factor, hole_factor)
+
+    @unittest.skipIf(pyclipper is None, "pyclipper is not installed")
+    def test_depth_deposition_closure_fill_budget_separates_hole_and_line(self) -> None:
+        base = dict(
+            points=BOWED_JAR_TRENCH_POINTS,
+            cycles=80,
+            angstrom_per_cycle=10.0,
+            reparam_ds_a=8.0,
+            deposition_depth_enabled=True,
+            deposition_feature_width_a=240.0,
+            deposition_feature_depth_a=4700.0,
+        )
+
+        hole_sealed = run_trench_depo(
+            TrenchDepoConfig(
+                **base,
+                deposition_feature_type="hole",
+                deposition_post_closure_fill_pct_hole=0.0,
+            )
+        )
+        hole_fill = run_trench_depo(
+            TrenchDepoConfig(
+                **base,
+                deposition_feature_type="hole",
+                deposition_post_closure_fill_pct_hole=0.03,
+            )
+        )
+        line_fill = run_trench_depo(
+            TrenchDepoConfig(
+                **base,
+                deposition_feature_type="line",
+                deposition_post_closure_fill_pct_line=0.20,
+                deposition_line_open_path_factor=1.0,
+            )
+        )
+        line_closed = run_trench_depo(
+            TrenchDepoConfig(
+                **base,
+                deposition_feature_type="line",
+                deposition_post_closure_fill_pct_line=0.20,
+                deposition_line_open_path_factor=0.0,
+            )
+        )
+
+        hole_sealed_area = sum(self.polygon_area(poly) for poly in hole_sealed.frame_voids[-1])
+        hole_fill_area = sum(self.polygon_area(poly) for poly in hole_fill.frame_voids[-1])
+        line_fill_area = sum(self.polygon_area(poly) for poly in line_fill.frame_voids[-1])
+        line_closed_area = sum(self.polygon_area(poly) for poly in line_closed.frame_voids[-1])
+
+        self.assertTrue(hole_sealed.meta["deposition_depth_active"])
+        self.assertFalse(hole_sealed.meta["sputter_active"])
+        self.assertFalse(hole_sealed.meta["redepo_active"])
+        self.assertTrue(hole_sealed.meta["deposition_closure_detected"])
+        self.assertEqual(hole_sealed.meta["deposition_post_closure_allowed_fill_area_a2"], 0.0)
+        self.assertLess(hole_fill_area, hole_sealed_area)
+        self.assertLess(line_fill_area, line_closed_area)
+        self.assertLess(line_fill_area, hole_fill_area)
+        self.assertLessEqual(
+            line_fill.meta["deposition_post_closure_budget_used_area_a2"],
+            line_fill.meta["deposition_post_closure_allowed_fill_area_a2"] + 1e-6,
+        )
 
     def test_ion_transmission_factor_decreases_in_stepped_trench_depth(self) -> None:
         factors = compute_ion_transmission_factors(ION_TRANSMISSION_STEPPED_TRENCH_POINTS)

@@ -8,7 +8,8 @@
 
 ## 기본 UI
 
-- 4번 에뮬레이터에서 `Source = Model1 / Model2` 선택 가능
+- 초기 구현 당시에는 4번 에뮬레이터에서 `Source = Model1 / Model2` 선택 가능
+- 2026-05-06 이후 현재 구현은 `Model2 ion source`만 사용
 - `Redepo %`, `Emit power`, `Dist power` 조절 가능
 - 비교창은 GapSim이 아니라 Emulator 01 baseline과 비교
 

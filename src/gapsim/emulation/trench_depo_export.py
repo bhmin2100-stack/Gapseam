@@ -121,6 +121,32 @@ def result_to_payload(
             "redepo_distance_power": float(config.redepo_distance_power),
             "redepo_neighbor_exclusion": int(config.redepo_neighbor_exclusion),
             "redepo_max_distance_a": float(config.redepo_max_distance_a),
+            "deposition_depth_enabled": bool(config.deposition_depth_enabled),
+            "deposition_feature_type": str(config.deposition_feature_type),
+            "deposition_feature_width_a": float(config.deposition_feature_width_a),
+            "deposition_feature_depth_a": float(config.deposition_feature_depth_a),
+            "deposition_feature_length_a": (
+                None
+                if config.deposition_feature_length_a is None
+                else float(config.deposition_feature_length_a)
+            ),
+            "deposition_attenuation_model": str(config.deposition_attenuation_model),
+            "deposition_depth_decay_k": float(config.deposition_depth_decay_k),
+            "deposition_depth_decay_power": float(config.deposition_depth_decay_power),
+            "deposition_min_ratio": float(config.deposition_min_ratio),
+            "deposition_use_equivalent_ar": bool(config.deposition_use_equivalent_ar),
+            "deposition_closure_threshold_a": float(config.deposition_closure_threshold_a),
+            "deposition_post_closure_fill_pct_hole": float(config.deposition_post_closure_fill_pct_hole),
+            "deposition_post_closure_fill_pct_line": float(config.deposition_post_closure_fill_pct_line),
+            "deposition_line_open_path_factor": float(config.deposition_line_open_path_factor),
+            "deposition_residual_fill_decay_length_a": float(config.deposition_residual_fill_decay_length_a),
+            "deposition_residual_fill_distribution": str(config.deposition_residual_fill_distribution),
+            "deposition_max_depo_per_cell_a": (
+                None
+                if config.deposition_max_depo_per_cell_a is None
+                else float(config.deposition_max_depo_per_cell_a)
+            ),
+            "deposition_conserve_volume": bool(config.deposition_conserve_volume),
         },
         "result": {
             "frame_steps": [int(v) for v in result.frame_steps],
@@ -239,12 +265,46 @@ def payload_to_trench_run(payload: Dict[str, Any]) -> Tuple[TrenchDepoConfig, Tr
         reflected_ion_microtrench_weight=float(config_raw.get("reflected_ion_microtrench_weight", 1.0)),
         reflected_ion_range_a=float(config_raw.get("reflected_ion_range_a", 1600.0)),
         redepo_enabled=bool(config_raw.get("redepo_enabled", False)),
-        redepo_source_model=str(config_raw.get("redepo_source_model", "model1")),
+        redepo_source_model=str(config_raw.get("redepo_source_model", "model2")),
         redepo_efficiency_pct=float(config_raw.get("redepo_efficiency_pct", 25.0)),
         redepo_emit_power=float(config_raw.get("redepo_emit_power", 1.0)),
         redepo_distance_power=float(config_raw.get("redepo_distance_power", 1.0)),
         redepo_neighbor_exclusion=int(config_raw.get("redepo_neighbor_exclusion", 2)),
         redepo_max_distance_a=float(config_raw.get("redepo_max_distance_a", 1800.0)),
+        deposition_depth_enabled=bool(config_raw.get("deposition_depth_enabled", False)),
+        deposition_feature_type=str(config_raw.get("deposition_feature_type", "hole")),
+        deposition_feature_width_a=float(config_raw.get("deposition_feature_width_a", 240.0)),
+        deposition_feature_depth_a=float(config_raw.get("deposition_feature_depth_a", 4700.0)),
+        deposition_feature_length_a=(
+            None
+            if config_raw.get("deposition_feature_length_a", None) is None
+            else float(config_raw.get("deposition_feature_length_a"))
+        ),
+        deposition_attenuation_model=str(config_raw.get("deposition_attenuation_model", "exponential")),
+        deposition_depth_decay_k=float(config_raw.get("deposition_depth_decay_k", 0.8)),
+        deposition_depth_decay_power=float(config_raw.get("deposition_depth_decay_power", 1.2)),
+        deposition_min_ratio=float(config_raw.get("deposition_min_ratio", 0.03)),
+        deposition_use_equivalent_ar=bool(config_raw.get("deposition_use_equivalent_ar", True)),
+        deposition_closure_threshold_a=float(config_raw.get("deposition_closure_threshold_a", 8.0)),
+        deposition_post_closure_fill_pct_hole=float(
+            config_raw.get("deposition_post_closure_fill_pct_hole", 0.03)
+        ),
+        deposition_post_closure_fill_pct_line=float(
+            config_raw.get("deposition_post_closure_fill_pct_line", 0.20)
+        ),
+        deposition_line_open_path_factor=float(config_raw.get("deposition_line_open_path_factor", 1.0)),
+        deposition_residual_fill_decay_length_a=float(
+            config_raw.get("deposition_residual_fill_decay_length_a", 1175.0)
+        ),
+        deposition_residual_fill_distribution=str(
+            config_raw.get("deposition_residual_fill_distribution", "exponential_from_closure")
+        ),
+        deposition_max_depo_per_cell_a=(
+            None
+            if config_raw.get("deposition_max_depo_per_cell_a", None) is None
+            else float(config_raw.get("deposition_max_depo_per_cell_a"))
+        ),
+        deposition_conserve_volume=bool(config_raw.get("deposition_conserve_volume", True)),
     )
     result = TrenchDepoResult(
         frame_steps=frame_steps,
@@ -309,6 +369,12 @@ def _gif_panel_lines(
         f"redepo efficiency: {float(config.redepo_efficiency_pct):g} %",
         f"redepo emit power: {float(config.redepo_emit_power):g}",
         f"redepo distance power: {float(config.redepo_distance_power):g}",
+        f"depth depo: {'ON' if config.deposition_depth_enabled else 'OFF'}",
+        f"feature type: {config.deposition_feature_type}",
+        f"depth decay K: {float(config.deposition_depth_decay_k):g}",
+        f"min depo ratio: {float(config.deposition_min_ratio) * 100.0:g} %",
+        f"hole post-fill: {float(config.deposition_post_closure_fill_pct_hole) * 100.0:g} %",
+        f"line post-fill: {float(config.deposition_post_closure_fill_pct_line) * 100.0:g} %",
         "",
         "[요청사항]",
         note,
@@ -390,6 +456,7 @@ def _render_gif_frames(
         voids=result.frame_voids,
         void_mode="current",
         dynamic_substrate_fill=bool(result.meta.get("sputter_active")),
+        history_mode="mixed_etch" if bool(result.meta.get("sputter_active")) else "film",
     )
     view.setFont(QFont(font_family, 13))
     host_layout.addWidget(view, 1)
@@ -541,6 +608,14 @@ def export_trench_depo_run(
         f"bowing weight: {float(config.reflected_ion_bowing_weight):g}",
         f"microtrench weight: {float(config.reflected_ion_microtrench_weight):g}",
         f"reflection range: {float(config.reflected_ion_range_a):g} A",
+        f"depth depo: {'ON' if config.deposition_depth_enabled else 'OFF'}",
+        f"feature type: {config.deposition_feature_type}",
+        f"feature width/depth: {float(config.deposition_feature_width_a):g} / {float(config.deposition_feature_depth_a):g} A",
+        f"depth decay K/power: {float(config.deposition_depth_decay_k):g} / {float(config.deposition_depth_decay_power):g}",
+        f"min depo ratio: {float(config.deposition_min_ratio) * 100.0:g} %",
+        f"closure threshold: {float(config.deposition_closure_threshold_a):g} A",
+        f"hole/line post-fill: {float(config.deposition_post_closure_fill_pct_hole) * 100.0:g} / {float(config.deposition_post_closure_fill_pct_line) * 100.0:g} %",
+        f"line open path: {float(config.deposition_line_open_path_factor):g}",
         f"초기 점 수: {int(result.meta.get('initial_points', 0))}",
         f"최종 점 수: {int(result.meta.get('final_points', 0))}",
         "",

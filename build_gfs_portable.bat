@@ -1,33 +1,52 @@
 @echo off
-setlocal EnableExtensions
+chcp 65001 >nul
+setlocal EnableExtensions DisableDelayedExpansion
 
 cd /d "%~dp0"
 
 if not exist ".venv\Scripts\python.exe" (
-  echo [1/5] Creating local Python virtual environment...
-  python -m venv .venv
+  echo [1/6] Creating local Python virtual environment...
+  where py >nul 2>nul
+  if not errorlevel 1 (
+    py -3 -m venv ".venv"
+  ) else (
+    where python >nul 2>nul
+    if errorlevel 1 (
+      echo Failed to find Python. Install Python 3.10+ and retry.
+      exit /b 1
+    )
+    python -m venv ".venv"
+  )
   if errorlevel 1 (
     echo Failed to create .venv. Install Python 3.10+ and retry.
     exit /b 1
   )
 ) else (
-  echo [1/5] Reusing local Python virtual environment...
+  echo [1/6] Reusing local Python virtual environment...
 )
 
-echo [2/5] Installing build dependencies...
-".venv\Scripts\python.exe" -m pip install --upgrade pip
+set "PYTHON_EXE=%cd%\.venv\Scripts\python.exe"
+
+"%PYTHON_EXE%" -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)"
+if errorlevel 1 (
+  echo Python 3.10 or newer is required to build GFS.
+  exit /b 1
+)
+
+echo [2/6] Installing build dependencies...
+"%PYTHON_EXE%" -m pip install --upgrade pip
 if errorlevel 1 exit /b 1
-".venv\Scripts\python.exe" -m pip install -e . pyinstaller
+"%PYTHON_EXE%" -m pip install -e . pyinstaller
 if errorlevel 1 exit /b 1
 
-echo [3/5] Cleaning old build artifacts...
+echo [3/6] Cleaning old build artifacts...
 if exist "build\GapSim" rmdir /s /q "build\GapSim"
 if exist "build\GFS" rmdir /s /q "build\GFS"
 if exist "dist\GFS" rmdir /s /q "dist\GFS"
 del /q "dist\GFS_portable_*.zip" >nul 2>nul
 
-echo [4/5] Building GFS and mini emulator with PyInstaller...
-".venv\Scripts\python.exe" -m PyInstaller --noconfirm "GapSim.spec"
+echo [4/6] Building GFS and mini emulator with PyInstaller...
+"%PYTHON_EXE%" -m PyInstaller --noconfirm "GapSim.spec"
 if errorlevel 1 exit /b 1
 
 if not exist "dist\GFS\GFS.exe" (
@@ -40,27 +59,28 @@ if not exist "dist\GFS\GFS_Emulator.exe" (
   exit /b 1
 )
 
-if exist "presets" (
-  if exist "dist\GFS\presets" rmdir /s /q "dist\GFS\presets"
-  xcopy "presets" "dist\GFS\presets" /E /I /Y >nul
-)
+echo [5/6] Copying runtime data...
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+  "$ErrorActionPreference = 'Stop';" ^
+  "$root = (Get-Location).Path;" ^
+  "$dest = Join-Path $root 'dist\GFS';" ^
+  "foreach ($name in @('presets', 'sample', 'emulator_research')) {" ^
+  "  $source = Join-Path $root $name;" ^
+  "  if (Test-Path -LiteralPath $source) {" ^
+  "    $target = Join-Path $dest $name;" ^
+  "    if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Recurse -Force }" ^
+  "    Copy-Item -LiteralPath $source -Destination $target -Recurse -Force;" ^
+  "  }" ^
+  "}"
+if errorlevel 1 exit /b 1
 
-if exist "sample" (
-  if exist "dist\GFS\sample" rmdir /s /q "dist\GFS\sample"
-  xcopy "sample" "dist\GFS\sample" /E /I /Y >nul
-)
-
-if exist "emulator_research" (
-  if exist "dist\GFS\emulator_research" rmdir /s /q "dist\GFS\emulator_research"
-  xcopy "emulator_research" "dist\GFS\emulator_research" /E /I /Y >nul
-)
-
-echo [5/5] Creating portable zip...
-for /f %%I in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd_HHmmss"') do set TS=%%I
-powershell -NoProfile -Command ^
-  "$zip = Join-Path '%cd%\\dist' ('GFS_portable_' + '%TS%' + '.zip');" ^
-  "if (Test-Path $zip) { Remove-Item $zip -Force };" ^
-  "Compress-Archive -Path '%cd%\\dist\\GFS' -DestinationPath $zip -Force;" ^
+echo [6/6] Creating portable zip...
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+  "$ErrorActionPreference = 'Stop';" ^
+  "$root = (Get-Location).Path;" ^
+  "$zip = Join-Path (Join-Path $root 'dist') ('GFS_portable_' + (Get-Date -Format yyyyMMdd_HHmmss) + '.zip');" ^
+  "if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force };" ^
+  "Compress-Archive -Path (Join-Path $root 'dist\GFS') -DestinationPath $zip -Force;" ^
   "Write-Host $zip"
 if errorlevel 1 exit /b 1
 

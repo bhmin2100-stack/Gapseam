@@ -1222,6 +1222,12 @@ class MainWindow(QMainWindow):
             return Path(sys.executable).resolve().parent
         return Path(__file__).resolve().parents[3]
 
+    @staticmethod
+    def _runs_root_dir() -> Path:
+        if getattr(sys, "frozen", False):
+            return MainWindow._app_root_dir() / "runs"
+        return Path("runs")
+
     def _run_preset_store_path(self) -> Path:
         return self._app_root_dir() / "presets" / "run_presets.json"
 
@@ -3341,7 +3347,7 @@ class MainWindow(QMainWindow):
         recipe_path = self._write_temp_recipe(recipe)
 
         th = QThread()
-        worker = EngineWorker(recipe_path=recipe_path, runs_root="runs")
+        worker = EngineWorker(recipe_path=recipe_path, runs_root=self._runs_root_dir())
         worker.moveToThread(th)
         th.started.connect(worker.run)
 

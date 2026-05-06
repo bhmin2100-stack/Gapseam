@@ -3,7 +3,13 @@
 from pathlib import Path
 
 ROOT = Path(SPECPATH).resolve()
-COMMON_HIDDEN_IMPORTS = ['pyclipper', 'PIL', 'PIL.Image', 'PIL.GifImagePlugin']
+COMMON_HIDDEN_IMPORTS = [
+    'pyclipper',
+    'PIL',
+    'PIL.Image',
+    'PIL.GifImagePlugin',
+    'gapsim.ui_qt.launcher_window',
+]
 
 app = Analysis(
     [str(ROOT / 'src' / 'gapsim' / 'ui_qt' / 'main_window.py')],
