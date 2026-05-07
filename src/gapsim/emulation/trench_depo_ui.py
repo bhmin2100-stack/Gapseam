@@ -2809,6 +2809,7 @@ class TrenchDepoWindow(QMainWindow):
             self.smoothing_view.set_points_xy(list(pts))
             self._sync_smoothed_table_from_points()
         self._update_geometry_labels()
+        self._refresh_result_input_preview_if_idle()
         if fit:
             QTimer.singleShot(0, self._fit_structure_views)
 
@@ -2903,6 +2904,7 @@ class TrenchDepoWindow(QMainWindow):
             self.smoothing_view.set_points_xy(list(self._structure_points))
             self._sync_smoothed_table_from_points()
         self._update_geometry_labels()
+        self._refresh_result_input_preview_if_idle()
 
     def _on_structure_point_moved(self, idx: int, x: float, y: float) -> None:
         if self._syncing_structure_view:
@@ -2932,6 +2934,7 @@ class TrenchDepoWindow(QMainWindow):
             self._use_smoothed_geometry = True
             self._sync_smoothed_table_from_points()
             self._update_geometry_labels()
+            self._refresh_result_input_preview_if_idle()
 
     def _on_smoothed_point_inserted(self, idx: int, x: float, y: float) -> None:
         if not self._smoothed_points:
@@ -2941,6 +2944,7 @@ class TrenchDepoWindow(QMainWindow):
         self._use_smoothed_geometry = True
         self._sync_smoothed_table_from_points()
         self._update_geometry_labels()
+        self._refresh_result_input_preview_if_idle()
 
     def _on_smoothed_point_deleted(self, idx: int) -> None:
         delete_idx = int(idx)
@@ -2949,6 +2953,7 @@ class TrenchDepoWindow(QMainWindow):
             self._use_smoothed_geometry = len(self._smoothed_points) >= 2
             self._sync_smoothed_table_from_points()
             self._update_geometry_labels()
+            self._refresh_result_input_preview_if_idle()
 
     def apply_structure_smoothing(self, _checked: bool = False) -> None:
         if len(self._structure_points) < 2:
@@ -2965,6 +2970,7 @@ class TrenchDepoWindow(QMainWindow):
         self.smoothing_view.set_points_xy(list(self._smoothed_points))
         self._sync_smoothed_table_from_points()
         self._update_geometry_labels()
+        self._refresh_result_input_preview_if_idle()
         QTimer.singleShot(0, self.smoothing_view.fit_points)
         self.statusBar().showMessage(f"Smoothing applied: {len(self._smoothed_points)} points", 2500)
 
@@ -2974,11 +2980,13 @@ class TrenchDepoWindow(QMainWindow):
             return
         self._use_smoothed_geometry = True
         self._update_geometry_labels()
+        self._refresh_result_input_preview_if_idle()
         self.statusBar().showMessage("Run input switched to smoothed geometry", 1800)
 
     def use_raw_geometry(self, _checked: bool = False) -> None:
         self._use_smoothed_geometry = False
         self._update_geometry_labels()
+        self._refresh_result_input_preview_if_idle()
         self.statusBar().showMessage("Run input switched to raw geometry", 1800)
 
     def _current_geometry_points(self) -> Tuple[Tuple[float, float], ...]:
@@ -2987,6 +2995,46 @@ class TrenchDepoWindow(QMainWindow):
         if len(self._structure_points) >= 2:
             return tuple(self._structure_points)
         return tuple(self._default_points_for_active_emulator())
+
+    def _current_geometry_source_name(self) -> str:
+        if self._use_smoothed_geometry and len(self._smoothed_points) >= 2:
+            return "smooth"
+        return "raw"
+
+    def _result_has_run_frames(self) -> bool:
+        return self._result is not None and bool(self._result.frame_profiles)
+
+    def _refresh_result_input_preview_if_idle(self, *, fit: bool = False) -> None:
+        if self._result_has_run_frames():
+            return
+        if not hasattr(self, "view_tabs") or self.view_tabs.currentIndex() != 2:
+            return
+        self._show_result_input_preview(fit=fit)
+
+    def _show_result_input_preview(self, *, fit: bool = False) -> None:
+        points = [(float(x), float(y)) for x, y in self._current_geometry_points()]
+        if len(points) < 2:
+            self.view.clear_data()
+            self.lbl_status.setText("Input preview: empty | Points 0")
+            return
+        self.view.set_frames(
+            [points],
+            voids=[[]],
+            void_mode="current",
+            dynamic_substrate_fill=False,
+            history_mode="film",
+        )
+        self.slider_frame.blockSignals(True)
+        try:
+            self.slider_frame.setRange(0, 0)
+            self.slider_frame.setValue(0)
+            self.slider_frame.setEnabled(False)
+        finally:
+            self.slider_frame.blockSignals(False)
+        self.view.show_frame(0, fit=fit)
+        self.lbl_status.setText(
+            f"Input preview: {self._current_geometry_source_name()} | Points {len(points)}"
+        )
 
     def _update_geometry_labels(self) -> None:
         raw_count = len(self._structure_points)
@@ -3153,6 +3201,8 @@ class TrenchDepoWindow(QMainWindow):
         finally:
             self._syncing_workflow_tabs = False
         self._sync_result_controls_visibility(workflow_index)
+        if workflow_index == 2:
+            self._refresh_result_input_preview_if_idle(fit=True)
 
     def _sync_result_controls_visibility(self, workflow_index: Optional[int] = None) -> None:
         index = self.view_tabs.currentIndex() if workflow_index is None else int(workflow_index)
@@ -4508,7 +4558,7 @@ class TrenchDepoWindow(QMainWindow):
 
     def show_frame(self, index: int) -> None:
         if self._result is None or not self._result.frame_profiles:
-            self.lbl_status.setText("Cycle 0/0 | Points 0")
+            self._show_result_input_preview(fit=False)
             return
 
         idx = max(0, min(int(index), len(self._result.frame_profiles) - 1))

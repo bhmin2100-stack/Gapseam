@@ -744,8 +744,16 @@ class SputterGaussianEditorTest(unittest.TestCase):
             self.assertGreater(len(window._smoothed_points), len(raw_points))
             self.assertEqual(tuple(window.current_config().points), tuple(window._smoothed_points))
 
+            window.btn_smoothing_next.click()
+            self.assertEqual(window.view_tabs.currentIndex(), 2)
+            self.assertEqual(tuple(window.view._frame_profiles_raw[0]), tuple(window._smoothed_points))
+            self.assertIn("Input preview: smooth", window.lbl_status.text())
+            self.assertFalse(window.slider_frame.isEnabled())
+
             window.use_raw_geometry()
             self.assertEqual(tuple(window.current_config().points), tuple(raw_points))
+            self.assertEqual(tuple(window.view._frame_profiles_raw[0]), tuple(raw_points))
+            self.assertIn("Input preview: raw", window.lbl_status.text())
         finally:
             window.close()
 
