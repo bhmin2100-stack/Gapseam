@@ -44,7 +44,7 @@ if not exist ".venv\Scripts\python.exe" (
   if errorlevel 1 goto FAIL
 )
 
-".venv\Scripts\python.exe" -c "import PySide6, pyclipper, PIL" >nul 2>nul
+".venv\Scripts\python.exe" -c "import PySide6, pyclipper, PIL, openpyxl" >nul 2>nul
 if errorlevel 1 (
   echo.
   echo Installing Python dependencies...

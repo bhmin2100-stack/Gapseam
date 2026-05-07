@@ -5,6 +5,7 @@ from pathlib import Path
 ROOT = Path(SPECPATH).resolve()
 COMMON_HIDDEN_IMPORTS = [
     'pyclipper',
+    'openpyxl',
     'PIL',
     'PIL.Image',
     'PIL.GifImagePlugin',
