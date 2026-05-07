@@ -838,6 +838,36 @@ class DepthDepositionProfileEditor(QWidget):
         self.update()
         self._emit_parameters_changed()
 
+    @staticmethod
+    def _draw_arrow(
+        painter: QPainter,
+        start: QPointF,
+        end: QPointF,
+        color: QColor,
+        *,
+        width: float = 1.4,
+    ) -> None:
+        dx = float(end.x() - start.x())
+        dy = float(end.y() - start.y())
+        dist = math.hypot(dx, dy)
+        if dist <= 7.0:
+            return
+        ux = dx / dist
+        uy = dy / dist
+        head = 7.0
+        side = 3.6
+        left = QPointF(end.x() - (ux * head) - (uy * side), end.y() - (uy * head) + (ux * side))
+        right = QPointF(end.x() - (ux * head) + (uy * side), end.y() - (uy * head) - (ux * side))
+
+        painter.setPen(QPen(color, width))
+        painter.drawLine(start, end)
+        arrow_head = QPainterPath()
+        arrow_head.moveTo(end)
+        arrow_head.lineTo(left)
+        arrow_head.moveTo(end)
+        arrow_head.lineTo(right)
+        painter.drawPath(arrow_head)
+
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() != Qt.MouseButton.LeftButton:
             super().mousePressEvent(event)
@@ -900,6 +930,31 @@ class DepthDepositionProfileEditor(QWidget):
             x = self._x_for_ratio(ratio)
             painter.drawLine(QPointF(x, rect.top()), QPointF(x, rect.bottom()))
 
+        conformal_x = self._x_for_ratio(1.0)
+        curve_points = self._curve_points()
+        reduction_area = QPainterPath()
+        reduction_area.moveTo(QPointF(conformal_x, rect.top()))
+        reduction_area.lineTo(QPointF(conformal_x, rect.bottom()))
+        for depth_ratio, ratio in reversed(curve_points):
+            reduction_area.lineTo(QPointF(self._x_for_ratio(ratio), self._y_for_depth_ratio(depth_ratio)))
+        reduction_area.closeSubpath()
+        painter.fillPath(reduction_area, QColor(219, 234, 254, 72))
+
+        painter.setPen(QPen(QColor(37, 99, 235, 165), 1.5, Qt.PenStyle.DashLine))
+        painter.drawLine(QPointF(conformal_x, rect.top()), QPointF(conformal_x, rect.bottom()))
+        painter.setPen(QPen(QColor(30, 64, 175), 1.0))
+        painter.drawText(QPointF(max(rect.left(), conformal_x - 92.0), rect.top() - 8.0), "Conformal 100%")
+
+        for depth_ratio in (0.18, 0.36, 0.54, 0.72, 0.90):
+            y = self._y_for_depth_ratio(depth_ratio)
+            ratio = self._ratio_at_depth_ratio(depth_ratio)
+            self._draw_arrow(
+                painter,
+                QPointF(conformal_x - 4.0, y),
+                QPointF(self._x_for_ratio(ratio) + 4.0, y),
+                QColor(37, 99, 235, 150),
+            )
+
         trench = QPainterPath()
         center_x = rect.left() + rect.width() * 0.16
         half_open = min(rect.width() * 0.10, max(8.0, rect.width() * 0.30 / max(1.0, self._effective_ar_at_depth_ratio(1.0))))
@@ -924,7 +979,7 @@ class DepthDepositionProfileEditor(QWidget):
         painter.drawLine(QPointF(floor_x, rect.top()), QPointF(floor_x, rect.bottom()))
 
         curve = QPainterPath()
-        for idx, (depth_ratio, ratio) in enumerate(self._curve_points()):
+        for idx, (depth_ratio, ratio) in enumerate(curve_points):
             point = QPointF(self._x_for_ratio(ratio), self._y_for_depth_ratio(depth_ratio))
             if idx == 0:
                 curve.moveTo(point)
