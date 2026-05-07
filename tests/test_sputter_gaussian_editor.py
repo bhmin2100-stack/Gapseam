@@ -460,6 +460,8 @@ class SputterGaussianEditorTest(unittest.TestCase):
                 [window.workflow_tabs.tabText(idx) for idx in range(window.workflow_tabs.count())],
                 ["1 Structure", "2 Smoothing", "3 Result"],
             )
+            self.assertGreaterEqual(window.right_panel.minimumWidth(), 440)
+            self.assertGreaterEqual(window.right_panel.maximumWidth(), 560)
 
             config = window.current_config()
             self.assertEqual(tuple(config.points), BOWED_JAR_TRENCH_POINTS)
@@ -501,6 +503,12 @@ class SputterGaussianEditorTest(unittest.TestCase):
             self.assertIn("deposition_post_closure_fill_pct_line", split_keys)
             self.assertNotIn("sputter_strength_a_per_cycle", split_keys)
             self.assertNotIn("redepo_efficiency_pct", split_keys)
+
+            window.resize(1280, 720)
+            window.show()
+            QApplication.processEvents()
+            self.assertEqual(window.results_scroll_area.horizontalScrollBar().maximum(), 0)
+            self.assertGreater(window.results_scroll_area.verticalScrollBar().maximum(), 0)
         finally:
             window.close()
 

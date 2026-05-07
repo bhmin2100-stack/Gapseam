@@ -2489,7 +2489,7 @@ class TrenchDepoWindow(QMainWindow):
             scroll = QScrollArea()
             scroll.setWidgetResizable(True)
             scroll.setWidget(content)
-            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
             return scroll
 
         self.structure_scroll_area = make_workflow_scroll(self.structure_panel_content)
@@ -2501,21 +2501,23 @@ class TrenchDepoWindow(QMainWindow):
         self.workflow_tabs.addTab(self.results_scroll_area, "3 Result")
 
         right_panel = QWidget()
-        right_panel.setMinimumWidth(360)
-        right_panel.setMaximumWidth(460)
+        right_panel.setMinimumWidth(440)
+        right_panel.setMaximumWidth(560)
         right_layout = QVBoxLayout()
         right_layout.setContentsMargins(6, 8, 8, 8)
         right_layout.setSpacing(8)
         right_layout.addWidget(self.workflow_tabs, 1)
         right_panel.setLayout(right_layout)
+        self.right_panel = right_panel
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(left_panel)
         splitter.addWidget(right_panel)
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 0)
-        splitter.setSizes([880, 400])
+        splitter.setSizes([820, 460])
         splitter.setChildrenCollapsible(False)
+        self.main_splitter = splitter
 
         root = QVBoxLayout()
         root.setContentsMargins(0, 0, 0, 0)
