@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -442,12 +443,23 @@ class SputterGaussianEditorTest(unittest.TestCase):
             self.assertTrue(all(widget.isHidden() for widget in window._redeposition_widgets))
             self.assertFalse(window.depth_profile_group.isHidden())
             self.assertTrue(window.chk_depth_deposition.isChecked())
-            scroll_content = window.right_scroll_area.widget()
-            self.assertIs(window.gaussian_group.parent(), scroll_content)
-            self.assertIs(window.ion_map_group.parent(), scroll_content)
-            self.assertIs(window.redepo_lobe_group.parent(), scroll_content)
-            self.assertIs(window.depth_profile_group.parent(), scroll_content)
-            self.assertEqual(window.workflow_group.title(), "Workflow")
+            self.assertIs(window.structure_points_group.parent(), window.structure_panel_content)
+            self.assertIs(window.overlay_group.parent(), window.structure_panel_content)
+            self.assertIs(window.smoothing_controls_group.parent(), window.smoothing_panel_content)
+            self.assertIs(window.smoothed_points_group.parent(), window.smoothing_panel_content)
+            self.assertIs(window.params_group.parent(), window.results_panel_content)
+            self.assertIs(window.gaussian_group.parent(), window.results_panel_content)
+            self.assertIs(window.ion_map_group.parent(), window.results_panel_content)
+            self.assertIs(window.redepo_lobe_group.parent(), window.results_panel_content)
+            self.assertIs(window.depth_profile_group.parent(), window.results_panel_content)
+            self.assertEqual(
+                [window.view_tabs.tabText(idx) for idx in range(window.view_tabs.count())],
+                ["1 Structure", "2 Smoothing", "3 Result"],
+            )
+            self.assertEqual(
+                [window.workflow_tabs.tabText(idx) for idx in range(window.workflow_tabs.count())],
+                ["1 Structure", "2 Smoothing", "3 Result"],
+            )
 
             config = window.current_config()
             self.assertEqual(tuple(config.points), BOWED_JAR_TRENCH_POINTS)
@@ -482,6 +494,51 @@ class SputterGaussianEditorTest(unittest.TestCase):
         finally:
             window.close()
 
+    def test_workflow_tabs_gate_structure_smoothing_and_result_controls(self) -> None:
+        result = TrenchDepoResult(
+            frame_steps=[0],
+            frame_profiles=[[(0.0, 0.0), (1.0, 0.0)]],
+            frame_voids=[[]],
+            final_profile=[(0.0, 0.0), (1.0, 0.0)],
+            meta={"cycles": 0},
+        )
+        with (
+            mock.patch("gapsim.emulation.trench_depo_ui.run_trench_depo", return_value=result),
+            mock.patch("gapsim.emulation.trench_depo_ui.QTimer.singleShot"),
+        ):
+            window = TrenchDepoWindow()
+
+        try:
+            self.assertEqual(window.view_tabs.currentIndex(), 0)
+            self.assertEqual(window.workflow_tabs.currentIndex(), 0)
+            self.assertTrue(window.result_controls_widget.isHidden())
+            self.assertIs(window.emulator_group.parent(), window.structure_panel_content)
+            self.assertIs(window.smoothing_controls_group.parent(), window.smoothing_panel_content)
+            self.assertIs(window.params_group.parent(), window.results_panel_content)
+            self.assertIs(window.action_group.parent(), window.results_panel_content)
+            self.assertIs(window.split_group.parent(), window.results_panel_content)
+
+            window.btn_structure_next.click()
+            self.assertEqual(window.view_tabs.currentIndex(), 1)
+            self.assertEqual(window.workflow_tabs.currentIndex(), 1)
+            self.assertTrue(window.result_controls_widget.isHidden())
+
+            window.btn_smoothing_next.click()
+            self.assertEqual(window.view_tabs.currentIndex(), 2)
+            self.assertEqual(window.workflow_tabs.currentIndex(), 2)
+            self.assertFalse(window.result_controls_widget.isHidden())
+
+            window.workflow_tabs.setCurrentIndex(0)
+            self.assertEqual(window.view_tabs.currentIndex(), 0)
+            self.assertTrue(window.result_controls_widget.isHidden())
+
+            window.run_emulation(save_artifacts=False)
+            self.assertEqual(window.view_tabs.currentIndex(), 2)
+            self.assertEqual(window.workflow_tabs.currentIndex(), 2)
+            self.assertFalse(window.result_controls_widget.isHidden())
+        finally:
+            window.close()
+
     def test_structure_editor_geometry_feeds_current_config_and_mode_defaults(self) -> None:
         result = TrenchDepoResult(
             frame_steps=[0],
@@ -507,6 +564,44 @@ class SputterGaussianEditorTest(unittest.TestCase):
 
             self.assertEqual(tuple(window.current_config().points), tuple(custom_points))
             self.assertIn("4 pts", window.lbl_geometry_source.text())
+        finally:
+            window.close()
+
+    def test_structure_table_and_image_overlay_match_gapsim_flow(self) -> None:
+        result = TrenchDepoResult(
+            frame_steps=[0],
+            frame_profiles=[[(0.0, 0.0), (1.0, 0.0)]],
+            frame_voids=[[]],
+            final_profile=[(0.0, 0.0), (1.0, 0.0)],
+            meta={"cycles": 0},
+        )
+        with (
+            mock.patch("gapsim.emulation.trench_depo_ui.run_trench_depo", return_value=result),
+            mock.patch("gapsim.emulation.trench_depo_ui.QTimer.singleShot"),
+        ):
+            window = TrenchDepoWindow()
+
+        try:
+            custom_points = [(-300.0, 0.0), (-100.0, -250.0), (100.0, -250.0), (300.0, 0.0)]
+            window._on_structure_table_replace_points_requested(custom_points)
+
+            self.assertEqual(tuple(window.current_config().points), tuple(custom_points))
+            self.assertEqual(window.structure_points_model.rowCount(), len(custom_points))
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                image_path = Path(tmpdir) / "overlay.png"
+                pixmap = QPixmap(24, 16)
+                pixmap.fill()
+                self.assertTrue(pixmap.save(str(image_path)))
+
+                self.assertTrue(window._set_overlay_image(str(image_path), scale_a_per_px=5.0))
+                self.assertIsNotNone(window.structure_view.get_overlay_state())
+                self.assertIsNotNone(window.smoothing_view.get_overlay_state())
+                self.assertTrue(window.btn_move_overlay.isEnabled())
+
+                window.slider_overlay_opacity.setValue(60)
+                self.assertAlmostEqual(window.structure_view.get_overlay_state()["opacity"], 0.6, places=6)
+                self.assertAlmostEqual(window.smoothing_view.get_overlay_state()["opacity"], 0.6, places=6)
         finally:
             window.close()
 

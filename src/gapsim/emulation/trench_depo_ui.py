@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
     QComboBox,
+    QDialog,
     QDoubleSpinBox,
     QFileDialog,
     QGridLayout,
@@ -62,7 +63,10 @@ from gapsim.emulation.trench_depo_export import (
     load_trench_depo_run,
     load_trench_depo_split_group,
 )
+from gapsim.ui_qt.calibrate_dialog import CalibrateDialog
 from gapsim.ui_qt.controllers.smoothing_ctrl import SmoothingController
+from gapsim.ui_qt.models.points_table import PointsTableModel
+from gapsim.ui_qt.models.points_table_view import PointsTableView
 from gapsim.ui_qt.views.result_vector_view import ResultVectorView
 from gapsim.ui_qt.views.structure_view import StructureView
 
@@ -1504,6 +1508,12 @@ class TrenchDepoWindow(QMainWindow):
         self._smoothed_points: List[Tuple[float, float]] = []
         self._use_smoothed_geometry = False
         self._syncing_structure_view = False
+        self._syncing_structure_table = False
+        self._syncing_smoothed_table = False
+        self._syncing_workflow_tabs = False
+        self._overlay_opacity = 0.35
+        self._overlay_path: Optional[str] = None
+        self._overlay_scale_a_per_px = 1.0
         self.emulator_button_group = QButtonGroup(self)
         self.emulator_button_group.setExclusive(True)
         self.emulator_toggle_row = QHBoxLayout()
@@ -1794,6 +1804,7 @@ class TrenchDepoWindow(QMainWindow):
 
         self.btn_fit_structure = QPushButton("Fit")
         self.btn_reset_structure = QPushButton("Default")
+        self.btn_structure_next = QPushButton("Next: Smoothing")
         self.lbl_geometry_points = QLabel("Geometry: 0 pts")
         self.lbl_geometry_source = QLabel("Input: raw")
         self.lbl_geometry_source.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -1803,6 +1814,7 @@ class TrenchDepoWindow(QMainWindow):
         structure_buttons.addWidget(self.btn_reset_structure)
         structure_buttons.addWidget(self.lbl_geometry_points, 1)
         structure_buttons.addWidget(self.lbl_geometry_source)
+        structure_buttons.addWidget(self.btn_structure_next)
 
         structure_tab = QWidget()
         structure_layout = QVBoxLayout()
@@ -1823,6 +1835,8 @@ class TrenchDepoWindow(QMainWindow):
         self.btn_apply_smoothing = QPushButton("Smooth")
         self.btn_use_smoothed_geometry = QPushButton("Use Smooth")
         self.btn_use_raw_geometry = QPushButton("Use Raw")
+        self.btn_smoothing_back = QPushButton("Back: Structure")
+        self.btn_smoothing_next = QPushButton("Next: Results")
         self.lbl_smoothing_status = QLabel("Smooth: not applied")
         smooth_grid = QGridLayout()
         smooth_grid.setContentsMargins(0, 0, 0, 0)
@@ -1837,41 +1851,32 @@ class TrenchDepoWindow(QMainWindow):
         smooth_grid.addWidget(self.btn_use_raw_geometry, 1, 2, 1, 2)
         smooth_grid.addWidget(self.lbl_smoothing_status, 1, 4)
 
+        smooth_nav = QHBoxLayout()
+        smooth_nav.setContentsMargins(0, 0, 0, 0)
+        smooth_nav.addWidget(self.btn_smoothing_back)
+        smooth_nav.addStretch(1)
+        smooth_nav.addWidget(self.btn_smoothing_next)
+
         smoothing_tab = QWidget()
         smoothing_layout = QVBoxLayout()
         smoothing_layout.setContentsMargins(0, 0, 0, 0)
         smoothing_layout.setSpacing(6)
         smoothing_layout.addWidget(self.smoothing_view, 1)
-        smoothing_layout.addLayout(smooth_grid)
         smoothing_tab.setLayout(smoothing_layout)
 
-        self.view_tabs.addTab(result_tab, "Result")
-        self.view_tabs.addTab(structure_tab, "Structure")
-        self.view_tabs.addTab(smoothing_tab, "Smoothing")
+        self.view_tabs.addTab(structure_tab, "1 Structure")
+        self.view_tabs.addTab(smoothing_tab, "2 Smoothing")
+        self.view_tabs.addTab(result_tab, "3 Result")
 
         left_panel = QWidget()
         left_layout = QVBoxLayout()
         left_layout.setContentsMargins(8, 8, 6, 8)
         left_layout.setSpacing(8)
         left_layout.addWidget(self.view_tabs, 1)
-        left_layout.addLayout(controls)
+        self.result_controls_widget = QWidget()
+        self.result_controls_widget.setLayout(controls)
+        left_layout.addWidget(self.result_controls_widget)
         left_panel.setLayout(left_layout)
-
-        workflow_group = QGroupBox("Workflow")
-        workflow_layout = QHBoxLayout()
-        workflow_layout.setContentsMargins(10, 8, 10, 8)
-        workflow_layout.setSpacing(6)
-        self.btn_workflow_structure = QPushButton("1 Structure")
-        self.btn_workflow_smoothing = QPushButton("2 Smoothing")
-        self.btn_workflow_results = QPushButton("3 Results")
-        for button in (
-            self.btn_workflow_structure,
-            self.btn_workflow_smoothing,
-            self.btn_workflow_results,
-        ):
-            button.setMinimumHeight(26)
-            workflow_layout.addWidget(button)
-        workflow_group.setLayout(workflow_layout)
 
         emulator_group = QGroupBox("1 Structure / Emulator")
         emulator_layout = QVBoxLayout()
@@ -1880,7 +1885,60 @@ class TrenchDepoWindow(QMainWindow):
         emulator_layout.addWidget(self.btn_new_emulator)
         emulator_group.setLayout(emulator_layout)
 
-        params_group = QGroupBox("2 Smoothing / Process Parameters")
+        self.structure_points_model = PointsTableModel()
+        self.structure_points_table = PointsTableView()
+        self.structure_points_table.setModel(self.structure_points_model)
+        self.structure_points_table.setMinimumHeight(160)
+        self.structure_points_group = QGroupBox("Structure Points")
+        structure_points_layout = QVBoxLayout()
+        structure_points_layout.setContentsMargins(10, 10, 10, 10)
+        structure_points_layout.addWidget(self.structure_points_table, 1)
+        self.structure_points_group.setLayout(structure_points_layout)
+
+        self.btn_load_overlay = QPushButton("Load Image")
+        self.btn_clear_overlay = QPushButton("Clear Image")
+        self.btn_move_overlay = QPushButton("Move Image")
+        self.btn_move_overlay.setCheckable(True)
+        self.btn_move_overlay.setEnabled(False)
+        self.lbl_overlay_opacity = QLabel("Opacity")
+        self.slider_overlay_opacity = QSlider(Qt.Orientation.Horizontal)
+        self.slider_overlay_opacity.setRange(0, 100)
+        self.slider_overlay_opacity.setValue(int(round(self._overlay_opacity * 100.0)))
+        self.slider_overlay_opacity.setFixedWidth(160)
+        self.overlay_group = QGroupBox("Image Overlay")
+        overlay_layout = QVBoxLayout()
+        overlay_layout.setContentsMargins(10, 10, 10, 10)
+        overlay_buttons = QHBoxLayout()
+        overlay_buttons.addWidget(self.btn_load_overlay)
+        overlay_buttons.addWidget(self.btn_clear_overlay)
+        overlay_buttons.addWidget(self.btn_move_overlay)
+        overlay_layout.addLayout(overlay_buttons)
+        overlay_opacity_row = QHBoxLayout()
+        overlay_opacity_row.addWidget(self.lbl_overlay_opacity)
+        overlay_opacity_row.addWidget(self.slider_overlay_opacity)
+        overlay_opacity_row.addStretch(1)
+        overlay_layout.addLayout(overlay_opacity_row)
+        self.overlay_group.setLayout(overlay_layout)
+
+        self.smoothing_controls_group = QGroupBox("Smoothing")
+        smoothing_controls_layout = QVBoxLayout()
+        smoothing_controls_layout.setContentsMargins(10, 10, 10, 10)
+        smoothing_controls_layout.setSpacing(8)
+        smoothing_controls_layout.addLayout(smooth_grid)
+        smoothing_controls_layout.addLayout(smooth_nav)
+        self.smoothing_controls_group.setLayout(smoothing_controls_layout)
+        self.smoothed_points_model = PointsTableModel()
+        self.smoothed_points_table = PointsTableView()
+        self.smoothed_points_table.setModel(self.smoothed_points_model)
+        self.smoothed_points_table.setEditTriggers(PointsTableView.NoEditTriggers)
+        self.smoothed_points_table.setMinimumHeight(160)
+        self.smoothed_points_group = QGroupBox("Smoothing Result Points")
+        smoothed_points_layout = QVBoxLayout()
+        smoothed_points_layout.setContentsMargins(10, 10, 10, 10)
+        smoothed_points_layout.addWidget(self.smoothed_points_table, 1)
+        self.smoothed_points_group.setLayout(smoothed_points_layout)
+
+        params_group = QGroupBox("3 Result / Process Parameters")
         params_grid = QGridLayout()
         params_grid.setContentsMargins(10, 10, 10, 10)
         params_grid.setHorizontalSpacing(8)
@@ -2157,8 +2215,9 @@ class TrenchDepoWindow(QMainWindow):
 
         self.emulator_group = emulator_group
         self.params_group = params_group
-        self.workflow_group = workflow_group
+        self.action_group = action_group
         self.split_group = split_group
+        self.note_group = note_group
         self.ion_map_group = ion_map_group
         self.depth_profile_group = depth_profile_group
         self.gaussian_group = gaussian_group
@@ -2259,33 +2318,75 @@ class TrenchDepoWindow(QMainWindow):
             self.depth_deposition_editor,
         ]
 
-        right_top_content = QWidget()
-        right_top_layout = QVBoxLayout()
-        right_top_layout.setContentsMargins(0, 0, 0, 0)
-        right_top_layout.setSpacing(8)
-        right_top_layout.addWidget(workflow_group)
-        right_top_layout.addWidget(emulator_group)
-        right_top_layout.addWidget(params_group)
-        right_top_layout.addWidget(gaussian_group)
-        right_top_layout.addWidget(ion_map_group)
-        right_top_layout.addWidget(self.redepo_lobe_group)
-        right_top_layout.addWidget(depth_profile_group)
-        right_top_layout.addWidget(action_group)
-        right_top_layout.addWidget(split_group)
-        right_top_layout.addWidget(note_group)
-        right_top_layout.addStretch(1)
-        right_top_content.setLayout(right_top_layout)
+        self.btn_structure_panel_next = QPushButton("Next: Smoothing")
+        self.btn_smoothing_panel_back = QPushButton("Back: Structure")
+        self.btn_smoothing_panel_next = QPushButton("Next: Results")
+        self.btn_results_panel_back = QPushButton("Back: Smoothing")
 
-        right_top_scroll = QScrollArea()
-        right_top_scroll.setWidgetResizable(True)
-        right_top_scroll.setWidget(right_top_content)
-        right_top_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.right_scroll_area = right_top_scroll
-        self._workflow_scroll_targets = {
-            "structure": emulator_group,
-            "smoothing": params_group,
-            "results": action_group,
-        }
+        self.structure_panel_content = QWidget()
+        structure_panel_layout = QVBoxLayout()
+        structure_panel_layout.setContentsMargins(0, 0, 0, 0)
+        structure_panel_layout.setSpacing(8)
+        structure_panel_layout.addWidget(emulator_group)
+        structure_panel_layout.addWidget(self.structure_points_group)
+        structure_panel_layout.addWidget(self.overlay_group)
+        structure_panel_nav = QHBoxLayout()
+        structure_panel_nav.setContentsMargins(0, 0, 0, 0)
+        structure_panel_nav.addStretch(1)
+        structure_panel_nav.addWidget(self.btn_structure_panel_next)
+        structure_panel_layout.addLayout(structure_panel_nav)
+        structure_panel_layout.addStretch(1)
+        self.structure_panel_content.setLayout(structure_panel_layout)
+
+        self.smoothing_panel_content = QWidget()
+        smoothing_panel_layout = QVBoxLayout()
+        smoothing_panel_layout.setContentsMargins(0, 0, 0, 0)
+        smoothing_panel_layout.setSpacing(8)
+        smoothing_panel_layout.addWidget(self.smoothing_controls_group)
+        smoothing_panel_layout.addWidget(self.smoothed_points_group)
+        smoothing_panel_nav = QHBoxLayout()
+        smoothing_panel_nav.setContentsMargins(0, 0, 0, 0)
+        smoothing_panel_nav.addWidget(self.btn_smoothing_panel_back)
+        smoothing_panel_nav.addStretch(1)
+        smoothing_panel_nav.addWidget(self.btn_smoothing_panel_next)
+        smoothing_panel_layout.addLayout(smoothing_panel_nav)
+        smoothing_panel_layout.addStretch(1)
+        self.smoothing_panel_content.setLayout(smoothing_panel_layout)
+
+        self.results_panel_content = QWidget()
+        results_panel_layout = QVBoxLayout()
+        results_panel_layout.setContentsMargins(0, 0, 0, 0)
+        results_panel_layout.setSpacing(8)
+        results_panel_layout.addWidget(action_group)
+        results_panel_layout.addWidget(params_group)
+        results_panel_layout.addWidget(gaussian_group)
+        results_panel_layout.addWidget(ion_map_group)
+        results_panel_layout.addWidget(self.redepo_lobe_group)
+        results_panel_layout.addWidget(depth_profile_group)
+        results_panel_layout.addWidget(split_group)
+        results_panel_layout.addWidget(note_group)
+        results_panel_nav = QHBoxLayout()
+        results_panel_nav.setContentsMargins(0, 0, 0, 0)
+        results_panel_nav.addWidget(self.btn_results_panel_back)
+        results_panel_nav.addStretch(1)
+        results_panel_layout.addLayout(results_panel_nav)
+        results_panel_layout.addStretch(1)
+        self.results_panel_content.setLayout(results_panel_layout)
+
+        def make_workflow_scroll(content: QWidget) -> QScrollArea:
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setWidget(content)
+            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            return scroll
+
+        self.structure_scroll_area = make_workflow_scroll(self.structure_panel_content)
+        self.smoothing_scroll_area = make_workflow_scroll(self.smoothing_panel_content)
+        self.results_scroll_area = make_workflow_scroll(self.results_panel_content)
+        self.workflow_tabs = QTabWidget()
+        self.workflow_tabs.addTab(self.structure_scroll_area, "1 Structure")
+        self.workflow_tabs.addTab(self.smoothing_scroll_area, "2 Smoothing")
+        self.workflow_tabs.addTab(self.results_scroll_area, "3 Result")
 
         right_panel = QWidget()
         right_panel.setMinimumWidth(360)
@@ -2293,7 +2394,7 @@ class TrenchDepoWindow(QMainWindow):
         right_layout = QVBoxLayout()
         right_layout.setContentsMargins(6, 8, 8, 8)
         right_layout.setSpacing(8)
-        right_layout.addWidget(right_top_scroll, 1)
+        right_layout.addWidget(self.workflow_tabs, 1)
         right_panel.setLayout(right_layout)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -2319,9 +2420,22 @@ class TrenchDepoWindow(QMainWindow):
         self.btn_run_split.clicked.connect(self.run_split_test)
         self.btn_compare_gapsim_angle.clicked.connect(self.run_compare_for_active_emulator)
         self.btn_new_emulator.clicked.connect(self.create_new_emulator)
-        self.btn_workflow_structure.clicked.connect(lambda: self._scroll_right_panel_to("structure"))
-        self.btn_workflow_smoothing.clicked.connect(lambda: self._scroll_right_panel_to("smoothing"))
-        self.btn_workflow_results.clicked.connect(lambda: self._scroll_right_panel_to("results"))
+        self.view_tabs.currentChanged.connect(self._on_view_workflow_tab_changed)
+        self.workflow_tabs.currentChanged.connect(self._on_control_workflow_tab_changed)
+        self.btn_structure_next.clicked.connect(lambda: self._set_workflow_step("smoothing"))
+        self.btn_smoothing_back.clicked.connect(lambda: self._set_workflow_step("structure"))
+        self.btn_smoothing_next.clicked.connect(lambda: self._set_workflow_step("results"))
+        self.btn_structure_panel_next.clicked.connect(lambda: self._set_workflow_step("smoothing"))
+        self.btn_smoothing_panel_back.clicked.connect(lambda: self._set_workflow_step("structure"))
+        self.btn_smoothing_panel_next.clicked.connect(lambda: self._set_workflow_step("results"))
+        self.btn_results_panel_back.clicked.connect(lambda: self._set_workflow_step("smoothing"))
+        self.btn_load_overlay.clicked.connect(self._load_overlay_image)
+        self.btn_clear_overlay.clicked.connect(self._clear_overlay_image)
+        self.btn_move_overlay.toggled.connect(self._on_overlay_move_toggled)
+        self.slider_overlay_opacity.valueChanged.connect(self._on_overlay_opacity_changed)
+        self.structure_points_model.pointEditRequested.connect(self._on_structure_table_point_edit_requested)
+        self.structure_points_table.deleteRowsRequested.connect(self._on_structure_table_delete_rows_requested)
+        self.structure_points_table.replacePointsRequested.connect(self._on_structure_table_replace_points_requested)
         self.cmb_split_parameter.currentIndexChanged.connect(self.apply_split_parameter_defaults)
         self.slider_frame.valueChanged.connect(self.show_frame)
         self.chk_sputter.toggled.connect(self.sync_etch_control_availability)
@@ -2371,6 +2485,7 @@ class TrenchDepoWindow(QMainWindow):
 
         self.apply_emulator_mode(run=False)
         self._reset_geometry_to_default()
+        self._set_workflow_step("structure")
 
     def _default_points_for_active_emulator(self) -> List[Tuple[float, float]]:
         number = self.active_emulator_number()
@@ -2394,15 +2509,80 @@ class TrenchDepoWindow(QMainWindow):
             self.structure_view.set_points_xy(list(pts))
         finally:
             self._syncing_structure_view = False
+        self._sync_structure_table_from_points()
         if clear_smoothing:
             self._smoothed_points = []
             self._use_smoothed_geometry = False
             self.smoothing.revert()
             self.smoothing_view.set_reference_profiles_xy([])
             self.smoothing_view.set_points_xy(list(pts))
+            self._sync_smoothed_table_from_points()
         self._update_geometry_labels()
         if fit:
             QTimer.singleShot(0, self._fit_structure_views)
+
+    def _sync_structure_table_from_points(self) -> None:
+        if not hasattr(self, "structure_points_model") or self._syncing_structure_table:
+            return
+        self._syncing_structure_table = True
+        try:
+            self.structure_points_model.set_points(list(self._structure_points))
+        finally:
+            self._syncing_structure_table = False
+
+    def _sync_smoothed_table_from_points(self) -> None:
+        if not hasattr(self, "smoothed_points_model") or self._syncing_smoothed_table:
+            return
+        self._syncing_smoothed_table = True
+        try:
+            self.smoothed_points_model.set_points(list(self._smoothed_points))
+        finally:
+            self._syncing_smoothed_table = False
+
+    def _refresh_structure_from_table_model(self, *, fit: bool = False) -> None:
+        if self._syncing_structure_table:
+            return
+        pts = [(float(x), float(y)) for x, y in self.structure_points_model.get_points()]
+        if len(pts) < 2:
+            return
+        self._structure_points = pts
+        self._syncing_structure_view = True
+        try:
+            self.structure_view.set_points_xy(list(pts))
+        finally:
+            self._syncing_structure_view = False
+        self._mark_structure_edited()
+        if fit:
+            QTimer.singleShot(0, self.structure_view.fit_points)
+
+    def _on_structure_table_point_edit_requested(self, row: int, x: float, y: float) -> None:
+        if self._syncing_structure_table:
+            return
+        self._syncing_structure_table = True
+        try:
+            self.structure_points_model.set_point(int(row), (float(x), float(y)))
+        finally:
+            self._syncing_structure_table = False
+        self._refresh_structure_from_table_model()
+
+    def _on_structure_table_delete_rows_requested(self, rows: List[int]) -> None:
+        if self._syncing_structure_table:
+            return
+        valid_rows = sorted({int(row) for row in rows}, reverse=True)
+        changed = False
+        self._syncing_structure_table = True
+        try:
+            for row in valid_rows:
+                changed = self.structure_points_model.delete_point(row) is not None or changed
+        finally:
+            self._syncing_structure_table = False
+        if changed:
+            self._refresh_structure_from_table_model(fit=True)
+
+    def _on_structure_table_replace_points_requested(self, points: List[Tuple[float, float]]) -> None:
+        if len(points) < 2:
+            return
+        self._set_structure_points(points, fit=True)
 
     def _reset_geometry_to_default(self, _checked: bool = False) -> None:
         self._set_structure_points(self._default_points_for_active_emulator())
@@ -2413,12 +2593,14 @@ class TrenchDepoWindow(QMainWindow):
         self.smoothing_view.fit_points()
 
     def _mark_structure_edited(self) -> None:
+        self._sync_structure_table_from_points()
         if self._smoothed_points or self._use_smoothed_geometry:
             self._smoothed_points = []
             self._use_smoothed_geometry = False
             self.smoothing.revert()
             self.smoothing_view.set_reference_profiles_xy([])
             self.smoothing_view.set_points_xy(list(self._structure_points))
+            self._sync_smoothed_table_from_points()
         self._update_geometry_labels()
 
     def _on_structure_point_moved(self, idx: int, x: float, y: float) -> None:
@@ -2447,6 +2629,7 @@ class TrenchDepoWindow(QMainWindow):
         if 0 <= int(idx) < len(self._smoothed_points):
             self._smoothed_points[int(idx)] = (float(x), float(y))
             self._use_smoothed_geometry = True
+            self._sync_smoothed_table_from_points()
             self._update_geometry_labels()
 
     def _on_smoothed_point_inserted(self, idx: int, x: float, y: float) -> None:
@@ -2455,6 +2638,7 @@ class TrenchDepoWindow(QMainWindow):
         insert_idx = max(0, min(int(idx), len(self._smoothed_points)))
         self._smoothed_points.insert(insert_idx, (float(x), float(y)))
         self._use_smoothed_geometry = True
+        self._sync_smoothed_table_from_points()
         self._update_geometry_labels()
 
     def _on_smoothed_point_deleted(self, idx: int) -> None:
@@ -2462,6 +2646,7 @@ class TrenchDepoWindow(QMainWindow):
         if 0 <= delete_idx < len(self._smoothed_points):
             self._smoothed_points.pop(delete_idx)
             self._use_smoothed_geometry = len(self._smoothed_points) >= 2
+            self._sync_smoothed_table_from_points()
             self._update_geometry_labels()
 
     def apply_structure_smoothing(self, _checked: bool = False) -> None:
@@ -2477,6 +2662,7 @@ class TrenchDepoWindow(QMainWindow):
         self._use_smoothed_geometry = True
         self.smoothing_view.set_reference_profiles_xy([list(self._structure_points)])
         self.smoothing_view.set_points_xy(list(self._smoothed_points))
+        self._sync_smoothed_table_from_points()
         self._update_geometry_labels()
         QTimer.singleShot(0, self.smoothing_view.fit_points)
         self.statusBar().showMessage(f"Smoothing applied: {len(self._smoothed_points)} points", 2500)
@@ -2516,17 +2702,166 @@ class TrenchDepoWindow(QMainWindow):
         )
         self.btn_use_smoothed_geometry.setEnabled(smooth_count >= 2)
 
+    def _set_overlay_opacity(self, opacity: float) -> None:
+        clamped = max(0.0, min(1.0, float(opacity)))
+        self._overlay_opacity = clamped
+        value = int(round(clamped * 100.0))
+        if hasattr(self, "slider_overlay_opacity"):
+            try:
+                self.slider_overlay_opacity.blockSignals(True)
+                self.slider_overlay_opacity.setValue(value)
+            finally:
+                self.slider_overlay_opacity.blockSignals(False)
+        self.structure_view.set_overlay_opacity(clamped)
+        self.smoothing_view.set_overlay_opacity(clamped)
+
+    def _on_overlay_opacity_changed(self, value: int) -> None:
+        self._set_overlay_opacity(float(value) / 100.0)
+
+    def _apply_overlay_state_to_smoothing_view(self) -> None:
+        state = self.structure_view.get_overlay_state()
+        if not state:
+            self.smoothing_view.clear_overlay_image()
+            return
+        image_path = state.get("image_path")
+        if not image_path:
+            self.smoothing_view.clear_overlay_image()
+            return
+        self.smoothing_view.set_overlay_image(
+            str(image_path),
+            scale_a_per_px=float(state.get("scale_a_per_px", 1.0)),
+            opacity=float(state.get("opacity", self._overlay_opacity)),
+            origin_x=float(state.get("origin_x", 0.0)),
+            origin_y=float(state.get("origin_y", 0.0)),
+            align_to_axes=False,
+        )
+
+    def _update_overlay_move_button_state(self) -> None:
+        has_overlay = self.structure_view.get_overlay_state() is not None
+        self.btn_move_overlay.setEnabled(has_overlay)
+        if not has_overlay and self.btn_move_overlay.isChecked():
+            try:
+                self.btn_move_overlay.blockSignals(True)
+                self.btn_move_overlay.setChecked(False)
+            finally:
+                self.btn_move_overlay.blockSignals(False)
+        self.structure_view.set_overlay_drag_enabled(has_overlay and self.btn_move_overlay.isChecked())
+
+    def _on_overlay_move_toggled(self, checked: bool) -> None:
+        has_overlay = self.structure_view.get_overlay_state() is not None
+        if not has_overlay and checked:
+            try:
+                self.btn_move_overlay.blockSignals(True)
+                self.btn_move_overlay.setChecked(False)
+            finally:
+                self.btn_move_overlay.blockSignals(False)
+            return
+        self.structure_view.set_overlay_drag_enabled(has_overlay and bool(checked))
+        if has_overlay:
+            self.statusBar().showMessage(
+                "Image move enabled" if checked else "Image move disabled",
+                1500,
+            )
+
+    def _set_overlay_image(
+        self,
+        image_path: str,
+        *,
+        scale_a_per_px: float,
+        align_to_axes: bool = True,
+        origin_x: Optional[float] = None,
+        origin_y: Optional[float] = None,
+    ) -> bool:
+        ok = self.structure_view.set_overlay_image(
+            str(image_path),
+            scale_a_per_px=float(scale_a_per_px),
+            opacity=self._overlay_opacity,
+            origin_x=origin_x,
+            origin_y=origin_y,
+            align_to_axes=align_to_axes,
+        )
+        if not ok:
+            return False
+        self._overlay_path = str(image_path)
+        self._overlay_scale_a_per_px = float(scale_a_per_px)
+        self._apply_overlay_state_to_smoothing_view()
+        self._update_overlay_move_button_state()
+        return True
+
+    def _load_overlay_image(self, _checked: bool = False) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load Image",
+            "",
+            "Images (*.png *.jpg *.jpeg *.bmp *.tif *.tiff);;All Files (*)",
+        )
+        if not path:
+            return
+        image_path = Path(path)
+        dlg = CalibrateDialog(image_path, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        scale = dlg.scale_a_per_px
+        if scale is None or scale <= 0.0:
+            QMessageBox.warning(self, "Image Overlay", "Calibration scale must be greater than zero.")
+            return
+        if not self._set_overlay_image(str(image_path), scale_a_per_px=float(scale), align_to_axes=True):
+            QMessageBox.warning(self, "Image Overlay", "Failed to load the selected image.")
+            return
+        self.statusBar().showMessage("Image overlay loaded", 2000)
+
+    def _clear_overlay_image(self, _checked: bool = False) -> None:
+        self.structure_view.clear_overlay_image()
+        self.smoothing_view.clear_overlay_image()
+        self._overlay_path = None
+        self._update_overlay_move_button_state()
+        self.statusBar().showMessage("Image overlay cleared", 1500)
+
     def active_emulator_number(self) -> int:
         checked_id = self.emulator_button_group.checkedId()
         if checked_id >= 0:
             return int(checked_id)
         return int(self._active_emulator_number)
 
-    def _scroll_right_panel_to(self, key: str) -> None:
-        target = self._workflow_scroll_targets.get(str(key))
-        if target is None:
+    def _workflow_index_for_step(self, step: str) -> int:
+        normalized = str(step).strip().lower()
+        if normalized in {"structure", "1"}:
+            return 0
+        if normalized in {"smoothing", "smooth", "2"}:
+            return 1
+        if normalized in {"result", "results", "3"}:
+            return 2
+        return 0
+
+    def _set_workflow_step(self, step: str) -> None:
+        self._set_workflow_index(self._workflow_index_for_step(step))
+
+    def _set_workflow_index(self, index: int) -> None:
+        workflow_index = max(0, min(2, int(index)))
+        if workflow_index == 1:
+            self._apply_overlay_state_to_smoothing_view()
+        if self._syncing_workflow_tabs:
+            self._sync_result_controls_visibility(workflow_index)
             return
-        self.right_scroll_area.ensureWidgetVisible(target, 0, 12)
+        self._syncing_workflow_tabs = True
+        try:
+            if self.view_tabs.currentIndex() != workflow_index:
+                self.view_tabs.setCurrentIndex(workflow_index)
+            if self.workflow_tabs.currentIndex() != workflow_index:
+                self.workflow_tabs.setCurrentIndex(workflow_index)
+        finally:
+            self._syncing_workflow_tabs = False
+        self._sync_result_controls_visibility(workflow_index)
+
+    def _sync_result_controls_visibility(self, workflow_index: Optional[int] = None) -> None:
+        index = self.view_tabs.currentIndex() if workflow_index is None else int(workflow_index)
+        self.result_controls_widget.setVisible(index == 2)
+
+    def _on_view_workflow_tab_changed(self, index: int) -> None:
+        self._set_workflow_index(index)
+
+    def _on_control_workflow_tab_changed(self, index: int) -> None:
+        self._set_workflow_index(index)
 
     def _add_emulator_toggle(self, number: int) -> None:
         target = max(0, min(MAX_EMULATOR_NUMBER, int(number)))
@@ -2578,6 +2913,7 @@ class TrenchDepoWindow(QMainWindow):
 
     def set_active_emulator_number(self, number: int, *, run: bool = False) -> None:
         target = max(0, min(MAX_EMULATOR_NUMBER, int(number)))
+        previous = self.active_emulator_number()
         created_any = False
         for slot_number in range(0, target + 1):
             if slot_number not in self._emulator_buttons:
@@ -2590,6 +2926,8 @@ class TrenchDepoWindow(QMainWindow):
             return
         button.setChecked(True)
         self.apply_emulator_mode(run=run)
+        if target != previous:
+            self._set_workflow_step("structure")
 
     def _active_emulator_supports_sputter(self) -> bool:
         return self.active_emulator_number() in (1, 2, 3, 4)
@@ -3511,7 +3849,8 @@ class TrenchDepoWindow(QMainWindow):
         self.slider_frame.setEnabled(max_idx > 0)
         self.slider_frame.blockSignals(False)
         self.show_frame(max_idx)
-        self.view_tabs.setCurrentIndex(0)
+        if not use_preview_cache:
+            self._set_workflow_step("results")
         QTimer.singleShot(0, self.view.fit_content)
         if run_dir is not None:
             self._set_run_dir_label(self._last_run_dir)
@@ -3835,7 +4174,7 @@ class TrenchDepoWindow(QMainWindow):
         self.slider_frame.setEnabled(max_idx > 0)
         self.slider_frame.blockSignals(False)
         self.show_frame(max_idx)
-        self.view_tabs.setCurrentIndex(0)
+        self._set_workflow_step("results")
         QTimer.singleShot(0, self.view.fit_content)
         self._set_run_dir_label(self._last_run_dir)
         self.btn_open_run_dir.setEnabled(True)
