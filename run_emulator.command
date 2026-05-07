@@ -6,7 +6,7 @@ SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
 run_python() {
-  "$1" -m gapsim.ui_qt.main_window
+  "$1" -m gapsim.emulation.trench_depo_ui
 }
 
 find_python() {
