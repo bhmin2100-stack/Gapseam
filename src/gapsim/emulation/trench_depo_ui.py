@@ -165,52 +165,62 @@ EMULATOR_PROCESS_PRESETS: dict[int, list[tuple[str, dict[str, object]]]] = {
 }
 
 
-def _draw_structure_minimap(
-    painter: QPainter,
+def _map_structure_points_to_rect(
     points: Sequence[Tuple[float, float]],
     rect: QRectF,
-    *,
-    label: str = "Structure",
-) -> None:
+) -> List[QPointF]:
     if len(points) < 2:
-        return
+        return []
     xs = [float(x) for x, _y in points]
     ys = [float(y) for _x, y in points]
     x_min, x_max = min(xs), max(xs)
     y_min, y_max = min(ys), max(ys)
     x_span = max(x_max - x_min, 1e-9)
     y_span = max(y_max - y_min, 1e-9)
-    pad = 8.0
-    draw_rect = rect.adjusted(pad, 17.0, -pad, -pad)
-    scale = min(draw_rect.width() / x_span, draw_rect.height() / y_span)
-    used_w = x_span * scale
-    used_h = y_span * scale
-    x_offset = draw_rect.left() + (draw_rect.width() - used_w) * 0.5
-    y_offset = draw_rect.top() + (draw_rect.height() - used_h) * 0.5
-
-    def map_point(point: Tuple[float, float]) -> QPointF:
-        x, y = point
-        return QPointF(
-            x_offset + ((float(x) - x_min) * scale),
-            y_offset + ((y_max - float(y)) * scale),
+    return [
+        QPointF(
+            rect.left() + (rect.width() * ((float(x) - x_min) / x_span)),
+            rect.top() + (rect.height() * ((y_max - float(y)) / y_span)),
         )
+        for x, y in points
+    ]
 
-    path = QPainterPath()
-    for idx, point in enumerate(points):
-        mapped = map_point(point)
+
+def _draw_structure_background(
+    painter: QPainter,
+    points: Sequence[Tuple[float, float]],
+    rect: QRectF,
+    *,
+    fill_color: Optional[QColor] = None,
+    line_color: Optional[QColor] = None,
+    line_width: float = 1.7,
+) -> None:
+    mapped_points = _map_structure_points_to_rect(points, rect)
+    if len(mapped_points) < 2:
+        return
+
+    profile = QPainterPath()
+    for idx, point in enumerate(mapped_points):
         if idx == 0:
-            path.moveTo(mapped)
+            profile.moveTo(point)
         else:
-            path.lineTo(mapped)
+            profile.lineTo(point)
 
-    painter.setPen(QPen(QColor(203, 213, 225), 1.0))
-    painter.setBrush(QColor(255, 255, 255, 230))
-    painter.drawRoundedRect(rect, 5.0, 5.0)
-    painter.setPen(QPen(QColor(71, 85, 105), 1.0))
-    painter.drawText(QPointF(rect.left() + 7.0, rect.top() + 12.0), label)
-    painter.setPen(QPen(QColor(30, 41, 59), 1.7))
+    solid = QPainterPath()
+    solid.moveTo(mapped_points[0])
+    for point in mapped_points[1:]:
+        solid.lineTo(point)
+    solid.lineTo(QPointF(mapped_points[-1].x(), rect.bottom()))
+    solid.lineTo(QPointF(mapped_points[0].x(), rect.bottom()))
+    solid.closeSubpath()
+
+    painter.save()
+    painter.setClipRect(rect)
+    painter.fillPath(solid, fill_color or QColor(226, 232, 240, 92))
+    painter.setPen(QPen(line_color or QColor(51, 65, 85, 170), line_width))
     painter.setBrush(Qt.BrushStyle.NoBrush)
-    painter.drawPath(path)
+    painter.drawPath(profile)
+    painter.restore()
 
 
 class SputterGaussianEditor(QWidget):
@@ -507,21 +517,6 @@ class IonTransmissionEditor(QWidget):
     def _map_rect(self) -> QRectF:
         return QRectF(32.0, 28.0, max(120.0, float(self.width()) - 64.0), max(72.0, float(self.height()) - 62.0))
 
-    def _bounds(self) -> Tuple[float, float, float, float]:
-        xs = [float(x) for x, _y in self._points]
-        ys = [float(y) for _x, y in self._points]
-        return (min(xs), max(xs), min(ys), max(ys))
-
-    def _point_to_widget(self, point: Tuple[float, float]) -> QPointF:
-        rect = self._map_rect()
-        x_min, x_max, y_min, y_max = self._bounds()
-        x_span = max(x_max - x_min, 1e-9)
-        y_span = max(y_max - y_min, 1e-9)
-        x, y = point
-        tx = (float(x) - x_min) / x_span
-        ty = (y_max - float(y)) / y_span
-        return QPointF(rect.left() + rect.width() * tx, rect.top() + rect.height() * ty)
-
     def _y_for_depth_pct(self, depth_pct: float) -> float:
         rect = self._map_rect()
         t = self._clamp(float(depth_pct) / 100.0, 0.0, 1.0)
@@ -676,6 +671,14 @@ class IonTransmissionEditor(QWidget):
         painter.setPen(QPen(QColor(203, 213, 225), 1.0))
         painter.setBrush(QColor(255, 255, 255))
         painter.drawRoundedRect(rect, 5.0, 5.0)
+        _draw_structure_background(
+            painter,
+            self._points,
+            rect,
+            fill_color=QColor(226, 232, 240, 82),
+            line_color=QColor(51, 65, 85, 185),
+            line_width=2.0,
+        )
 
         painter.setPen(QPen(QColor(226, 232, 240), 1.0))
         for depth_pct in (0.0, 25.0, 50.0, 75.0, 100.0):
@@ -684,20 +687,14 @@ class IonTransmissionEditor(QWidget):
         for factor in (0.0, 0.5, 1.0):
             x = self._x_for_factor(factor)
             painter.drawLine(QPointF(x, rect.top()), QPointF(x, rect.bottom()))
-
-        trench_path = QPainterPath()
-        for idx, point in enumerate(self._points):
-            mapped = self._point_to_widget(point)
-            if idx == 0:
-                trench_path.moveTo(mapped)
-            else:
-                trench_path.lineTo(mapped)
-        painter.setPen(QPen(QColor(51, 65, 85), 2.0))
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawPath(trench_path)
-
-        inset = QRectF(rect.left() + 8.0, rect.top() + 8.0, min(128.0, rect.width() * 0.28), min(78.0, rect.height() * 0.42))
-        _draw_structure_minimap(painter, self._points, inset)
+        _draw_structure_background(
+            painter,
+            self._points,
+            rect,
+            fill_color=QColor(0, 0, 0, 0),
+            line_color=QColor(51, 65, 85, 185),
+            line_width=2.0,
+        )
 
         start_y = self._y_for_depth_pct(self._start_depth_pct)
         painter.setPen(QPen(QColor(245, 158, 11), 1.6, Qt.PenStyle.DashLine))
@@ -1035,6 +1032,14 @@ class DepthDepositionProfileEditor(QWidget):
         painter.setPen(QPen(QColor(203, 213, 225), 1.0))
         painter.setBrush(QColor(255, 255, 255))
         painter.drawRoundedRect(rect, 5.0, 5.0)
+        _draw_structure_background(
+            painter,
+            self._structure_points,
+            rect,
+            fill_color=QColor(220, 252, 231, 58),
+            line_color=QColor(51, 65, 85, 165),
+            line_width=1.8,
+        )
 
         painter.setPen(QPen(QColor(226, 232, 240), 1.0))
         for depth_ratio in (0.0, 0.25, 0.5, 0.75, 1.0):
@@ -1053,11 +1058,22 @@ class DepthDepositionProfileEditor(QWidget):
             reduction_area.lineTo(QPointF(self._x_for_ratio(ratio), self._y_for_depth_ratio(depth_ratio)))
         reduction_area.closeSubpath()
         painter.fillPath(reduction_area, QColor(219, 234, 254, 72))
+        _draw_structure_background(
+            painter,
+            self._structure_points,
+            rect,
+            fill_color=QColor(0, 0, 0, 0),
+            line_color=QColor(51, 65, 85, 165),
+            line_width=1.8,
+        )
 
         painter.setPen(QPen(QColor(37, 99, 235, 165), 1.5, Qt.PenStyle.DashLine))
         painter.drawLine(QPointF(conformal_x, rect.top()), QPointF(conformal_x, rect.bottom()))
         painter.setPen(QPen(QColor(30, 64, 175), 1.0))
         painter.drawText(QPointF(max(rect.left(), conformal_x - 92.0), rect.top() - 8.0), "Conformal 100%")
+        bottom_ear = self._effective_ar_at_depth_ratio(1.0)
+        painter.setPen(QPen(QColor(15, 23, 42), 1.0))
+        painter.drawText(QPointF(rect.left() + 8.0, rect.bottom() - 8.0), f"Eff AR {bottom_ear:.2f}")
 
         for depth_ratio in (0.18, 0.36, 0.54, 0.72, 0.90):
             y = self._y_for_depth_ratio(depth_ratio)
@@ -1068,12 +1084,6 @@ class DepthDepositionProfileEditor(QWidget):
                 QPointF(self._x_for_ratio(ratio) + 4.0, y),
                 QColor(37, 99, 235, 150),
             )
-
-        bottom_ear = self._effective_ar_at_depth_ratio(1.0)
-        inset = QRectF(rect.left() + 8.0, rect.top() + 12.0, min(150.0, rect.width() * 0.30), min(96.0, rect.height() * 0.48))
-        _draw_structure_minimap(painter, self._structure_points, inset)
-        painter.setPen(QPen(QColor(15, 23, 42), 1.0))
-        painter.drawText(QPointF(inset.left() + 7.0, min(rect.bottom() - 4.0, inset.bottom() + 15.0)), f"Eff AR {bottom_ear:.2f}")
 
         floor_x = self._x_for_ratio(float(self._min_ratio_pct) / 100.0)
         painter.setPen(QPen(QColor(22, 163, 74), 1.4, Qt.PenStyle.DashLine))
@@ -3079,7 +3089,7 @@ class TrenchDepoWindow(QMainWindow):
             return
         self._show_result_input_preview(fit=fit)
 
-    def _sync_structure_minimap_editors(self) -> None:
+    def _sync_structure_map_editors(self) -> None:
         if not hasattr(self, "ion_transmission_editor") or not hasattr(self, "depth_deposition_editor"):
             return
         points = self._current_geometry_points()
@@ -3125,7 +3135,7 @@ class TrenchDepoWindow(QMainWindow):
             f"Smooth: {smooth_count} pts" if smooth_count else "Smooth: not applied"
         )
         self.btn_use_smoothed_geometry.setEnabled(smooth_count >= 2)
-        self._sync_structure_minimap_editors()
+        self._sync_structure_map_editors()
 
     def _set_overlay_opacity(self, opacity: float) -> None:
         clamped = max(0.0, min(1.0, float(opacity)))
@@ -3666,14 +3676,14 @@ class TrenchDepoWindow(QMainWindow):
                 self.chk_depth_deposition.setText("Inhibition deposition")
                 self.lbl_depth_depo_section.setText("6 Inhibition-weighted deposition")
                 self.lbl_depth_parameter_help.setText(
-                    "Inhibition map: top growth is suppressed first. The mini-map shows the active structure."
+                    "Inhibition map: active structure fills the background."
                 )
                 self.edit_request_note.setPlaceholderText("Request note / inhibition notes are saved with the run.")
             else:
                 self.chk_depth_deposition.setText("Depth-dependent deposition")
                 self.lbl_depth_depo_section.setText("5 Depth-dependent deposition")
                 self.lbl_depth_parameter_help.setText(
-                    "Depth map: deeper areas receive less deposition. The mini-map shows the active structure."
+                    "Depth map: active structure fills the background."
                 )
                 self.edit_request_note.setPlaceholderText("Request note / depth fill notes are saved with the run.")
         else:

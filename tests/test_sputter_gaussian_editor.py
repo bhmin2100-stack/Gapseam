@@ -13,7 +13,7 @@ os.environ.setdefault(
     str(Path(_STRUCTURE_LIBRARY_TMP.name) / "structures.xlsx"),
 )
 
-from PySide6.QtCore import QPointF
+from PySide6.QtCore import QPointF, QRectF
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QApplication
 
@@ -30,6 +30,7 @@ from gapsim.emulation.trench_depo_ui import (
     RedepositionLobeEditor,
     SputterGaussianEditor,
     TrenchDepoWindow,
+    _map_structure_points_to_rect,
 )
 
 
@@ -97,7 +98,17 @@ class SputterGaussianEditorTest(unittest.TestCase):
         self.assertAlmostEqual(editor.parameters()[2], 0.0, places=6)
         self.assertTrue(seen)
 
-    def test_ion_transmission_editor_renders_minimap(self) -> None:
+    def test_structure_background_mapping_fills_plot_rect(self) -> None:
+        rect = QRectF(44.0, 30.0, 320.0, 150.0)
+        mapped = _map_structure_points_to_rect(ION_TRANSMISSION_STEPPED_TRENCH_POINTS, rect)
+
+        self.assertGreaterEqual(len(mapped), 2)
+        self.assertAlmostEqual(min(point.x() for point in mapped), rect.left(), places=6)
+        self.assertAlmostEqual(max(point.x() for point in mapped), rect.right(), places=6)
+        self.assertAlmostEqual(min(point.y() for point in mapped), rect.top(), places=6)
+        self.assertAlmostEqual(max(point.y() for point in mapped), rect.bottom(), places=6)
+
+    def test_ion_transmission_editor_renders_full_structure_background(self) -> None:
         editor = IonTransmissionEditor()
         editor.resize(420, 170)
         editor.set_parameters(20.0, 90.0, 65.0, 15.0, 1.4)
@@ -172,7 +183,7 @@ class SputterGaussianEditorTest(unittest.TestCase):
         self.assertAlmostEqual(editor.parameters()[3], 24.0, places=6)
         self.assertTrue(seen)
 
-    def test_depth_deposition_editor_renders_profile_curve(self) -> None:
+    def test_depth_deposition_editor_renders_profile_curve_with_structure_background(self) -> None:
         editor = DepthDepositionProfileEditor()
         editor.resize(420, 170)
         editor.set_feature_geometry("line", 280.0, 4200.0, 2500.0)
@@ -216,7 +227,7 @@ class SputterGaussianEditorTest(unittest.TestCase):
         finally:
             window.close()
 
-    def test_emulator_two_shows_ion_transmission_minimap_controls(self) -> None:
+    def test_emulator_two_shows_ion_transmission_map_controls(self) -> None:
         result = TrenchDepoResult(
             frame_steps=[0],
             frame_profiles=[[(0.0, 0.0), (1.0, 0.0)]],
