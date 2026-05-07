@@ -467,8 +467,18 @@ class SputterGaussianEditorTest(unittest.TestCase):
             self.assertFalse(config.sputter_enabled)
             self.assertFalse(config.redepo_enabled)
             self.assertEqual(config.deposition_feature_type, "hole")
+            self.assertIsNone(config.deposition_feature_length_a)
+            self.assertFalse(window.spin_depth_feature_length.isEnabled())
             self.assertAlmostEqual(config.deposition_min_ratio, 0.03, places=6)
             self.assertAlmostEqual(config.deposition_post_closure_fill_pct_hole, 0.03, places=6)
+
+            line_idx = window.cmb_depth_feature_type.findData("line")
+            window.cmb_depth_feature_type.setCurrentIndex(line_idx)
+            window.spin_depth_feature_length.setValue(2500.0)
+            self.assertTrue(window.spin_depth_feature_length.isEnabled())
+            config = window.current_config()
+            self.assertEqual(config.deposition_feature_type, "line")
+            self.assertAlmostEqual(config.deposition_feature_length_a, 2500.0, places=6)
 
             window.spin_depth_decay_k.setValue(1.1)
             self.assertAlmostEqual(window.depth_deposition_editor.parameters()[0], 1.1, places=6)

@@ -955,24 +955,80 @@ class DepthDepositionProfileEditor(QWidget):
                 QColor(37, 99, 235, 150),
             )
 
+        feature_width = max(1.0, float(self._feature_width_a))
+        feature_depth = max(1.0, float(self._feature_depth_a))
+        feature_length = self._feature_length_a
+        bottom_ear = self._effective_ar_at_depth_ratio(1.0)
+        preview_w = min(rect.width() * 0.30, 122.0)
+        preview_h = rect.height() * self._clamp(
+            math.sqrt(feature_depth / max(feature_depth + feature_width, 1e-9)),
+            0.36,
+            0.95,
+        )
+        width_factor = self._clamp(math.sqrt(feature_width / max(feature_width + (feature_depth * 0.18), 1e-9)), 0.22, 1.0)
+        feature_px_w = max(18.0, preview_w * width_factor)
+        center_x = rect.left() + 10.0 + (preview_w * 0.5)
+        top_y = rect.top() + 16.0
+        bottom_y = min(rect.bottom() - 14.0, top_y + preview_h)
+        half_open = feature_px_w * 0.5
+
         trench = QPainterPath()
-        center_x = rect.left() + rect.width() * 0.16
-        half_open = min(rect.width() * 0.10, max(8.0, rect.width() * 0.30 / max(1.0, self._effective_ar_at_depth_ratio(1.0))))
-        trench.moveTo(QPointF(center_x - half_open, rect.top() + 10.0))
-        trench.cubicTo(
-            QPointF(center_x - half_open * 0.80, rect.top() + rect.height() * 0.25),
-            QPointF(center_x - half_open * 1.55, rect.top() + rect.height() * 0.55),
-            QPointF(center_x - half_open * 0.55, rect.bottom() - 8.0),
-        )
-        trench.lineTo(QPointF(center_x + half_open * 0.55, rect.bottom() - 8.0))
-        trench.cubicTo(
-            QPointF(center_x + half_open * 1.55, rect.top() + rect.height() * 0.55),
-            QPointF(center_x + half_open * 0.80, rect.top() + rect.height() * 0.25),
-            QPointF(center_x + half_open, rect.top() + 10.0),
-        )
+        if self._feature_type == "line":
+            trench.moveTo(QPointF(center_x - half_open, top_y))
+            trench.lineTo(QPointF(center_x - half_open * 0.78, bottom_y))
+            trench.lineTo(QPointF(center_x + half_open * 0.78, bottom_y))
+            trench.lineTo(QPointF(center_x + half_open, top_y))
+            trench.closeSubpath()
+        else:
+            trench.moveTo(QPointF(center_x - half_open, top_y))
+            trench.cubicTo(
+                QPointF(center_x - half_open * 0.72, top_y + ((bottom_y - top_y) * 0.25)),
+                QPointF(center_x - half_open * 1.35, top_y + ((bottom_y - top_y) * 0.58)),
+                QPointF(center_x - half_open * 0.46, bottom_y),
+            )
+            trench.lineTo(QPointF(center_x + half_open * 0.46, bottom_y))
+            trench.cubicTo(
+                QPointF(center_x + half_open * 1.35, top_y + ((bottom_y - top_y) * 0.58)),
+                QPointF(center_x + half_open * 0.72, top_y + ((bottom_y - top_y) * 0.25)),
+                QPointF(center_x + half_open, top_y),
+            )
         painter.setPen(QPen(QColor(187, 247, 208, 150), 2.0))
         painter.setBrush(QColor(220, 252, 231, 75))
         painter.drawPath(trench)
+        painter.setPen(QPen(QColor(22, 101, 52), 1.0))
+        dim_y = max(rect.top() + 5.0, top_y - 7.0)
+        painter.drawLine(QPointF(center_x - half_open, dim_y), QPointF(center_x + half_open, dim_y))
+        painter.drawLine(QPointF(center_x - half_open, dim_y - 3.0), QPointF(center_x - half_open, dim_y + 3.0))
+        painter.drawLine(QPointF(center_x + half_open, dim_y - 3.0), QPointF(center_x + half_open, dim_y + 3.0))
+        painter.drawText(QPointF(center_x - half_open, max(rect.top() + 9.0, dim_y - 5.0)), f"W {feature_width:.0f}A")
+
+        depth_x = center_x - half_open - 11.0
+        painter.drawLine(QPointF(depth_x, top_y), QPointF(depth_x, bottom_y))
+        painter.drawLine(QPointF(depth_x - 3.0, top_y), QPointF(depth_x + 3.0, top_y))
+        painter.drawLine(QPointF(depth_x - 3.0, bottom_y), QPointF(depth_x + 3.0, bottom_y))
+        painter.drawText(QPointF(depth_x + 4.0, min(rect.bottom() - 20.0, top_y + 28.0)), f"D {feature_depth:.0f}A")
+
+        painter.setPen(QPen(QColor(77, 124, 15), 1.0))
+        if self._feature_type == "line":
+            if feature_length is None:
+                length_text = "L open"
+                length_factor = 1.0
+            else:
+                length_text = f"L {float(feature_length):.0f}A"
+                length_factor = self._clamp(
+                    math.sqrt(float(feature_length) / max(float(feature_length) + (feature_width * 6.0), 1e-9)),
+                    0.28,
+                    1.0,
+                )
+            length_y = min(rect.bottom() - 4.0, bottom_y + 9.0)
+            length_half = preview_w * 0.45 * length_factor
+            painter.drawLine(QPointF(center_x - length_half, length_y), QPointF(center_x + length_half, length_y))
+            painter.drawText(QPointF(center_x - length_half, length_y - 4.0), length_text)
+        else:
+            painter.drawText(QPointF(center_x - half_open, min(rect.bottom() - 4.0, bottom_y + 12.0)), "Length ignored")
+
+        painter.setPen(QPen(QColor(15, 23, 42), 1.0))
+        painter.drawText(QPointF(rect.left() + 6.0, rect.bottom() - 4.0), f"Eff AR {bottom_ear:.2f}")
 
         floor_x = self._x_for_ratio(float(self._min_ratio_pct) / 100.0)
         painter.setPen(QPen(QColor(22, 163, 74), 1.4, Qt.PenStyle.DashLine))
@@ -2144,6 +2200,7 @@ class TrenchDepoWindow(QMainWindow):
         self.lbl_depth_residual_decay = QLabel("Decay len A")
         self.lbl_depth_parameter_help = QLabel(
             "5번은 etch 없이 기본 Depo A/CYC에 깊이별 증착 비율을 곱합니다. "
+            "Width A는 입구 폭, Depth A는 100% 기준 깊이, Length A는 Line 구조에서만 쓰는 길이입니다. "
             "Decay K는 깊을수록 줄어드는 세기, Power는 곡선 모양, Min %는 바닥 최저 증착률, "
             "Close A와 post-fill 값은 입구가 닫힌 뒤 남은 빈 공간을 얼마나 더 채울지 정합니다."
         )
@@ -2540,6 +2597,7 @@ class TrenchDepoWindow(QMainWindow):
 
         self.apply_emulator_mode(run=False)
         self._reset_geometry_to_default()
+        self.sync_depth_deposition_editor_from_spins()
         self._set_workflow_step("structure")
 
     def _default_points_for_active_emulator(self) -> List[Tuple[float, float]]:
@@ -3165,6 +3223,7 @@ class TrenchDepoWindow(QMainWindow):
             else:
                 self.edit_request_note.setPlaceholderText("아직 물리 모델이 배정되지 않은 슬롯입니다. 기본 conformal depo로만 실행됩니다.")
 
+        self.sync_depth_deposition_editor_from_spins()
         self._populate_split_parameters()
         self.sync_etch_control_availability()
         if run:
@@ -3287,12 +3346,16 @@ class TrenchDepoWindow(QMainWindow):
             return
         self._syncing_depth_curve = True
         try:
+            feature_type = str(self.cmb_depth_feature_type.currentData() or "hole")
+            length_enabled = feature_type == "line"
+            self.lbl_depth_feature_length.setEnabled(length_enabled)
+            self.spin_depth_feature_length.setEnabled(length_enabled)
             depth_feature_length = float(self.spin_depth_feature_length.value())
             self.depth_deposition_editor.set_feature_geometry(
-                str(self.cmb_depth_feature_type.currentData() or "hole"),
+                feature_type,
                 float(self.spin_depth_feature_width.value()),
                 float(self.spin_depth_feature_depth.value()),
-                None if depth_feature_length <= 0.0 else depth_feature_length,
+                None if (not length_enabled or depth_feature_length <= 0.0) else depth_feature_length,
             )
             self.depth_deposition_editor.set_parameters(
                 float(self.spin_depth_decay_k.value()),
@@ -3318,12 +3381,16 @@ class TrenchDepoWindow(QMainWindow):
             self.spin_depth_decay_power.setValue(float(decay_power))
             self.spin_depth_min_ratio_pct.setValue(float(min_ratio_pct))
             self.spin_depth_closure_threshold.setValue(float(closure_threshold_a))
+            feature_type = str(self.cmb_depth_feature_type.currentData() or "hole")
+            length_enabled = feature_type == "line"
+            self.lbl_depth_feature_length.setEnabled(length_enabled)
+            self.spin_depth_feature_length.setEnabled(length_enabled)
             depth_feature_length = float(self.spin_depth_feature_length.value())
             self.depth_deposition_editor.set_feature_geometry(
-                str(self.cmb_depth_feature_type.currentData() or "hole"),
+                feature_type,
                 float(self.spin_depth_feature_width.value()),
                 float(self.spin_depth_feature_depth.value()),
-                None if depth_feature_length <= 0.0 else depth_feature_length,
+                None if (not length_enabled or depth_feature_length <= 0.0) else depth_feature_length,
             )
             self.depth_deposition_editor.set_parameters(
                 float(self.spin_depth_decay_k.value()),
@@ -3469,6 +3536,11 @@ class TrenchDepoWindow(QMainWindow):
             self.depth_deposition_editor,
         ]:
             widget.setEnabled(depth_enabled)
+        length_enabled = bool(
+            depth_enabled and str(self.cmb_depth_feature_type.currentData() or "hole") == "line"
+        )
+        self.lbl_depth_feature_length.setEnabled(length_enabled)
+        self.spin_depth_feature_length.setEnabled(length_enabled)
 
     def reset_defaults(self) -> None:
         supports_sputter = self._active_emulator_supports_sputter()
@@ -3636,6 +3708,7 @@ class TrenchDepoWindow(QMainWindow):
         supports_redeposition = self._active_emulator_supports_redeposition()
         supports_depth_deposition = self._active_emulator_supports_depth_deposition()
         etch_enabled = bool(supports_sputter and self.chk_sputter.isChecked())
+        depth_feature_type = str(self.cmb_depth_feature_type.currentData() or "hole")
         depth_feature_length = float(self.spin_depth_feature_length.value())
         return TrenchDepoConfig(
             points=self._current_geometry_points(),
@@ -3698,10 +3771,12 @@ class TrenchDepoWindow(QMainWindow):
             deposition_depth_enabled=bool(
                 supports_depth_deposition and self.chk_depth_deposition.isChecked()
             ),
-            deposition_feature_type=str(self.cmb_depth_feature_type.currentData() or "hole"),
+            deposition_feature_type=depth_feature_type,
             deposition_feature_width_a=float(self.spin_depth_feature_width.value()),
             deposition_feature_depth_a=float(self.spin_depth_feature_depth.value()),
-            deposition_feature_length_a=None if depth_feature_length <= 0.0 else depth_feature_length,
+            deposition_feature_length_a=(
+                None if depth_feature_type != "line" or depth_feature_length <= 0.0 else depth_feature_length
+            ),
             deposition_attenuation_model="exponential",
             deposition_depth_decay_k=float(self.spin_depth_decay_k.value()),
             deposition_depth_decay_power=float(self.spin_depth_decay_power.value()),
