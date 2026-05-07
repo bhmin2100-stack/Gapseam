@@ -466,6 +466,47 @@ class SputterGaussianEditorTest(unittest.TestCase):
             finally:
                 window.close()
 
+    def test_run_progress_bar_tracks_cycle_callback(self) -> None:
+        result = TrenchDepoResult(
+            frame_steps=[0, 1, 2, 3],
+            frame_profiles=[
+                [(0.0, 0.0), (1.0, 0.0)],
+                [(0.0, -1.0), (1.0, -1.0)],
+                [(0.0, -2.0), (1.0, -2.0)],
+                [(0.0, -3.0), (1.0, -3.0)],
+            ],
+            frame_voids=[[], [], [], []],
+            final_profile=[(0.0, -3.0), (1.0, -3.0)],
+            meta={"cycles": 3},
+        )
+
+        window_holder = {}
+
+        def fake_run(config, *, progress_cb=None, **_kwargs):
+            self.assertIsNotNone(progress_cb)
+            window = window_holder["window"]
+            self.assertFalse(window.progress_run.isHidden())
+            progress_cb(0, 3)
+            progress_cb(2, 3)
+            progress_cb(3, 3)
+            self.assertEqual(window.progress_run.maximum(), 3)
+            self.assertEqual(window.progress_run.value(), 3)
+            return result
+
+        with (
+            mock.patch("gapsim.emulation.trench_depo_ui.run_trench_depo", side_effect=fake_run),
+            mock.patch("gapsim.emulation.trench_depo_ui.QTimer.singleShot"),
+        ):
+            window = TrenchDepoWindow()
+            window_holder["window"] = window
+            try:
+                window.run_emulation(save_artifacts=False)
+
+                self.assertTrue(window.progress_run.isHidden())
+                self.assertEqual(window.lbl_status.text(), "Cycle 3/3 | Points 2")
+            finally:
+                window.close()
+
     def test_emulator_five_is_depth_deposition_only_with_bowed_jar_geometry(self) -> None:
         result = TrenchDepoResult(
             frame_steps=[0],

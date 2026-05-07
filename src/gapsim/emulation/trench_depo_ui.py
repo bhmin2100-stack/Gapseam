@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QSlider,
@@ -1909,6 +1910,13 @@ class TrenchDepoWindow(QMainWindow):
         self.btn_run = QPushButton("Run")
         self.btn_reset = QPushButton("Reset")
         self.btn_open_json = QPushButton("Open JSON")
+        self.progress_run = QProgressBar()
+        self.progress_run.setRange(0, 100)
+        self.progress_run.setValue(0)
+        self.progress_run.setTextVisible(True)
+        self.progress_run.setFormat("Ready")
+        self.progress_run.setVisible(False)
+        self.progress_run.setFixedHeight(18)
         self.slider_frame = QSlider(Qt.Orientation.Horizontal)
         self.slider_frame.setRange(0, 0)
         self.slider_frame.setEnabled(False)
@@ -2369,6 +2377,7 @@ class TrenchDepoWindow(QMainWindow):
         action_buttons.addWidget(self.btn_run)
         action_buttons.addWidget(self.btn_reset)
         action_layout.addLayout(action_buttons)
+        action_layout.addWidget(self.progress_run)
         result_option_buttons = QHBoxLayout()
         result_option_buttons.addWidget(self.btn_split_options)
         result_option_buttons.addWidget(self.btn_compare_options)
@@ -4473,6 +4482,39 @@ class TrenchDepoWindow(QMainWindow):
             float(config.inhibition_smoothing_a),
         )
 
+    def _start_run_progress(self, label: str) -> None:
+        self.progress_run.setRange(0, 0)
+        self.progress_run.setValue(0)
+        self.progress_run.setFormat(label)
+        self.progress_run.setVisible(True)
+        QApplication.processEvents()
+
+    def _update_run_progress(self, step: int, total: int, *, label: str = "Running") -> None:
+        total_i = max(0, int(total))
+        step_i = max(0, int(step))
+        if total_i <= 0:
+            self.progress_run.setRange(0, 1)
+            self.progress_run.setValue(1)
+            self.progress_run.setFormat(f"{label}: complete")
+            self.lbl_status.setText(f"{label}: complete")
+        else:
+            step_i = min(step_i, total_i)
+            self.progress_run.setRange(0, total_i)
+            self.progress_run.setValue(step_i)
+            self.progress_run.setFormat(f"{label}: {step_i}/{total_i}")
+            self.lbl_status.setText(f"{label}: {step_i}/{total_i}")
+        self.progress_run.setVisible(True)
+        QApplication.processEvents()
+
+    def _finish_run_progress(self, *, success: bool) -> None:
+        if success:
+            maximum = max(1, self.progress_run.maximum())
+            self.progress_run.setRange(0, maximum)
+            self.progress_run.setValue(maximum)
+            self.progress_run.setFormat("Done")
+            QApplication.processEvents()
+        self.progress_run.setVisible(False)
+
     def run_emulation(
         self,
         _checked: bool = False,
@@ -4482,22 +4524,36 @@ class TrenchDepoWindow(QMainWindow):
     ) -> None:
         self._emulator_run_timer.stop()
         self.btn_run.setEnabled(False)
+        success = False
         try:
             config = self.current_config()
             run_dir: Optional[Path] = None
             cache_key = self._preview_cache_key(config)
             if use_preview_cache and not save_artifacts and cache_key in self._preview_result_cache:
+                self._start_run_progress("Loading cached run")
                 result = self._preview_result_cache[cache_key]
+                self._update_run_progress(1, 1, label="Cached run")
             else:
-                result = run_trench_depo(config)
+                self._start_run_progress("Running simulation")
+                result = run_trench_depo(
+                    config,
+                    progress_cb=lambda step, total: self._update_run_progress(
+                        step,
+                        total,
+                        label="Run",
+                    ),
+                )
                 self._preview_result_cache[cache_key] = result
             if save_artifacts:
+                self._start_run_progress("Saving run")
                 run_dir = export_trench_depo_run(
                     config,
                     result,
                     request_note=self.edit_request_note.toPlainText(),
                     runs_root=DEFAULT_RUNS_ROOT,
                 )
+                self._update_run_progress(1, 1, label="Saved")
+            success = True
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(
                 self,
@@ -4507,6 +4563,7 @@ class TrenchDepoWindow(QMainWindow):
             return
         finally:
             self.btn_run.setEnabled(True)
+            self._finish_run_progress(success=success)
 
         self._result = result
         self._last_run_dir = run_dir.resolve() if run_dir is not None else None
@@ -4539,6 +4596,8 @@ class TrenchDepoWindow(QMainWindow):
         self.btn_run_split.setEnabled(False)
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         self.statusBar().showMessage("Split test 계산 중...")
+        success = False
+        self._start_run_progress("Running split")
         try:
             parameter = str(self.cmb_split_parameter.currentData())
             cases = run_trench_depo_sweep(
@@ -4548,12 +4607,20 @@ class TrenchDepoWindow(QMainWindow):
                 float(self.spin_split_end.value()),
                 float(self.spin_split_step.value()),
                 max_cases=24,
+                progress_cb=lambda idx, total, _cfg: self._update_run_progress(
+                    idx,
+                    total,
+                    label="Split",
+                ),
             )
+            self._start_run_progress("Saving split")
             saved_dirs = export_trench_depo_sweep_runs(
                 cases,
                 request_note=self.edit_request_note.toPlainText(),
                 runs_root=DEFAULT_RUNS_ROOT,
             )
+            self._update_run_progress(1, 1, label="Saved")
+            success = True
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(
                 self,
@@ -4564,6 +4631,7 @@ class TrenchDepoWindow(QMainWindow):
         finally:
             QApplication.restoreOverrideCursor()
             self.btn_run_split.setEnabled(True)
+            self._finish_run_progress(success=success)
 
         if not cases:
             return
@@ -4602,14 +4670,31 @@ class TrenchDepoWindow(QMainWindow):
         self.btn_run_compare.setEnabled(False)
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         self.statusBar().showMessage(f"Emulator {active_number:02d}/{target:02d} 비교 계산 중...")
+        success = False
+        self._start_run_progress(f"Running emulator {active_number:02d}")
         try:
             current_cfg = self._config_for_emulator_number(active_number, force_model_enabled=True)
             target_cfg = self._config_for_emulator_number(target, force_model_enabled=True)
             t0 = time.perf_counter()
-            current_result = run_trench_depo(current_cfg)
+            current_result = run_trench_depo(
+                current_cfg,
+                progress_cb=lambda step, total: self._update_run_progress(
+                    step,
+                    total,
+                    label=f"Emulator {active_number:02d}",
+                ),
+            )
             current_elapsed = time.perf_counter() - t0
             t1 = time.perf_counter()
-            target_result = run_trench_depo(target_cfg)
+            self._start_run_progress(f"Running emulator {target:02d}")
+            target_result = run_trench_depo(
+                target_cfg,
+                progress_cb=lambda step, total: self._update_run_progress(
+                    step,
+                    total,
+                    label=f"Emulator {target:02d}",
+                ),
+            )
             target_elapsed = time.perf_counter() - t1
             cases = [
                 TrenchSweepResult(
@@ -4627,6 +4712,7 @@ class TrenchDepoWindow(QMainWindow):
                     result=target_result,
                 ),
             ]
+            success = True
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(
                 self,
@@ -4637,6 +4723,7 @@ class TrenchDepoWindow(QMainWindow):
         finally:
             QApplication.restoreOverrideCursor()
             self.btn_run_compare.setEnabled(True)
+            self._finish_run_progress(success=success)
 
         window = SplitTestWindow(cases)
         window.destroyed.connect(lambda _obj=None, w=window: self._forget_split_window(w))
@@ -4657,14 +4744,31 @@ class TrenchDepoWindow(QMainWindow):
         self.btn_run_compare.setEnabled(False)
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         self.statusBar().showMessage("GapSim angle-only 비교 계산 중...")
+        success = False
+        self._start_run_progress("Running current model")
         try:
             config = self._config_for_emulator_number(self.active_emulator_number(), force_model_enabled=True)
             t0 = time.perf_counter()
-            mini_result = run_trench_depo(config)
+            mini_result = run_trench_depo(
+                config,
+                progress_cb=lambda step, total: self._update_run_progress(
+                    step,
+                    total,
+                    label="Current model",
+                ),
+            )
             mini_elapsed = time.perf_counter() - t0
             t1 = time.perf_counter()
             baseline_config = config
-            comparison_result = run_trench_depo_legacy_sputter(config)
+            self._start_run_progress("Running GapSim legacy")
+            comparison_result = run_trench_depo_legacy_sputter(
+                config,
+                progress_cb=lambda step, total: self._update_run_progress(
+                    step,
+                    total,
+                    label="GapSim legacy",
+                ),
+            )
             comparison_label = "GapSim angle-only"
             comparison_elapsed = time.perf_counter() - t1
             cases = [
@@ -4683,6 +4787,7 @@ class TrenchDepoWindow(QMainWindow):
                     result=comparison_result,
                 ),
             ]
+            success = True
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(
                 self,
@@ -4693,6 +4798,7 @@ class TrenchDepoWindow(QMainWindow):
         finally:
             QApplication.restoreOverrideCursor()
             self.btn_run_compare.setEnabled(True)
+            self._finish_run_progress(success=success)
 
         window = SplitTestWindow(cases)
         window.destroyed.connect(lambda _obj=None, w=window: self._forget_split_window(w))
