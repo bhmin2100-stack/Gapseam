@@ -19,6 +19,7 @@ from gapsim.emulation.trench_depo import (
     TrenchSweepResult,
 )
 from gapsim.emulation.trench_depo_ui import (
+    DepthDepositionProfileEditor,
     IonTransmissionEditor,
     RedepositionLobeEditor,
     SputterGaussianEditor,
@@ -132,6 +133,44 @@ class SputterGaussianEditorTest(unittest.TestCase):
         editor = RedepositionLobeEditor()
         editor.resize(420, 150)
         editor.set_parameters(45.0, 2.0, 1.5)
+        pixmap = QPixmap(editor.size())
+
+        editor.render(pixmap)
+
+        self.assertFalse(pixmap.isNull())
+
+    def test_depth_deposition_editor_drags_decay_floor_and_closure(self) -> None:
+        editor = DepthDepositionProfileEditor()
+        editor.resize(420, 170)
+        seen = []
+        editor.parametersChanged.connect(lambda k, power, floor, close: seen.append((k, power, floor, close)))
+
+        editor._apply_drag("floor", QPointF(editor._x_for_ratio(0.12), editor._y_for_depth_ratio(1.0)))
+        self.assertAlmostEqual(editor.parameters()[2], 12.0, places=6)
+
+        editor._apply_drag(
+            "attenuation",
+            QPointF(editor._x_for_ratio(0.60), editor._y_for_depth_ratio(1.0)),
+        )
+        self.assertGreaterEqual(editor.parameters()[0], 0.0)
+        self.assertLess(editor.parameters()[0], 0.8)
+
+        editor._apply_drag("power", QPointF(editor._x_for_ratio(0.80), editor._y_for_depth_ratio(0.5)))
+        self.assertGreaterEqual(editor.parameters()[1], 0.05)
+        self.assertLessEqual(editor.parameters()[1], 8.0)
+
+        editor._apply_drag(
+            "closure",
+            QPointF(editor._x_for_closure_threshold(24.0), editor._plot_rect().top() + 8.0),
+        )
+        self.assertAlmostEqual(editor.parameters()[3], 24.0, places=6)
+        self.assertTrue(seen)
+
+    def test_depth_deposition_editor_renders_profile_curve(self) -> None:
+        editor = DepthDepositionProfileEditor()
+        editor.resize(420, 170)
+        editor.set_feature_geometry("line", 280.0, 4200.0, 2500.0)
+        editor.set_parameters(0.55, 1.5, 7.0, 12.0)
         pixmap = QPixmap(editor.size())
 
         editor.render(pixmap)
@@ -401,7 +440,14 @@ class SputterGaussianEditorTest(unittest.TestCase):
             self.assertTrue(all(not widget.isHidden() for widget in window._depth_deposition_widgets))
             self.assertTrue(all(widget.isHidden() for widget in window._sputter_widgets))
             self.assertTrue(all(widget.isHidden() for widget in window._redeposition_widgets))
+            self.assertFalse(window.depth_profile_group.isHidden())
             self.assertTrue(window.chk_depth_deposition.isChecked())
+            scroll_content = window.right_scroll_area.widget()
+            self.assertIs(window.gaussian_group.parent(), scroll_content)
+            self.assertIs(window.ion_map_group.parent(), scroll_content)
+            self.assertIs(window.redepo_lobe_group.parent(), scroll_content)
+            self.assertIs(window.depth_profile_group.parent(), scroll_content)
+            self.assertEqual(window.workflow_group.title(), "Workflow")
 
             config = window.current_config()
             self.assertEqual(tuple(config.points), BOWED_JAR_TRENCH_POINTS)
@@ -411,6 +457,19 @@ class SputterGaussianEditorTest(unittest.TestCase):
             self.assertEqual(config.deposition_feature_type, "hole")
             self.assertAlmostEqual(config.deposition_min_ratio, 0.03, places=6)
             self.assertAlmostEqual(config.deposition_post_closure_fill_pct_hole, 0.03, places=6)
+
+            window.spin_depth_decay_k.setValue(1.1)
+            self.assertAlmostEqual(window.depth_deposition_editor.parameters()[0], 1.1, places=6)
+            window.apply_depth_deposition_editor_parameters(0.45, 1.7, 6.0, 16.0)
+            self.assertAlmostEqual(window.spin_depth_decay_k.value(), 0.45, places=6)
+            self.assertAlmostEqual(window.spin_depth_decay_power.value(), 1.7, places=6)
+            self.assertAlmostEqual(window.spin_depth_min_ratio_pct.value(), 6.0, places=6)
+            self.assertAlmostEqual(window.spin_depth_closure_threshold.value(), 16.0, places=6)
+            config = window.current_config()
+            self.assertAlmostEqual(config.deposition_depth_decay_k, 0.45, places=6)
+            self.assertAlmostEqual(config.deposition_depth_decay_power, 1.7, places=6)
+            self.assertAlmostEqual(config.deposition_min_ratio, 0.06, places=6)
+            self.assertAlmostEqual(config.deposition_closure_threshold_a, 16.0, places=6)
 
             split_keys = {
                 window.cmb_split_parameter.itemData(idx)
