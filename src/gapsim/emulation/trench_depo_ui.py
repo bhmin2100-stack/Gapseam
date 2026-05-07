@@ -1633,9 +1633,6 @@ class TrenchDepoWindow(QMainWindow):
         self.emulator_toggle_row.addStretch(1)
         for number in self._emulator_numbers:
             self._add_emulator_toggle(number)
-        self.btn_new_emulator = QPushButton("New")
-        self.btn_new_emulator.setToolTip("Create the next emulator slot")
-        self._sync_new_emulator_button()
 
         self.spin_cycles = QSpinBox()
         self.spin_cycles.setRange(0, 10000)
@@ -1989,11 +1986,10 @@ class TrenchDepoWindow(QMainWindow):
         left_layout.addWidget(self.result_controls_widget)
         left_panel.setLayout(left_layout)
 
-        emulator_group = QGroupBox("1 Structure / Emulator")
+        emulator_group = QGroupBox("3 Result / Emulator Version")
         emulator_layout = QVBoxLayout()
         emulator_layout.setContentsMargins(10, 10, 10, 10)
         emulator_layout.addLayout(self.emulator_toggle_row)
-        emulator_layout.addWidget(self.btn_new_emulator)
         emulator_group.setLayout(emulator_layout)
 
         self.structure_points_model = PointsTableModel()
@@ -2439,7 +2435,6 @@ class TrenchDepoWindow(QMainWindow):
         structure_panel_layout = QVBoxLayout()
         structure_panel_layout.setContentsMargins(0, 0, 0, 0)
         structure_panel_layout.setSpacing(8)
-        structure_panel_layout.addWidget(emulator_group)
         structure_panel_layout.addWidget(self.structure_points_group)
         structure_panel_layout.addWidget(self.overlay_group)
         structure_panel_nav = QHBoxLayout()
@@ -2469,6 +2464,7 @@ class TrenchDepoWindow(QMainWindow):
         results_panel_layout = QVBoxLayout()
         results_panel_layout.setContentsMargins(0, 0, 0, 0)
         results_panel_layout.setSpacing(8)
+        results_panel_layout.addWidget(emulator_group)
         results_panel_layout.addWidget(action_group)
         results_panel_layout.addWidget(params_group)
         results_panel_layout.addWidget(gaussian_group)
@@ -2533,7 +2529,6 @@ class TrenchDepoWindow(QMainWindow):
         self.btn_open_run_dir.clicked.connect(self.open_last_run_dir)
         self.btn_run_split.clicked.connect(self.run_split_test)
         self.btn_compare_gapsim_angle.clicked.connect(self.run_compare_for_active_emulator)
-        self.btn_new_emulator.clicked.connect(self.create_new_emulator)
         self.view_tabs.currentChanged.connect(self._on_view_workflow_tab_changed)
         self.workflow_tabs.currentChanged.connect(self._on_control_workflow_tab_changed)
         self.btn_structure_next.clicked.connect(lambda: self._set_workflow_step("smoothing"))

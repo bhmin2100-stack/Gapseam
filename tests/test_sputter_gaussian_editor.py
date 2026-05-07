@@ -447,11 +447,14 @@ class SputterGaussianEditorTest(unittest.TestCase):
             self.assertIs(window.overlay_group.parent(), window.structure_panel_content)
             self.assertIs(window.smoothing_controls_group.parent(), window.smoothing_panel_content)
             self.assertIs(window.smoothed_points_group.parent(), window.smoothing_panel_content)
+            self.assertIs(window.emulator_group.parent(), window.results_panel_content)
             self.assertIs(window.params_group.parent(), window.results_panel_content)
             self.assertIs(window.gaussian_group.parent(), window.results_panel_content)
             self.assertIs(window.ion_map_group.parent(), window.results_panel_content)
             self.assertIs(window.redepo_lobe_group.parent(), window.results_panel_content)
             self.assertIs(window.depth_profile_group.parent(), window.results_panel_content)
+            self.assertEqual(window.emulator_group.title(), "3 Result / Emulator Version")
+            self.assertFalse(hasattr(window, "btn_new_emulator"))
             self.assertEqual(
                 [window.view_tabs.tabText(idx) for idx in range(window.view_tabs.count())],
                 ["1 Structure", "2 Smoothing", "3 Result"],
@@ -530,7 +533,8 @@ class SputterGaussianEditorTest(unittest.TestCase):
             self.assertEqual(window.view_tabs.currentIndex(), 0)
             self.assertEqual(window.workflow_tabs.currentIndex(), 0)
             self.assertTrue(window.result_controls_widget.isHidden())
-            self.assertIs(window.emulator_group.parent(), window.structure_panel_content)
+            self.assertIs(window.emulator_group.parent(), window.results_panel_content)
+            self.assertFalse(hasattr(window, "btn_new_emulator"))
             self.assertIs(window.smoothing_controls_group.parent(), window.smoothing_panel_content)
             self.assertIs(window.params_group.parent(), window.results_panel_content)
             self.assertIs(window.action_group.parent(), window.results_panel_content)
