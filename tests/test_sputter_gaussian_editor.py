@@ -7,6 +7,11 @@ from pathlib import Path
 from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+_STRUCTURE_LIBRARY_TMP = tempfile.TemporaryDirectory()
+os.environ.setdefault(
+    "GAPSIM_STRUCTURE_LIBRARY",
+    str(Path(_STRUCTURE_LIBRARY_TMP.name) / "structures.xlsx"),
+)
 
 from PySide6.QtCore import QPointF
 from PySide6.QtGui import QPixmap
@@ -571,6 +576,7 @@ class SputterGaussianEditorTest(unittest.TestCase):
             self.assertTrue(window.result_controls_widget.isHidden())
             self.assertIs(window.emulator_group.parent(), window.results_panel_content)
             self.assertFalse(hasattr(window, "btn_new_emulator"))
+            self.assertIs(window.structure_library_group.parent(), window.structure_panel_content)
             self.assertIs(window.smoothing_controls_group.parent(), window.smoothing_panel_content)
             self.assertIs(window.params_group.parent(), window.results_panel_content)
             self.assertIs(window.action_group.parent(), window.results_panel_content)
@@ -635,6 +641,44 @@ class SputterGaussianEditorTest(unittest.TestCase):
             self.assertIn("4 pts", window.lbl_geometry_source.text())
         finally:
             window.close()
+
+    def test_structure_library_exports_loads_and_saves_excel_sheets(self) -> None:
+        result = TrenchDepoResult(
+            frame_steps=[0],
+            frame_profiles=[[(0.0, 0.0), (1.0, 0.0)]],
+            frame_voids=[[]],
+            final_profile=[(0.0, 0.0), (1.0, 0.0)],
+            meta={"cycles": 0},
+        )
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch("gapsim.emulation.trench_depo_ui.run_trench_depo", return_value=result),
+            mock.patch("gapsim.emulation.trench_depo_ui.QTimer.singleShot"),
+        ):
+            window = TrenchDepoWindow()
+            try:
+                window._structure_library_path = Path(tmp) / "structures.xlsx"
+                window.refresh_structure_library(show_status=False)
+
+                window.export_default_structures_to_library()
+                self.assertGreaterEqual(window.cmb_structure_library.count(), 7)
+                stepped_idx = window.cmb_structure_library.findText("em02_stepped_trench")
+                self.assertGreaterEqual(stepped_idx, 0)
+                window.cmb_structure_library.setCurrentIndex(stepped_idx)
+                window.load_selected_structure_from_library()
+                self.assertEqual(tuple(window.current_config().points), tuple(ION_TRANSMISSION_STEPPED_TRENCH_POINTS))
+
+                custom_points = [(-50.0, 0.0), (0.0, -80.0), (50.0, 0.0)]
+                window._set_structure_points(custom_points, fit=False)
+                with mock.patch(
+                    "gapsim.emulation.trench_depo_ui.QInputDialog.getText",
+                    return_value=("custom_test_structure", True),
+                ):
+                    window.save_current_structure_to_library()
+                self.assertGreaterEqual(window.cmb_structure_library.findText("custom_test_structure"), 0)
+                self.assertEqual(tuple(window.current_config().points), tuple(custom_points))
+            finally:
+                window.close()
 
     def test_structure_table_and_image_overlay_match_gapsim_flow(self) -> None:
         result = TrenchDepoResult(

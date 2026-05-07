@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import math
+import os
 import platform
 import subprocess
 import sys
@@ -22,6 +23,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QMainWindow,
     QMessageBox,
@@ -43,6 +45,16 @@ from gapsim.emulation.research_registry import (
     load_created_emulator_numbers,
     next_emulator_number,
     save_created_emulator_numbers,
+)
+from gapsim.emulation.structure_library import (
+    DEFAULT_EMULATOR_STRUCTURE_SHEETS,
+    DEFAULT_STRUCTURE_LIBRARY_PATH,
+    StructureLibraryError,
+    ensure_default_structures,
+    list_structure_names,
+    read_structure_points,
+    sanitize_structure_name,
+    save_structure_points,
 )
 from gapsim.emulation.trench_depo import (
     BOWED_JAR_TRENCH_POINTS,
@@ -1622,6 +1634,10 @@ class TrenchDepoWindow(QMainWindow):
         self._syncing_structure_table = False
         self._syncing_smoothed_table = False
         self._syncing_workflow_tabs = False
+        self._structure_library_path = Path(
+            os.environ.get("GAPSIM_STRUCTURE_LIBRARY", str(DEFAULT_STRUCTURE_LIBRARY_PATH))
+        )
+        self._active_structure_sheet_name = ""
         self._overlay_opacity = 0.35
         self._overlay_path: Optional[str] = None
         self._overlay_scale_a_per_px = 1.0
@@ -1921,6 +1937,16 @@ class TrenchDepoWindow(QMainWindow):
         self.lbl_geometry_points = QLabel("Geometry: 0 pts")
         self.lbl_geometry_source = QLabel("Input: raw")
         self.lbl_geometry_source.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.cmb_structure_library = QComboBox()
+        self.btn_reload_structure_library = QPushButton("Reload")
+        self.btn_load_structure = QPushButton("Load")
+        self.btn_save_structure = QPushButton("Save")
+        self.btn_export_default_structures = QPushButton("Export Defaults")
+        self.btn_open_structure_workbook = QPushButton("Open Excel")
+        self.lbl_structure_library_path = QLabel("")
+        self.lbl_structure_library_path.setWordWrap(True)
+        self.lbl_structure_library_active = QLabel("Active: emulator default")
+        self.lbl_structure_library_active.setWordWrap(True)
         structure_buttons = QHBoxLayout()
         structure_buttons.setContentsMargins(0, 0, 0, 0)
         structure_buttons.addWidget(self.btn_fit_structure)
@@ -2006,6 +2032,22 @@ class TrenchDepoWindow(QMainWindow):
         structure_points_layout.setContentsMargins(10, 10, 10, 10)
         structure_points_layout.addWidget(self.structure_points_table, 1)
         self.structure_points_group.setLayout(structure_points_layout)
+
+        self.structure_library_group = QGroupBox("Structure Library")
+        structure_library_layout = QGridLayout()
+        structure_library_layout.setContentsMargins(10, 10, 10, 10)
+        structure_library_layout.setHorizontalSpacing(8)
+        structure_library_layout.setVerticalSpacing(8)
+        structure_library_layout.addWidget(QLabel("Sheet"), 0, 0)
+        structure_library_layout.addWidget(self.cmb_structure_library, 0, 1, 1, 3)
+        structure_library_layout.addWidget(self.btn_reload_structure_library, 1, 0)
+        structure_library_layout.addWidget(self.btn_load_structure, 1, 1)
+        structure_library_layout.addWidget(self.btn_save_structure, 1, 2)
+        structure_library_layout.addWidget(self.btn_open_structure_workbook, 1, 3)
+        structure_library_layout.addWidget(self.btn_export_default_structures, 2, 0, 1, 2)
+        structure_library_layout.addWidget(self.lbl_structure_library_active, 2, 2, 1, 2)
+        structure_library_layout.addWidget(self.lbl_structure_library_path, 3, 0, 1, 4)
+        self.structure_library_group.setLayout(structure_library_layout)
 
         self.btn_load_overlay = QPushButton("Load Image")
         self.btn_clear_overlay = QPushButton("Clear Image")
@@ -2456,6 +2498,7 @@ class TrenchDepoWindow(QMainWindow):
         structure_panel_layout = QVBoxLayout()
         structure_panel_layout.setContentsMargins(0, 0, 0, 0)
         structure_panel_layout.setSpacing(8)
+        structure_panel_layout.addWidget(self.structure_library_group)
         structure_panel_layout.addWidget(self.structure_points_group)
         structure_panel_layout.addWidget(self.overlay_group)
         structure_panel_nav = QHBoxLayout()
@@ -2608,6 +2651,11 @@ class TrenchDepoWindow(QMainWindow):
         self.smoothing_view.pointMoved.connect(self._on_smoothed_point_moved)
         self.smoothing_view.pointInserted.connect(self._on_smoothed_point_inserted)
         self.smoothing_view.pointDeleted.connect(self._on_smoothed_point_deleted)
+        self.btn_reload_structure_library.clicked.connect(self.refresh_structure_library)
+        self.btn_load_structure.clicked.connect(self.load_selected_structure_from_library)
+        self.btn_save_structure.clicked.connect(self.save_current_structure_to_library)
+        self.btn_export_default_structures.clicked.connect(self.export_default_structures_to_library)
+        self.btn_open_structure_workbook.clicked.connect(self.open_structure_library_workbook)
         self.btn_fit_structure.clicked.connect(self._fit_structure_views)
         self.btn_reset_structure.clicked.connect(self._reset_geometry_to_default)
         self.btn_apply_smoothing.clicked.connect(self.apply_structure_smoothing)
@@ -2616,18 +2664,127 @@ class TrenchDepoWindow(QMainWindow):
         self.sync_ion_shadow_slider_labels()
         self.spin_ion_end_depth.valueChanged.connect(self.sync_ion_transmission_editor_from_spins)
 
+        self.refresh_structure_library(show_status=False)
         self.apply_emulator_mode(run=False)
         self._reset_geometry_to_default()
         self.sync_depth_deposition_editor_from_spins()
         self._set_workflow_step("structure")
 
-    def _default_points_for_active_emulator(self) -> List[Tuple[float, float]]:
-        number = self.active_emulator_number()
-        if number == 2:
+    def _structure_library_sheet_for_emulator(self, number: int) -> str:
+        return DEFAULT_EMULATOR_STRUCTURE_SHEETS.get(int(number), "")
+
+    def _fallback_points_for_emulator(self, number: int) -> List[Tuple[float, float]]:
+        if int(number) == 2:
             return [(float(x), float(y)) for x, y in ION_TRANSMISSION_STEPPED_TRENCH_POINTS]
-        if number in (5, 6):
+        if int(number) in (5, 6):
             return [(float(x), float(y)) for x, y in BOWED_JAR_TRENCH_POINTS]
         return [(float(x), float(y)) for x, y in TrenchDepoConfig().points]
+
+    def _default_points_for_active_emulator(self) -> List[Tuple[float, float]]:
+        number = self.active_emulator_number()
+        sheet_name = self._structure_library_sheet_for_emulator(number)
+        if sheet_name:
+            try:
+                return read_structure_points(self._structure_library_path, sheet_name)
+            except StructureLibraryError:
+                pass
+        return self._fallback_points_for_emulator(number)
+
+    def refresh_structure_library(self, _checked: bool = False, *, show_status: bool = True) -> None:
+        try:
+            names = list_structure_names(self._structure_library_path)
+        except Exception as exc:  # noqa: BLE001
+            names = []
+            if show_status:
+                QMessageBox.warning(self, "Structure Library", f"Failed to read structure workbook:\n{exc}")
+
+        previous = self.cmb_structure_library.currentText()
+        self.cmb_structure_library.blockSignals(True)
+        try:
+            self.cmb_structure_library.clear()
+            self.cmb_structure_library.addItems(names)
+            idx = self.cmb_structure_library.findText(previous)
+            if idx >= 0:
+                self.cmb_structure_library.setCurrentIndex(idx)
+        finally:
+            self.cmb_structure_library.blockSignals(False)
+
+        has_workbook = self._structure_library_path.exists()
+        has_structures = bool(names)
+        self.cmb_structure_library.setEnabled(has_structures)
+        self.btn_load_structure.setEnabled(has_structures)
+        self.btn_open_structure_workbook.setEnabled(True)
+        self.lbl_structure_library_path.setText(f"Workbook: {self._structure_library_path}")
+        self._update_structure_library_active_label()
+        if show_status:
+            if has_workbook:
+                self.statusBar().showMessage(f"Structure workbook loaded: {len(names)} sheets", 2200)
+            else:
+                self.statusBar().showMessage("Structure workbook not created yet", 2200)
+
+    def _update_structure_library_active_label(self) -> None:
+        active = self._active_structure_sheet_name or "emulator default"
+        self.lbl_structure_library_active.setText(f"Active: {active}")
+
+    def load_selected_structure_from_library(self, _checked: bool = False) -> None:
+        sheet_name = self.cmb_structure_library.currentText().strip()
+        if not sheet_name:
+            QMessageBox.information(self, "Structure Library", "No structure sheet is selected.")
+            return
+        try:
+            points = read_structure_points(self._structure_library_path, sheet_name)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "Structure Library", f"Failed to load structure '{sheet_name}':\n{exc}")
+            return
+        self._active_structure_sheet_name = sheet_name
+        self._set_structure_points(points, fit=True)
+        self._update_structure_library_active_label()
+        self.statusBar().showMessage(f"Loaded structure: {sheet_name}", 2200)
+
+    def save_current_structure_to_library(self, _checked: bool = False) -> None:
+        points = list(self._structure_points or self._current_geometry_points())
+        if len(points) < 2:
+            QMessageBox.warning(self, "Structure Library", "At least two XY points are required.")
+            return
+        default_name = self._active_structure_sheet_name or f"structure_{self.active_emulator_number():02d}"
+        sheet_name, accepted = QInputDialog.getText(
+            self,
+            "Save Structure",
+            "Sheet name:",
+            text=sanitize_structure_name(default_name),
+        )
+        if not accepted:
+            return
+        try:
+            saved_name = save_structure_points(self._structure_library_path, sheet_name, points)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "Structure Library", f"Failed to save structure:\n{exc}")
+            return
+        self._active_structure_sheet_name = saved_name
+        self.refresh_structure_library(show_status=False)
+        idx = self.cmb_structure_library.findText(saved_name)
+        if idx >= 0:
+            self.cmb_structure_library.setCurrentIndex(idx)
+        self._update_structure_library_active_label()
+        self.statusBar().showMessage(f"Saved structure: {saved_name}", 2200)
+
+    def export_default_structures_to_library(self, _checked: bool = False) -> None:
+        try:
+            written = ensure_default_structures(self._structure_library_path, overwrite=False)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "Structure Library", f"Failed to export default structures:\n{exc}")
+            return
+        self.refresh_structure_library(show_status=False)
+        if written:
+            self.statusBar().showMessage(f"Exported {len(written)} default structure sheets", 2600)
+        else:
+            self.statusBar().showMessage("Default structure sheets already exist", 2200)
+
+    def open_structure_library_workbook(self, _checked: bool = False) -> None:
+        if not self._structure_library_path.exists():
+            self.export_default_structures_to_library()
+        if self._structure_library_path.exists():
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._structure_library_path.resolve())))
 
     def _set_structure_points(
         self,
@@ -2719,7 +2876,17 @@ class TrenchDepoWindow(QMainWindow):
         self._set_structure_points(points, fit=True)
 
     def _reset_geometry_to_default(self, _checked: bool = False) -> None:
+        default_sheet = self._structure_library_sheet_for_emulator(self.active_emulator_number())
+        if default_sheet and self._structure_library_path.exists():
+            try:
+                read_structure_points(self._structure_library_path, default_sheet)
+                self._active_structure_sheet_name = default_sheet
+            except StructureLibraryError:
+                self._active_structure_sheet_name = ""
+        else:
+            self._active_structure_sheet_name = ""
         self._set_structure_points(self._default_points_for_active_emulator())
+        self._update_structure_library_active_label()
         self.statusBar().showMessage("Geometry reset to emulator default", 1800)
 
     def _fit_structure_views(self, _checked: bool = False) -> None:
@@ -3234,7 +3401,7 @@ class TrenchDepoWindow(QMainWindow):
 
         self.setWindowTitle(f"Trench Depo Emulation - Emulator {number:02d}")
         if changed:
-            self._set_structure_points(self._default_points_for_active_emulator())
+            self._reset_geometry_to_default()
         if supports_sputter:
             if number == 2:
                 self.lbl_etch_section.setText("Etch switch (1번 direct + 2번 modifier)")
@@ -3702,7 +3869,7 @@ class TrenchDepoWindow(QMainWindow):
             self.edit_request_note.setPlainText("라운드 conformal offset 기반 트렌치 증착")
         else:
             self.edit_request_note.setPlainText("미배정 슬롯: 기본 conformal deposition만 실행")
-        self._set_structure_points(self._default_points_for_active_emulator())
+        self._reset_geometry_to_default()
         self.run_emulation(save_artifacts=False)
 
     def apply_split_parameter_defaults(self, _index: int = 0) -> None:
