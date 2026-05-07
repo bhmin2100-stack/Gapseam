@@ -23,8 +23,8 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
@@ -125,6 +125,91 @@ def _emulator_mode_title(number: int) -> str:
 
 def _emulator_mode_label(number: int) -> str:
     return f"{int(number):02d} - {_emulator_mode_title(int(number))}"
+
+
+EMULATOR_PROCESS_PRESETS: dict[int, list[tuple[str, dict[str, object]]]] = {
+    0: [
+        ("Baseline conformal", {"cycles": 20, "depo": 10.0}),
+        ("Quick conformal", {"cycles": 8, "depo": 10.0}),
+    ],
+    1: [
+        ("Direct sputter default", {"cycles": 20, "depo": 10.0, "sputter": True, "etch": 4.0, "peak": 55.0, "width": 14.0}),
+        ("Soft direct etch", {"cycles": 20, "depo": 10.0, "sputter": True, "etch": 2.0, "peak": 55.0, "width": 18.0}),
+        ("Strong direct etch", {"cycles": 20, "depo": 10.0, "sputter": True, "etch": 7.0, "peak": 58.0, "width": 12.0}),
+    ],
+    2: [
+        ("Ion depth default", {"cycles": 20, "depo": 10.0, "sputter": True, "ion": True, "ion_start": 0.0, "ion_end": 100.0, "ion_drop": 100.0, "ion_floor": 0.0, "ion_curve": 1.0}),
+        ("Top-open ion", {"cycles": 20, "depo": 10.0, "sputter": True, "ion": True, "ion_start": 20.0, "ion_end": 100.0, "ion_drop": 80.0, "ion_floor": 10.0, "ion_curve": 1.2}),
+        ("Deep-select ion", {"cycles": 20, "depo": 10.0, "sputter": True, "ion": True, "ion_start": 45.0, "ion_end": 100.0, "ion_drop": 100.0, "ion_floor": 0.0, "ion_curve": 1.8}),
+    ],
+    3: [
+        ("Reflected ion default", {"cycles": 20, "depo": 10.0, "sputter": True, "reflected": True, "reflect": 35.0, "bowing": 0.75, "micro": 1.0, "range": 1600.0}),
+        ("Bowing focus", {"cycles": 20, "depo": 10.0, "sputter": True, "reflected": True, "reflect": 50.0, "bowing": 1.15, "micro": 0.8, "range": 1900.0}),
+    ],
+    4: [
+        ("Redepo default", {"cycles": 20, "depo": 10.0, "sputter": True, "redepo": True, "redepo_eff": 25.0, "redepo_emit": 1.0, "redepo_dist": 1.0}),
+        ("Soft redepo", {"cycles": 20, "depo": 10.0, "sputter": True, "redepo": True, "redepo_eff": 15.0, "redepo_emit": 0.7, "redepo_dist": 1.3}),
+        ("Strong redepo", {"cycles": 20, "depo": 10.0, "sputter": True, "redepo": True, "redepo_eff": 40.0, "redepo_emit": 1.4, "redepo_dist": 0.8}),
+    ],
+    5: [
+        ("Depth fill default", {"cycles": 20, "depo": 10.0, "depth": True, "depth_k": 0.8, "depth_power": 1.2, "depth_min": 3.0}),
+        ("Gentle depth fill", {"cycles": 20, "depo": 10.0, "depth": True, "depth_k": 0.45, "depth_power": 1.0, "depth_min": 8.0}),
+        ("Strong top loss", {"cycles": 20, "depo": 10.0, "depth": True, "depth_k": 1.35, "depth_power": 1.4, "depth_min": 2.0}),
+    ],
+    6: [
+        ("Inhibition default", {"cycles": 20, "depo": 10.0, "depth": True, "depth_k": 0.8, "depth_power": 1.2, "depth_min": 8.0}),
+        ("Soft inhibition", {"cycles": 20, "depo": 10.0, "depth": True, "depth_k": 0.45, "depth_power": 1.0, "depth_min": 12.0}),
+        ("Strong inhibition", {"cycles": 20, "depo": 10.0, "depth": True, "depth_k": 1.25, "depth_power": 1.5, "depth_min": 5.0}),
+    ],
+}
+
+
+def _draw_structure_minimap(
+    painter: QPainter,
+    points: Sequence[Tuple[float, float]],
+    rect: QRectF,
+    *,
+    label: str = "Structure",
+) -> None:
+    if len(points) < 2:
+        return
+    xs = [float(x) for x, _y in points]
+    ys = [float(y) for _x, y in points]
+    x_min, x_max = min(xs), max(xs)
+    y_min, y_max = min(ys), max(ys)
+    x_span = max(x_max - x_min, 1e-9)
+    y_span = max(y_max - y_min, 1e-9)
+    pad = 8.0
+    draw_rect = rect.adjusted(pad, 17.0, -pad, -pad)
+    scale = min(draw_rect.width() / x_span, draw_rect.height() / y_span)
+    used_w = x_span * scale
+    used_h = y_span * scale
+    x_offset = draw_rect.left() + (draw_rect.width() - used_w) * 0.5
+    y_offset = draw_rect.top() + (draw_rect.height() - used_h) * 0.5
+
+    def map_point(point: Tuple[float, float]) -> QPointF:
+        x, y = point
+        return QPointF(
+            x_offset + ((float(x) - x_min) * scale),
+            y_offset + ((y_max - float(y)) * scale),
+        )
+
+    path = QPainterPath()
+    for idx, point in enumerate(points):
+        mapped = map_point(point)
+        if idx == 0:
+            path.moveTo(mapped)
+        else:
+            path.lineTo(mapped)
+
+    painter.setPen(QPen(QColor(203, 213, 225), 1.0))
+    painter.setBrush(QColor(255, 255, 255, 230))
+    painter.drawRoundedRect(rect, 5.0, 5.0)
+    painter.setPen(QPen(QColor(71, 85, 105), 1.0))
+    painter.drawText(QPointF(rect.left() + 7.0, rect.top() + 12.0), label)
+    painter.setPen(QPen(QColor(30, 41, 59), 1.7))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.drawPath(path)
 
 
 class SputterGaussianEditor(QWidget):
@@ -365,10 +450,10 @@ class IonTransmissionEditor(QWidget):
         self._curve_power = 1.0
         self._drag_handle: Optional[str] = None
         self._points = tuple(ION_TRANSMISSION_STEPPED_TRENCH_POINTS)
-        self.setMinimumHeight(158)
-        self.setMaximumHeight(188)
+        self.setMinimumHeight(196)
+        self.setMaximumHeight(246)
         self.setMouseTracking(True)
-        self.setToolTip("Drag the depth line to set where attenuation starts. Drag the bottom curve handle to set drop strength.")
+        self.setToolTip("Drag the line or dots to tune the depth fade.")
 
     def parameters(self) -> Tuple[float, float, float, float, float]:
         return (
@@ -378,6 +463,13 @@ class IonTransmissionEditor(QWidget):
             float(self._floor_pct),
             float(self._curve_power),
         )
+
+    def set_structure_points(self, points: Sequence[Tuple[float, float]]) -> None:
+        pts = tuple((float(x), float(y)) for x, y in points)
+        if len(pts) < 2 or pts == self._points:
+            return
+        self._points = pts
+        self.update()
 
     def set_parameters(
         self,
@@ -603,6 +695,9 @@ class IonTransmissionEditor(QWidget):
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawPath(trench_path)
 
+        inset = QRectF(rect.left() + 8.0, rect.top() + 8.0, min(128.0, rect.width() * 0.28), min(78.0, rect.height() * 0.42))
+        _draw_structure_minimap(painter, self._points, inset)
+
         start_y = self._y_for_depth_pct(self._start_depth_pct)
         painter.setPen(QPen(QColor(245, 158, 11), 1.6, Qt.PenStyle.DashLine))
         painter.drawLine(QPointF(rect.left(), start_y), QPointF(rect.right(), start_y))
@@ -660,12 +755,11 @@ class DepthDepositionProfileEditor(QWidget):
         self._min_ratio_pct = 3.0
         self._closure_threshold_a = 8.0
         self._drag_handle: Optional[str] = None
-        self.setMinimumHeight(158)
-        self.setMaximumHeight(188)
+        self._structure_points: Tuple[Tuple[float, float], ...] = tuple(BOWED_JAR_TRENCH_POINTS)
+        self.setMinimumHeight(220)
+        self.setMaximumHeight(280)
         self.setMouseTracking(True)
-        self.setToolTip(
-            "Drag bottom attenuation, mid curve, minimum floor, or closure gate handles to tune emulator 5."
-        )
+        self.setToolTip("Drag the dots to tune the depth map.")
 
     def parameters(self) -> Tuple[float, float, float, float]:
         return (
@@ -674,6 +768,13 @@ class DepthDepositionProfileEditor(QWidget):
             float(self._min_ratio_pct),
             float(self._closure_threshold_a),
         )
+
+    def set_structure_points(self, points: Sequence[Tuple[float, float]]) -> None:
+        pts = tuple((float(x), float(y)) for x, y in points)
+        if len(pts) < 2 or pts == self._structure_points:
+            return
+        self._structure_points = pts
+        self.update()
 
     def set_feature_geometry(
         self,
@@ -967,80 +1068,11 @@ class DepthDepositionProfileEditor(QWidget):
                 QColor(37, 99, 235, 150),
             )
 
-        feature_width = max(1.0, float(self._feature_width_a))
-        feature_depth = max(1.0, float(self._feature_depth_a))
-        feature_length = self._feature_length_a
         bottom_ear = self._effective_ar_at_depth_ratio(1.0)
-        preview_w = min(rect.width() * 0.30, 122.0)
-        preview_h = rect.height() * self._clamp(
-            math.sqrt(feature_depth / max(feature_depth + feature_width, 1e-9)),
-            0.36,
-            0.95,
-        )
-        width_factor = self._clamp(math.sqrt(feature_width / max(feature_width + (feature_depth * 0.18), 1e-9)), 0.22, 1.0)
-        feature_px_w = max(18.0, preview_w * width_factor)
-        center_x = rect.left() + 10.0 + (preview_w * 0.5)
-        top_y = rect.top() + 16.0
-        bottom_y = min(rect.bottom() - 14.0, top_y + preview_h)
-        half_open = feature_px_w * 0.5
-
-        trench = QPainterPath()
-        if self._feature_type == "line":
-            trench.moveTo(QPointF(center_x - half_open, top_y))
-            trench.lineTo(QPointF(center_x - half_open * 0.78, bottom_y))
-            trench.lineTo(QPointF(center_x + half_open * 0.78, bottom_y))
-            trench.lineTo(QPointF(center_x + half_open, top_y))
-            trench.closeSubpath()
-        else:
-            trench.moveTo(QPointF(center_x - half_open, top_y))
-            trench.cubicTo(
-                QPointF(center_x - half_open * 0.72, top_y + ((bottom_y - top_y) * 0.25)),
-                QPointF(center_x - half_open * 1.35, top_y + ((bottom_y - top_y) * 0.58)),
-                QPointF(center_x - half_open * 0.46, bottom_y),
-            )
-            trench.lineTo(QPointF(center_x + half_open * 0.46, bottom_y))
-            trench.cubicTo(
-                QPointF(center_x + half_open * 1.35, top_y + ((bottom_y - top_y) * 0.58)),
-                QPointF(center_x + half_open * 0.72, top_y + ((bottom_y - top_y) * 0.25)),
-                QPointF(center_x + half_open, top_y),
-            )
-        painter.setPen(QPen(QColor(187, 247, 208, 150), 2.0))
-        painter.setBrush(QColor(220, 252, 231, 75))
-        painter.drawPath(trench)
-        painter.setPen(QPen(QColor(22, 101, 52), 1.0))
-        dim_y = max(rect.top() + 5.0, top_y - 7.0)
-        painter.drawLine(QPointF(center_x - half_open, dim_y), QPointF(center_x + half_open, dim_y))
-        painter.drawLine(QPointF(center_x - half_open, dim_y - 3.0), QPointF(center_x - half_open, dim_y + 3.0))
-        painter.drawLine(QPointF(center_x + half_open, dim_y - 3.0), QPointF(center_x + half_open, dim_y + 3.0))
-        painter.drawText(QPointF(center_x - half_open, max(rect.top() + 9.0, dim_y - 5.0)), f"W {feature_width:.0f}A")
-
-        depth_x = center_x - half_open - 11.0
-        painter.drawLine(QPointF(depth_x, top_y), QPointF(depth_x, bottom_y))
-        painter.drawLine(QPointF(depth_x - 3.0, top_y), QPointF(depth_x + 3.0, top_y))
-        painter.drawLine(QPointF(depth_x - 3.0, bottom_y), QPointF(depth_x + 3.0, bottom_y))
-        painter.drawText(QPointF(depth_x + 4.0, min(rect.bottom() - 20.0, top_y + 28.0)), f"D {feature_depth:.0f}A")
-
-        painter.setPen(QPen(QColor(77, 124, 15), 1.0))
-        if self._feature_type == "line":
-            if feature_length is None:
-                length_text = "L open"
-                length_factor = 1.0
-            else:
-                length_text = f"L {float(feature_length):.0f}A"
-                length_factor = self._clamp(
-                    math.sqrt(float(feature_length) / max(float(feature_length) + (feature_width * 6.0), 1e-9)),
-                    0.28,
-                    1.0,
-                )
-            length_y = min(rect.bottom() - 4.0, bottom_y + 9.0)
-            length_half = preview_w * 0.45 * length_factor
-            painter.drawLine(QPointF(center_x - length_half, length_y), QPointF(center_x + length_half, length_y))
-            painter.drawText(QPointF(center_x - length_half, length_y - 4.0), length_text)
-        else:
-            painter.drawText(QPointF(center_x - half_open, min(rect.bottom() - 4.0, bottom_y + 12.0)), "Length ignored")
-
+        inset = QRectF(rect.left() + 8.0, rect.top() + 12.0, min(150.0, rect.width() * 0.30), min(96.0, rect.height() * 0.48))
+        _draw_structure_minimap(painter, self._structure_points, inset)
         painter.setPen(QPen(QColor(15, 23, 42), 1.0))
-        painter.drawText(QPointF(rect.left() + 6.0, rect.bottom() - 4.0), f"Eff AR {bottom_ear:.2f}")
+        painter.drawText(QPointF(inset.left() + 7.0, min(rect.bottom() - 4.0, inset.bottom() + 15.0)), f"Eff AR {bottom_ear:.2f}")
 
         floor_x = self._x_for_ratio(float(self._min_ratio_pct) / 100.0)
         painter.setPen(QPen(QColor(22, 163, 74), 1.4, Qt.PenStyle.DashLine))
@@ -1634,6 +1666,7 @@ class TrenchDepoWindow(QMainWindow):
         self._syncing_structure_table = False
         self._syncing_smoothed_table = False
         self._syncing_workflow_tabs = False
+        self._syncing_emulator_preset = False
         self._structure_library_path = Path(
             os.environ.get("GAPSIM_STRUCTURE_LIBRARY", str(DEFAULT_STRUCTURE_LIBRARY_PATH))
         )
@@ -1891,6 +1924,9 @@ class TrenchDepoWindow(QMainWindow):
         self.btn_open_run_dir = QPushButton("Open Folder")
         self.btn_open_run_dir.setEnabled(False)
 
+        self.cmb_emulator_default_preset = QComboBox()
+        self.cmb_emulator_default_preset.setToolTip("Load the default process values for the selected emulator.")
+
         self.cmb_split_parameter = QComboBox()
         self.spin_split_start = QDoubleSpinBox()
         self.spin_split_end = QDoubleSpinBox()
@@ -1933,14 +1969,18 @@ class TrenchDepoWindow(QMainWindow):
 
         self.btn_fit_structure = QPushButton("Fit")
         self.btn_reset_structure = QPushButton("Default")
+        self.btn_load_structure_view = QPushButton("Load Structure")
+        self.btn_save_structure_view = QPushButton("Save to Excel")
         self.btn_structure_next = QPushButton("Next: Smoothing")
         self.lbl_geometry_points = QLabel("Geometry: 0 pts")
         self.lbl_geometry_source = QLabel("Input: raw")
         self.lbl_geometry_source.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.cmb_structure_library = QComboBox()
+        self.edit_structure_name = QLineEdit()
+        self.edit_structure_name.setPlaceholderText("Structure name / Excel sheet")
         self.btn_reload_structure_library = QPushButton("Reload")
-        self.btn_load_structure = QPushButton("Load")
-        self.btn_save_structure = QPushButton("Save")
+        self.btn_load_structure = QPushButton("Load Structure")
+        self.btn_save_structure = QPushButton("Save to Excel")
         self.btn_export_default_structures = QPushButton("Export Defaults")
         self.btn_open_structure_workbook = QPushButton("Open Excel")
         self.lbl_structure_library_path = QLabel("")
@@ -1951,6 +1991,8 @@ class TrenchDepoWindow(QMainWindow):
         structure_buttons.setContentsMargins(0, 0, 0, 0)
         structure_buttons.addWidget(self.btn_fit_structure)
         structure_buttons.addWidget(self.btn_reset_structure)
+        structure_buttons.addWidget(self.btn_load_structure_view)
+        structure_buttons.addWidget(self.btn_save_structure_view)
         structure_buttons.addWidget(self.lbl_geometry_points, 1)
         structure_buttons.addWidget(self.lbl_geometry_source)
         structure_buttons.addWidget(self.btn_structure_next)
@@ -2021,6 +2063,11 @@ class TrenchDepoWindow(QMainWindow):
         emulator_layout = QVBoxLayout()
         emulator_layout.setContentsMargins(10, 10, 10, 10)
         emulator_layout.addLayout(self.emulator_toggle_row)
+        preset_row = QHBoxLayout()
+        preset_row.setContentsMargins(0, 0, 0, 0)
+        preset_row.addWidget(QLabel("Default option"))
+        preset_row.addWidget(self.cmb_emulator_default_preset, 1)
+        emulator_layout.addLayout(preset_row)
         emulator_group.setLayout(emulator_layout)
 
         self.structure_points_model = PointsTableModel()
@@ -2040,13 +2087,15 @@ class TrenchDepoWindow(QMainWindow):
         structure_library_layout.setVerticalSpacing(8)
         structure_library_layout.addWidget(QLabel("Sheet"), 0, 0)
         structure_library_layout.addWidget(self.cmb_structure_library, 0, 1, 1, 3)
-        structure_library_layout.addWidget(self.btn_reload_structure_library, 1, 0)
-        structure_library_layout.addWidget(self.btn_load_structure, 1, 1)
-        structure_library_layout.addWidget(self.btn_save_structure, 1, 2)
-        structure_library_layout.addWidget(self.btn_open_structure_workbook, 1, 3)
-        structure_library_layout.addWidget(self.btn_export_default_structures, 2, 0, 1, 2)
-        structure_library_layout.addWidget(self.lbl_structure_library_active, 2, 2, 1, 2)
-        structure_library_layout.addWidget(self.lbl_structure_library_path, 3, 0, 1, 4)
+        structure_library_layout.addWidget(QLabel("Name"), 1, 0)
+        structure_library_layout.addWidget(self.edit_structure_name, 1, 1, 1, 3)
+        structure_library_layout.addWidget(self.btn_reload_structure_library, 2, 0)
+        structure_library_layout.addWidget(self.btn_load_structure, 2, 1)
+        structure_library_layout.addWidget(self.btn_save_structure, 2, 2)
+        structure_library_layout.addWidget(self.btn_open_structure_workbook, 2, 3)
+        structure_library_layout.addWidget(self.btn_export_default_structures, 3, 0, 1, 2)
+        structure_library_layout.addWidget(self.lbl_structure_library_active, 3, 2, 1, 2)
+        structure_library_layout.addWidget(self.lbl_structure_library_path, 4, 0, 1, 4)
         self.structure_library_group.setLayout(structure_library_layout)
 
         self.btn_load_overlay = QPushButton("Load Image")
@@ -2241,11 +2290,10 @@ class TrenchDepoWindow(QMainWindow):
         self.lbl_depth_post_fill_line = QLabel("Line fill %")
         self.lbl_depth_line_open_path = QLabel("Line open")
         self.lbl_depth_residual_decay = QLabel("Decay len A")
+        self.btn_depth_advanced = QPushButton("Advanced fill options")
+        self.btn_depth_advanced.setCheckable(True)
         self.lbl_depth_parameter_help = QLabel(
-            "5번은 etch 없이 기본 Depo A/CYC에 깊이별 증착 비율을 곱합니다. "
-            "Width A는 입구 폭, Depth A는 100% 기준 깊이, Length A는 Line 구조에서만 쓰는 길이입니다. "
-            "Decay K는 깊을수록 줄어드는 세기, Power는 곡선 모양, Min %는 바닥 최저 증착률, "
-            "Close A와 post-fill 값은 입구가 닫힌 뒤 남은 빈 공간을 얼마나 더 채울지 정합니다."
+            "Depth map: deeper areas receive less deposition. Drag the dots or use the fields."
         )
         self.lbl_depth_parameter_help.setWordWrap(True)
         self.lbl_depth_parameter_help.setStyleSheet(
@@ -2293,17 +2341,18 @@ class TrenchDepoWindow(QMainWindow):
         params_grid.addWidget(self.spin_depth_decay_power, 42, 1)
         params_grid.addWidget(self.lbl_depth_min_ratio, 43, 0)
         params_grid.addWidget(self.spin_depth_min_ratio_pct, 43, 1)
-        params_grid.addWidget(self.lbl_depth_closure_section, 44, 0, 1, 2)
-        params_grid.addWidget(self.lbl_depth_closure_threshold, 45, 0)
-        params_grid.addWidget(self.spin_depth_closure_threshold, 45, 1)
-        params_grid.addWidget(self.lbl_depth_post_fill_hole, 46, 0)
-        params_grid.addWidget(self.spin_depth_post_fill_hole_pct, 46, 1)
-        params_grid.addWidget(self.lbl_depth_post_fill_line, 47, 0)
-        params_grid.addWidget(self.spin_depth_post_fill_line_pct, 47, 1)
-        params_grid.addWidget(self.lbl_depth_line_open_path, 48, 0)
-        params_grid.addWidget(self.spin_depth_line_open_path, 48, 1)
-        params_grid.addWidget(self.lbl_depth_residual_decay, 49, 0)
-        params_grid.addWidget(self.spin_depth_residual_decay, 49, 1)
+        params_grid.addWidget(self.btn_depth_advanced, 44, 0, 1, 2)
+        params_grid.addWidget(self.lbl_depth_closure_section, 45, 0, 1, 2)
+        params_grid.addWidget(self.lbl_depth_closure_threshold, 46, 0)
+        params_grid.addWidget(self.spin_depth_closure_threshold, 46, 1)
+        params_grid.addWidget(self.lbl_depth_post_fill_hole, 47, 0)
+        params_grid.addWidget(self.spin_depth_post_fill_hole_pct, 47, 1)
+        params_grid.addWidget(self.lbl_depth_post_fill_line, 48, 0)
+        params_grid.addWidget(self.spin_depth_post_fill_line_pct, 48, 1)
+        params_grid.addWidget(self.lbl_depth_line_open_path, 49, 0)
+        params_grid.addWidget(self.spin_depth_line_open_path, 49, 1)
+        params_grid.addWidget(self.lbl_depth_residual_decay, 50, 0)
+        params_grid.addWidget(self.spin_depth_residual_decay, 50, 1)
         params_group.setLayout(params_grid)
 
         self.redepo_lobe_group = QGroupBox("4 Redeposition Lobe")
@@ -2473,6 +2522,7 @@ class TrenchDepoWindow(QMainWindow):
             self.spin_depth_decay_power,
             self.lbl_depth_min_ratio,
             self.spin_depth_min_ratio_pct,
+            self.btn_depth_advanced,
             self.lbl_depth_closure_section,
             self.lbl_depth_closure_threshold,
             self.spin_depth_closure_threshold,
@@ -2653,9 +2703,13 @@ class TrenchDepoWindow(QMainWindow):
         self.smoothing_view.pointDeleted.connect(self._on_smoothed_point_deleted)
         self.btn_reload_structure_library.clicked.connect(self.refresh_structure_library)
         self.btn_load_structure.clicked.connect(self.load_selected_structure_from_library)
+        self.btn_load_structure_view.clicked.connect(self.load_selected_structure_from_library)
         self.btn_save_structure.clicked.connect(self.save_current_structure_to_library)
+        self.btn_save_structure_view.clicked.connect(self.save_current_structure_to_library)
         self.btn_export_default_structures.clicked.connect(self.export_default_structures_to_library)
         self.btn_open_structure_workbook.clicked.connect(self.open_structure_library_workbook)
+        self.cmb_emulator_default_preset.currentIndexChanged.connect(self.apply_selected_emulator_preset)
+        self.btn_depth_advanced.toggled.connect(self._sync_depth_advanced_visibility)
         self.btn_fit_structure.clicked.connect(self._fit_structure_views)
         self.btn_reset_structure.clicked.connect(self._reset_geometry_to_default)
         self.btn_apply_smoothing.clicked.connect(self.apply_structure_smoothing)
@@ -2713,6 +2767,7 @@ class TrenchDepoWindow(QMainWindow):
         has_structures = bool(names)
         self.cmb_structure_library.setEnabled(has_structures)
         self.btn_load_structure.setEnabled(has_structures)
+        self.btn_load_structure_view.setEnabled(has_structures)
         self.btn_open_structure_workbook.setEnabled(True)
         self.lbl_structure_library_path.setText(f"Workbook: {self._structure_library_path}")
         self._update_structure_library_active_label()
@@ -2725,6 +2780,8 @@ class TrenchDepoWindow(QMainWindow):
     def _update_structure_library_active_label(self) -> None:
         active = self._active_structure_sheet_name or "emulator default"
         self.lbl_structure_library_active.setText(f"Active: {active}")
+        if self._active_structure_sheet_name and not self.edit_structure_name.text().strip():
+            self.edit_structure_name.setText(self._active_structure_sheet_name)
 
     def load_selected_structure_from_library(self, _checked: bool = False) -> None:
         sheet_name = self.cmb_structure_library.currentText().strip()
@@ -2737,6 +2794,7 @@ class TrenchDepoWindow(QMainWindow):
             QMessageBox.warning(self, "Structure Library", f"Failed to load structure '{sheet_name}':\n{exc}")
             return
         self._active_structure_sheet_name = sheet_name
+        self.edit_structure_name.setText(sheet_name)
         self._set_structure_points(points, fit=True)
         self._update_structure_library_active_label()
         self.statusBar().showMessage(f"Loaded structure: {sheet_name}", 2200)
@@ -2746,21 +2804,19 @@ class TrenchDepoWindow(QMainWindow):
         if len(points) < 2:
             QMessageBox.warning(self, "Structure Library", "At least two XY points are required.")
             return
-        default_name = self._active_structure_sheet_name or f"structure_{self.active_emulator_number():02d}"
-        sheet_name, accepted = QInputDialog.getText(
-            self,
-            "Save Structure",
-            "Sheet name:",
-            text=sanitize_structure_name(default_name),
+        sheet_name = sanitize_structure_name(
+            self.edit_structure_name.text().strip()
+            or self.cmb_structure_library.currentText().strip()
+            or self._active_structure_sheet_name
+            or f"structure_{self.active_emulator_number():02d}"
         )
-        if not accepted:
-            return
         try:
             saved_name = save_structure_points(self._structure_library_path, sheet_name, points)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "Structure Library", f"Failed to save structure:\n{exc}")
             return
         self._active_structure_sheet_name = saved_name
+        self.edit_structure_name.setText(saved_name)
         self.refresh_structure_library(show_status=False)
         idx = self.cmb_structure_library.findText(saved_name)
         if idx >= 0:
@@ -3011,6 +3067,13 @@ class TrenchDepoWindow(QMainWindow):
             return
         self._show_result_input_preview(fit=fit)
 
+    def _sync_structure_minimap_editors(self) -> None:
+        if not hasattr(self, "ion_transmission_editor") or not hasattr(self, "depth_deposition_editor"):
+            return
+        points = self._current_geometry_points()
+        self.ion_transmission_editor.set_structure_points(points)
+        self.depth_deposition_editor.set_structure_points(points)
+
     def _show_result_input_preview(self, *, fit: bool = False) -> None:
         points = [(float(x), float(y)) for x, y in self._current_geometry_points()]
         if len(points) < 2:
@@ -3050,6 +3113,7 @@ class TrenchDepoWindow(QMainWindow):
             f"Smooth: {smooth_count} pts" if smooth_count else "Smooth: not applied"
         )
         self.btn_use_smoothed_geometry.setEnabled(smooth_count >= 2)
+        self._sync_structure_minimap_editors()
 
     def _set_overlay_opacity(self, opacity: float) -> None:
         clamped = max(0.0, min(1.0, float(opacity)))
@@ -3443,6 +3507,74 @@ class TrenchDepoWindow(QMainWindow):
         self.cmb_split_parameter.blockSignals(False)
         self.apply_split_parameter_defaults()
 
+    def _populate_emulator_default_presets(self) -> None:
+        number = self.active_emulator_number()
+        previous = self.cmb_emulator_default_preset.currentText()
+        options = EMULATOR_PROCESS_PRESETS.get(number, EMULATOR_PROCESS_PRESETS[0])
+        self._syncing_emulator_preset = True
+        self.cmb_emulator_default_preset.blockSignals(True)
+        try:
+            self.cmb_emulator_default_preset.clear()
+            for label, settings in options:
+                self.cmb_emulator_default_preset.addItem(label, settings)
+            restored = self.cmb_emulator_default_preset.findText(previous)
+            self.cmb_emulator_default_preset.setCurrentIndex(restored if restored >= 0 else 0)
+        finally:
+            self.cmb_emulator_default_preset.blockSignals(False)
+            self._syncing_emulator_preset = False
+
+    def apply_selected_emulator_preset(self, _index: int = 0) -> None:
+        if self._syncing_emulator_preset:
+            return
+        settings = self.cmb_emulator_default_preset.currentData()
+        if not isinstance(settings, dict):
+            return
+        self._apply_emulator_preset(settings)
+        self.statusBar().showMessage(
+            f"Default option loaded: {self.cmb_emulator_default_preset.currentText()}",
+            1800,
+        )
+
+    def _apply_emulator_preset(self, settings: dict[str, object]) -> None:
+        supports_sputter = self._active_emulator_supports_sputter()
+        supports_ion = self._active_emulator_supports_ion_transmission()
+        supports_reflected = self._active_emulator_supports_reflected_ion()
+        supports_redepo = self._active_emulator_supports_redeposition()
+        supports_depth = self._active_emulator_supports_depth_deposition()
+
+        self.spin_cycles.setValue(int(settings.get("cycles", self.spin_cycles.value())))
+        self.spin_angstrom_per_cycle.setValue(float(settings.get("depo", self.spin_angstrom_per_cycle.value())))
+        self.chk_sputter.setChecked(bool(supports_sputter and settings.get("sputter", supports_sputter)))
+        self.chk_ion_transmission.setChecked(bool(supports_ion and settings.get("ion", supports_ion)))
+        self.chk_reflected_ion.setChecked(bool(supports_reflected and settings.get("reflected", supports_reflected)))
+        self.chk_redepo.setChecked(bool(supports_redepo and settings.get("redepo", supports_redepo)))
+        self.chk_depth_deposition.setChecked(bool(supports_depth and settings.get("depth", supports_depth)))
+
+        self.spin_sputter_strength.setValue(float(settings.get("etch", self.spin_sputter_strength.value())))
+        self.spin_sputter_peak.setValue(float(settings.get("peak", self.spin_sputter_peak.value())))
+        self.spin_sputter_width.setValue(float(settings.get("width", self.spin_sputter_width.value())))
+        self.spin_ion_start_depth.setValue(float(settings.get("ion_start", self.spin_ion_start_depth.value())))
+        self.spin_ion_end_depth.setValue(float(settings.get("ion_end", self.spin_ion_end_depth.value())))
+        self.spin_ion_decay_strength.setValue(float(settings.get("ion_drop", self.spin_ion_decay_strength.value())))
+        self.spin_ion_floor.setValue(float(settings.get("ion_floor", self.spin_ion_floor.value())))
+        self.spin_ion_curve_power.setValue(float(settings.get("ion_curve", self.spin_ion_curve_power.value())))
+        self.spin_reflected_strength.setValue(float(settings.get("reflect", self.spin_reflected_strength.value())))
+        self.spin_reflected_bowing.setValue(float(settings.get("bowing", self.spin_reflected_bowing.value())))
+        self.spin_reflected_microtrench.setValue(float(settings.get("micro", self.spin_reflected_microtrench.value())))
+        self.spin_reflected_range.setValue(float(settings.get("range", self.spin_reflected_range.value())))
+        self.spin_redepo_efficiency.setValue(float(settings.get("redepo_eff", self.spin_redepo_efficiency.value())))
+        self.spin_redepo_emit_power.setValue(float(settings.get("redepo_emit", self.spin_redepo_emit_power.value())))
+        self.spin_redepo_distance_power.setValue(float(settings.get("redepo_dist", self.spin_redepo_distance_power.value())))
+        self.spin_depth_decay_k.setValue(float(settings.get("depth_k", self.spin_depth_decay_k.value())))
+        self.spin_depth_decay_power.setValue(float(settings.get("depth_power", self.spin_depth_decay_power.value())))
+        self.spin_depth_min_ratio_pct.setValue(float(settings.get("depth_min", self.spin_depth_min_ratio_pct.value())))
+
+        self.sync_sputter_curve_from_spins()
+        self.sync_ion_transmission_editor_from_spins()
+        self.sync_redepo_lobe_from_spins()
+        self.sync_depth_deposition_editor_from_spins()
+        self.sync_etch_control_availability()
+
     def apply_emulator_mode(self, _index: int = 0, *, run: bool = True) -> None:
         number = self.active_emulator_number()
         changed = number != self._active_emulator_number
@@ -3512,11 +3644,17 @@ class TrenchDepoWindow(QMainWindow):
             if number == 6:
                 self.chk_depth_deposition.setText("Inhibition deposition")
                 self.lbl_depth_depo_section.setText("6 Inhibition-weighted deposition")
-                self.edit_request_note.setPlaceholderText("Request note / PECVD-PEALD inhibition, top suppression, and smooth fill notes are saved with the run.")
+                self.lbl_depth_parameter_help.setText(
+                    "Inhibition map: top growth is suppressed first. The mini-map shows the active structure."
+                )
+                self.edit_request_note.setPlaceholderText("Request note / inhibition notes are saved with the run.")
             else:
                 self.chk_depth_deposition.setText("Depth-dependent deposition")
                 self.lbl_depth_depo_section.setText("5 Depth-dependent deposition")
-                self.edit_request_note.setPlaceholderText("요청사항 / depth-dependent deposition과 closure 후 잔류 fill 메모를 적으면 run 파일명과 요약에 같이 들어갑니다.")
+                self.lbl_depth_parameter_help.setText(
+                    "Depth map: deeper areas receive less deposition. The mini-map shows the active structure."
+                )
+                self.edit_request_note.setPlaceholderText("Request note / depth fill notes are saved with the run.")
         else:
             self.chk_depth_deposition.setText("Depth-dependent deposition")
             self.chk_sputter.setChecked(False)
@@ -3529,9 +3667,16 @@ class TrenchDepoWindow(QMainWindow):
             else:
                 self.edit_request_note.setPlaceholderText("아직 물리 모델이 배정되지 않은 슬롯입니다. 기본 conformal depo로만 실행됩니다.")
 
+        self._populate_emulator_default_presets()
+        if changed:
+            settings = self.cmb_emulator_default_preset.currentData()
+            if isinstance(settings, dict):
+                self._apply_emulator_preset(settings)
+
         self.sync_depth_deposition_editor_from_spins()
         self._populate_split_parameters()
         self.sync_etch_control_availability()
+        self._sync_depth_advanced_visibility()
         if run:
             self._schedule_emulator_preview_run()
 
@@ -3712,6 +3857,27 @@ class TrenchDepoWindow(QMainWindow):
         self.lbl_ion_lateral_shadow_value.setText(f"{int(self.slider_ion_lateral_shadow.value())}%")
         self.lbl_ion_edge_shadow_value.setText(f"{int(self.slider_ion_edge_shadow.value())}%")
 
+    def _depth_advanced_widgets(self) -> List[QWidget]:
+        return [
+            self.lbl_depth_closure_section,
+            self.lbl_depth_closure_threshold,
+            self.spin_depth_closure_threshold,
+            self.lbl_depth_post_fill_hole,
+            self.spin_depth_post_fill_hole_pct,
+            self.lbl_depth_post_fill_line,
+            self.spin_depth_post_fill_line_pct,
+            self.lbl_depth_line_open_path,
+            self.spin_depth_line_open_path,
+            self.lbl_depth_residual_decay,
+            self.spin_depth_residual_decay,
+        ]
+
+    def _sync_depth_advanced_visibility(self, _checked: bool = False) -> None:
+        supports_depth = self._active_emulator_supports_depth_deposition()
+        show_advanced = bool(supports_depth and self.btn_depth_advanced.isChecked())
+        for widget in self._depth_advanced_widgets():
+            widget.setVisible(show_advanced)
+
     def sync_etch_control_availability(self, _checked: bool = False) -> None:
         supports_sputter = self._active_emulator_supports_sputter()
         supports_ion_transmission = self._active_emulator_supports_ion_transmission()
@@ -3847,6 +4013,7 @@ class TrenchDepoWindow(QMainWindow):
         )
         self.lbl_depth_feature_length.setEnabled(length_enabled)
         self.spin_depth_feature_length.setEnabled(length_enabled)
+        self._sync_depth_advanced_visibility()
 
     def reset_defaults(self) -> None:
         supports_sputter = self._active_emulator_supports_sputter()

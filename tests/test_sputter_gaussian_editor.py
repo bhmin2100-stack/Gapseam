@@ -240,6 +240,12 @@ class SputterGaussianEditorTest(unittest.TestCase):
             self.assertEqual(window.lbl_etch_section.text(), "Etch switch (1번 direct + 2번 modifier)")
             self.assertFalse(window.ion_map_group.isHidden())
             self.assertTrue(all(not widget.isHidden() for widget in window._ion_transmission_widgets))
+            self.assertEqual(tuple(window.ion_transmission_editor._points), tuple(window._current_geometry_points()))
+            deep_idx = window.cmb_emulator_default_preset.findText("Deep-select ion")
+            self.assertGreaterEqual(deep_idx, 0)
+            window.cmb_emulator_default_preset.setCurrentIndex(deep_idx)
+            self.assertAlmostEqual(window.spin_ion_start_depth.value(), 45.0, places=6)
+            self.assertAlmostEqual(window.spin_ion_curve_power.value(), 1.8, places=6)
 
             split_keys = {
                 window.cmb_split_parameter.itemData(idx)
@@ -479,11 +485,33 @@ class SputterGaussianEditorTest(unittest.TestCase):
 
             self.assertFalse(window._active_emulator_supports_sputter())
             self.assertTrue(window._active_emulator_supports_depth_deposition())
-            self.assertTrue(all(not widget.isHidden() for widget in window._depth_deposition_widgets))
+            self.assertTrue(all(not widget.isHidden() for widget in [
+                window.lbl_depth_depo_section,
+                window.chk_depth_deposition,
+                window.lbl_depth_feature_type,
+                window.cmb_depth_feature_type,
+                window.lbl_depth_feature_width,
+                window.spin_depth_feature_width,
+                window.lbl_depth_feature_depth,
+                window.spin_depth_feature_depth,
+                window.lbl_depth_decay_k,
+                window.spin_depth_decay_k,
+                window.lbl_depth_decay_power,
+                window.spin_depth_decay_power,
+                window.lbl_depth_min_ratio,
+                window.spin_depth_min_ratio_pct,
+                window.btn_depth_advanced,
+                window.depth_profile_group,
+            ]))
+            self.assertTrue(all(widget.isHidden() for widget in window._depth_advanced_widgets()))
+            window.btn_depth_advanced.setChecked(True)
+            self.assertTrue(all(not widget.isHidden() for widget in window._depth_advanced_widgets()))
             self.assertTrue(all(widget.isHidden() for widget in window._sputter_widgets))
             self.assertTrue(all(widget.isHidden() for widget in window._redeposition_widgets))
             self.assertFalse(window.depth_profile_group.isHidden())
             self.assertTrue(window.chk_depth_deposition.isChecked())
+            self.assertGreaterEqual(window.cmb_emulator_default_preset.findText("Depth fill default"), 0)
+            self.assertEqual(tuple(window.depth_deposition_editor._structure_points), tuple(window._current_geometry_points()))
             self.assertIs(window.structure_points_group.parent(), window.structure_panel_content)
             self.assertIs(window.overlay_group.parent(), window.structure_panel_content)
             self.assertIs(window.smoothing_controls_group.parent(), window.smoothing_panel_content)
@@ -667,15 +695,16 @@ class SputterGaussianEditorTest(unittest.TestCase):
                 window.cmb_structure_library.setCurrentIndex(stepped_idx)
                 window.load_selected_structure_from_library()
                 self.assertEqual(tuple(window.current_config().points), tuple(ION_TRANSMISSION_STEPPED_TRENCH_POINTS))
+                self.assertEqual(window.edit_structure_name.text(), "em02_stepped_trench")
+                self.assertFalse(window.btn_load_structure_view.isHidden())
+                self.assertFalse(window.btn_save_structure_view.isHidden())
 
                 custom_points = [(-50.0, 0.0), (0.0, -80.0), (50.0, 0.0)]
                 window._set_structure_points(custom_points, fit=False)
-                with mock.patch(
-                    "gapsim.emulation.trench_depo_ui.QInputDialog.getText",
-                    return_value=("custom_test_structure", True),
-                ):
-                    window.save_current_structure_to_library()
+                window.edit_structure_name.setText("custom_test_structure")
+                window.save_current_structure_to_library()
                 self.assertGreaterEqual(window.cmb_structure_library.findText("custom_test_structure"), 0)
+                self.assertEqual(window.edit_structure_name.text(), "custom_test_structure")
                 self.assertEqual(tuple(window.current_config().points), tuple(custom_points))
             finally:
                 window.close()
