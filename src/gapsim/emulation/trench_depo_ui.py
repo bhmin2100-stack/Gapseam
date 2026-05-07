@@ -1886,8 +1886,13 @@ class TrenchDepoWindow(QMainWindow):
         self.spin_split_step.setDecimals(3)
         self.spin_split_step.setRange(0.001, 10000.0)
         self.spin_split_step.setSingleStep(1.0)
+        self.cmb_compare_target = QComboBox()
+        self.btn_split_options = QPushButton("Split Options")
+        self.btn_split_options.setCheckable(True)
+        self.btn_compare_options = QPushButton("Compare Options")
+        self.btn_compare_options.setCheckable(True)
         self.btn_run_split = QPushButton("Run Split")
-        self.btn_compare_gapsim_angle = QPushButton("Compare GapSim Angle")
+        self.btn_run_compare = QPushButton("Run Compare")
 
         status = QStatusBar(self)
         self.setStatusBar(status)
@@ -2273,10 +2278,14 @@ class TrenchDepoWindow(QMainWindow):
         action_buttons.addWidget(self.btn_run)
         action_buttons.addWidget(self.btn_reset)
         action_layout.addLayout(action_buttons)
+        result_option_buttons = QHBoxLayout()
+        result_option_buttons.addWidget(self.btn_split_options)
+        result_option_buttons.addWidget(self.btn_compare_options)
+        action_layout.addLayout(result_option_buttons)
         action_layout.addLayout(run_row)
         action_group.setLayout(action_layout)
 
-        split_group = QGroupBox("Split / Compare")
+        split_group = QGroupBox("Split Options")
         split_grid = QGridLayout()
         split_grid.setContentsMargins(10, 10, 10, 10)
         split_grid.setHorizontalSpacing(8)
@@ -2291,9 +2300,20 @@ class TrenchDepoWindow(QMainWindow):
         split_grid.addWidget(self.spin_split_step, 3, 1)
         split_buttons = QHBoxLayout()
         split_buttons.addWidget(self.btn_run_split)
-        split_buttons.addWidget(self.btn_compare_gapsim_angle)
         split_grid.addLayout(split_buttons, 4, 0, 1, 2)
         split_group.setLayout(split_grid)
+        split_group.setVisible(False)
+
+        compare_group = QGroupBox("Compare Options")
+        compare_grid = QGridLayout()
+        compare_grid.setContentsMargins(10, 10, 10, 10)
+        compare_grid.setHorizontalSpacing(8)
+        compare_grid.setVerticalSpacing(8)
+        compare_grid.addWidget(QLabel("Compare to"), 0, 0)
+        compare_grid.addWidget(self.cmb_compare_target, 0, 1)
+        compare_grid.addWidget(self.btn_run_compare, 1, 0, 1, 2)
+        compare_group.setLayout(compare_grid)
+        compare_group.setVisible(False)
 
         note_group = QGroupBox("요청사항 / 물리 메모")
         note_layout = QVBoxLayout()
@@ -2325,6 +2345,7 @@ class TrenchDepoWindow(QMainWindow):
         self.params_group = params_group
         self.action_group = action_group
         self.split_group = split_group
+        self.compare_group = compare_group
         self.note_group = note_group
         self.ion_map_group = ion_map_group
         self.depth_profile_group = depth_profile_group
@@ -2472,6 +2493,7 @@ class TrenchDepoWindow(QMainWindow):
         results_panel_layout.addWidget(self.redepo_lobe_group)
         results_panel_layout.addWidget(depth_profile_group)
         results_panel_layout.addWidget(split_group)
+        results_panel_layout.addWidget(compare_group)
         results_panel_layout.addWidget(note_group)
         results_panel_nav = QHBoxLayout()
         results_panel_nav.setContentsMargins(0, 0, 0, 0)
@@ -2528,7 +2550,9 @@ class TrenchDepoWindow(QMainWindow):
         self.btn_open_json.clicked.connect(self.open_replay_json_dialog)
         self.btn_open_run_dir.clicked.connect(self.open_last_run_dir)
         self.btn_run_split.clicked.connect(self.run_split_test)
-        self.btn_compare_gapsim_angle.clicked.connect(self.run_compare_for_active_emulator)
+        self.btn_run_compare.clicked.connect(self.run_compare_for_active_emulator)
+        self.btn_split_options.toggled.connect(self._on_split_options_toggled)
+        self.btn_compare_options.toggled.connect(self._on_compare_options_toggled)
         self.view_tabs.currentChanged.connect(self._on_view_workflow_tab_changed)
         self.workflow_tabs.currentChanged.connect(self._on_control_workflow_tab_changed)
         self.btn_structure_next.clicked.connect(lambda: self._set_workflow_step("smoothing"))
@@ -2973,6 +2997,16 @@ class TrenchDepoWindow(QMainWindow):
     def _on_control_workflow_tab_changed(self, index: int) -> None:
         self._set_workflow_index(index)
 
+    def _on_split_options_toggled(self, checked: bool) -> None:
+        if checked and self.btn_compare_options.isChecked():
+            self.btn_compare_options.setChecked(False)
+        self.split_group.setVisible(bool(checked))
+
+    def _on_compare_options_toggled(self, checked: bool) -> None:
+        if checked and self.btn_split_options.isChecked():
+            self.btn_split_options.setChecked(False)
+        self.compare_group.setVisible(bool(checked and self.btn_compare_options.isEnabled()))
+
     def _add_emulator_toggle(self, number: int) -> None:
         target = max(0, min(MAX_EMULATOR_NUMBER, int(number)))
         if target in self._emulator_buttons:
@@ -2993,6 +3027,8 @@ class TrenchDepoWindow(QMainWindow):
         if target == self._active_emulator_number:
             button.setChecked(True)
         self._sync_new_emulator_button()
+        if hasattr(self, "cmb_compare_target"):
+            self._populate_compare_targets()
 
     def _sync_new_emulator_button(self) -> None:
         if not hasattr(self, "btn_new_emulator"):
@@ -3053,6 +3089,68 @@ class TrenchDepoWindow(QMainWindow):
 
     def _active_emulator_supports_depth_deposition(self) -> bool:
         return self.active_emulator_number() in (5, 6)
+
+    @staticmethod
+    def _emulator_supports_sputter(number: int) -> bool:
+        return int(number) in (1, 2, 3, 4)
+
+    @staticmethod
+    def _emulator_supports_ion_transmission(number: int) -> bool:
+        return int(number) == 2
+
+    @staticmethod
+    def _emulator_supports_reflected_ion(number: int) -> bool:
+        return int(number) == 3
+
+    @staticmethod
+    def _emulator_supports_redeposition(number: int) -> bool:
+        return int(number) == 4
+
+    @staticmethod
+    def _emulator_supports_depth_deposition(number: int) -> bool:
+        return int(number) in (5, 6)
+
+    def _populate_compare_targets(self) -> None:
+        previous = self.cmb_compare_target.currentData()
+        active = self.active_emulator_number()
+        default_target: object
+        if active in (2, 3, 4):
+            default_target = 1
+        elif active == 5:
+            default_target = 6
+        elif active == 6:
+            default_target = 5
+        elif self._emulator_supports_sputter(active):
+            default_target = "legacy_gapsim_angle"
+        else:
+            default_target = 1
+
+        self.cmb_compare_target.blockSignals(True)
+        self.cmb_compare_target.clear()
+        for number in self._emulator_numbers:
+            target = int(number)
+            if target == active:
+                continue
+            self.cmb_compare_target.addItem(f"Emulator {target:02d} - {_emulator_mode_title(target)}", target)
+        if self._emulator_supports_sputter(active):
+            self.cmb_compare_target.addItem("GapSim angle-only legacy", "legacy_gapsim_angle")
+
+        restored_idx = self.cmb_compare_target.findData(previous)
+        default_idx = self.cmb_compare_target.findData(default_target)
+        if restored_idx >= 0:
+            self.cmb_compare_target.setCurrentIndex(restored_idx)
+        elif default_idx >= 0:
+            self.cmb_compare_target.setCurrentIndex(default_idx)
+        elif self.cmb_compare_target.count() > 0:
+            self.cmb_compare_target.setCurrentIndex(0)
+        self.cmb_compare_target.blockSignals(False)
+
+        has_targets = self.cmb_compare_target.count() > 0
+        self.btn_compare_options.setEnabled(has_targets)
+        self.btn_run_compare.setEnabled(has_targets)
+        if not has_targets:
+            self.btn_compare_options.setChecked(False)
+            self.compare_group.setVisible(False)
 
     def _populate_split_parameters(self) -> None:
         previous = self.cmb_split_parameter.currentData()
@@ -3164,13 +3262,7 @@ class TrenchDepoWindow(QMainWindow):
         for widget in self._depth_deposition_widgets:
             widget.setVisible(supports_depth_deposition)
         self.gaussian_group.setVisible(supports_sputter)
-        self.btn_compare_gapsim_angle.setVisible(supports_sputter)
-        self.btn_compare_gapsim_angle.setEnabled(supports_sputter)
-        self.btn_compare_gapsim_angle.setText(
-            "Compare Emulator 01"
-            if (supports_ion_transmission or supports_reflected_ion or supports_redeposition)
-            else "Compare GapSim Angle"
-        )
+        self._populate_compare_targets()
         self.ion_map_group.setTitle("2 Ion Transmission Depth Map")
         self.gaussian_group.setTitle("1 Direct Sputter Gaussian")
         self.depth_profile_group.setTitle(
@@ -3839,6 +3931,79 @@ class TrenchDepoWindow(QMainWindow):
             redepo_soft_los_radius_points=cfg.redepo_soft_los_radius_points,
         )
 
+    def _config_for_emulator_number(
+        self,
+        number: int,
+        *,
+        force_model_enabled: bool = False,
+    ) -> TrenchDepoConfig:
+        target = max(0, min(MAX_EMULATOR_NUMBER, int(number)))
+        cfg = self.current_config()
+        supports_sputter = self._emulator_supports_sputter(target)
+        supports_ion_transmission = self._emulator_supports_ion_transmission(target)
+        supports_reflected_ion = self._emulator_supports_reflected_ion(target)
+        supports_redeposition = self._emulator_supports_redeposition(target)
+        supports_depth_deposition = self._emulator_supports_depth_deposition(target)
+        etch_enabled = bool(supports_sputter and (force_model_enabled or self.chk_sputter.isChecked()))
+        depth_enabled = bool(
+            supports_depth_deposition and (force_model_enabled or self.chk_depth_deposition.isChecked())
+        )
+        return replace(
+            cfg,
+            sputter_enabled=etch_enabled,
+            sputter_strength_a_per_cycle=(
+                float(self.spin_sputter_strength.value()) if supports_sputter else 0.0
+            ),
+            ion_transmission_enabled=bool(
+                etch_enabled
+                and supports_ion_transmission
+                and (force_model_enabled or self.chk_ion_transmission.isChecked())
+            ),
+            ion_transmission_start_depth_pct=(
+                float(self.spin_ion_start_depth.value()) if supports_ion_transmission else 0.0
+            ),
+            ion_transmission_end_depth_pct=(
+                float(self.spin_ion_end_depth.value()) if supports_ion_transmission else 100.0
+            ),
+            ion_transmission_decay_strength_pct=(
+                float(self.spin_ion_decay_strength.value()) if supports_ion_transmission else 100.0
+            ),
+            ion_transmission_floor_pct=(
+                float(self.spin_ion_floor.value()) if supports_ion_transmission else 0.0
+            ),
+            ion_transmission_curve_power=(
+                float(self.spin_ion_curve_power.value()) if supports_ion_transmission else 1.0
+            ),
+            ion_transmission_aperture_shadow_pct=(
+                float(self.slider_ion_aperture_shadow.value()) if supports_ion_transmission else 100.0
+            ),
+            ion_transmission_lateral_shadow_pct=(
+                float(self.slider_ion_lateral_shadow.value()) if supports_ion_transmission else 100.0
+            ),
+            ion_transmission_edge_shadow_pct=(
+                float(self.slider_ion_edge_shadow.value()) if supports_ion_transmission else 100.0
+            ),
+            reflected_ion_enabled=bool(
+                etch_enabled
+                and supports_reflected_ion
+                and (force_model_enabled or self.chk_reflected_ion.isChecked())
+            ),
+            reflected_ion_strength_pct=(
+                float(self.spin_reflected_strength.value()) if supports_reflected_ion else 0.0
+            ),
+            redepo_enabled=bool(
+                etch_enabled
+                and supports_redeposition
+                and (force_model_enabled or self.chk_redepo.isChecked())
+            ),
+            redepo_source_model=str(self.cmb_redepo_source_model.currentData() or "model2"),
+            redepo_efficiency_pct=(
+                float(self.spin_redepo_efficiency.value()) if supports_redeposition else 0.0
+            ),
+            deposition_depth_enabled=depth_enabled,
+            inhibition_enabled=bool(target == 6 and depth_enabled),
+        )
+
     def _set_run_dir_label(self, run_dir: Optional[Path]) -> None:
         if run_dir is None:
             self.lbl_run_dir.setText("저장된 run: 아직 없음")
@@ -4031,61 +4196,63 @@ class TrenchDepoWindow(QMainWindow):
         self.statusBar().showMessage(f"Split test 완료/저장: {len(cases)} cases", 5000)
 
     def run_compare_for_active_emulator(self, _checked: bool = False) -> None:
-        if self.active_emulator_number() == 2:
-            self.run_emulator_one_compare()
+        target = self.cmb_compare_target.currentData()
+        if target == "legacy_gapsim_angle":
+            self.run_gapsim_angle_compare()
             return
-        self.run_gapsim_angle_compare()
+        if target is None:
+            QMessageBox.information(self, "Emulator Compare", "Select an emulator to compare.")
+            return
+        self.run_emulator_compare(int(target))
 
-    def run_emulator_one_compare(self) -> None:
-        if self.active_emulator_number() != 2:
+    def run_emulator_compare(self, target_number: int) -> None:
+        active_number = self.active_emulator_number()
+        target = max(0, min(MAX_EMULATOR_NUMBER, int(target_number)))
+        if target == active_number:
             QMessageBox.information(
                 self,
                 "Emulator Compare",
-                "Emulator 01 comparison is available in Emulator 02.",
+                "Choose a different emulator as the compare target.",
             )
             return
-        self.btn_compare_gapsim_angle.setEnabled(False)
+        self.btn_run_compare.setEnabled(False)
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        self.statusBar().showMessage("Emulator 01 baseline 비교 계산 중...")
+        self.statusBar().showMessage(f"Emulator {active_number:02d}/{target:02d} 비교 계산 중...")
         try:
-            cfg_02 = self.current_config()
-            cfg_01 = replace(
-                cfg_02,
-                ion_transmission_enabled=False,
-                ion_transmission_override=None,
-            )
+            current_cfg = self._config_for_emulator_number(active_number, force_model_enabled=True)
+            target_cfg = self._config_for_emulator_number(target, force_model_enabled=True)
             t0 = time.perf_counter()
-            result_01 = run_trench_depo(cfg_01)
-            elapsed_01 = time.perf_counter() - t0
+            current_result = run_trench_depo(current_cfg)
+            current_elapsed = time.perf_counter() - t0
             t1 = time.perf_counter()
-            result_02 = run_trench_depo(cfg_02)
-            elapsed_02 = time.perf_counter() - t1
+            target_result = run_trench_depo(target_cfg)
+            target_elapsed = time.perf_counter() - t1
             cases = [
                 TrenchSweepResult(
                     parameter="emulator_compare",
-                    label=f"Emulator 01 direct sputter ({elapsed_01:.2f}s)",
-                    value=1.0,
-                    config=cfg_01,
-                    result=result_01,
+                    label=f"Current Emulator {active_number:02d} - {_emulator_mode_title(active_number)} ({current_elapsed:.2f}s)",
+                    value=float(active_number),
+                    config=current_cfg,
+                    result=current_result,
                 ),
                 TrenchSweepResult(
                     parameter="emulator_compare",
-                    label=f"Emulator 02 ion transmission ({elapsed_02:.2f}s)",
-                    value=2.0,
-                    config=cfg_02,
-                    result=result_02,
+                    label=f"Compare Emulator {target:02d} - {_emulator_mode_title(target)} ({target_elapsed:.2f}s)",
+                    value=float(target),
+                    config=target_cfg,
+                    result=target_result,
                 ),
             ]
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(
                 self,
                 "Emulator Compare",
-                f"Failed to compare Emulator 01 and 02:\n{exc}",
+                f"Failed to compare Emulator {active_number:02d} and {target:02d}:\n{exc}",
             )
             return
         finally:
             QApplication.restoreOverrideCursor()
-            self.btn_compare_gapsim_angle.setEnabled(True)
+            self.btn_run_compare.setEnabled(True)
 
         window = SplitTestWindow(cases)
         window.destroyed.connect(lambda _obj=None, w=window: self._forget_split_window(w))
@@ -4093,21 +4260,7 @@ class TrenchDepoWindow(QMainWindow):
         window.show()
         window.raise_()
         window.activateWindow()
-
-        summary = result_02.meta.get("ion_debug_summary_last", {})
-        ion_summary = summary.get("ion_factor", {}) if isinstance(summary, dict) else {}
-        if isinstance(ion_summary, dict) and ion_summary:
-            self.statusBar().showMessage(
-                (
-                    "Emulator 01/02 비교 완료 | ion top/mid/bottom="
-                    f"{float(ion_summary.get('top', 0.0)):.3f}/"
-                    f"{float(ion_summary.get('mid', 0.0)):.3f}/"
-                    f"{float(ion_summary.get('bottom', 0.0)):.3f}"
-                ),
-                7000,
-            )
-        else:
-            self.statusBar().showMessage("Emulator 01/02 비교 완료", 5000)
+        self.statusBar().showMessage(f"Emulator {active_number:02d}/{target:02d} 비교 완료", 5000)
 
     def run_gapsim_angle_compare(self, _checked: bool = False) -> None:
         if not self._active_emulator_supports_sputter():
@@ -4117,37 +4270,23 @@ class TrenchDepoWindow(QMainWindow):
                 "Angle/model comparison is available in sputter-based emulators.",
             )
             return
-        self.btn_compare_gapsim_angle.setEnabled(False)
+        self.btn_run_compare.setEnabled(False)
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        compare_to_emulator_01 = self.active_emulator_number() in (2, 3, 4)
-        self.statusBar().showMessage("Emulator 01 비교 계산 중..." if compare_to_emulator_01 else "GapSim angle-only 비교 계산 중...")
+        self.statusBar().showMessage("GapSim angle-only 비교 계산 중...")
         try:
-            config = self.current_etch_config()
+            config = self._config_for_emulator_number(self.active_emulator_number(), force_model_enabled=True)
             t0 = time.perf_counter()
             mini_result = run_trench_depo(config)
             mini_elapsed = time.perf_counter() - t0
             t1 = time.perf_counter()
-            if compare_to_emulator_01:
-                baseline_config = replace(
-                    config,
-                    ion_transmission_enabled=False,
-                    ion_transmission_override=None,
-                    reflected_ion_enabled=False,
-                    reflected_ion_strength_pct=0.0,
-                    redepo_enabled=False,
-                    redepo_efficiency_pct=0.0,
-                )
-                comparison_result = run_trench_depo(baseline_config)
-                comparison_label = "Emulator 01 direct"
-            else:
-                baseline_config = config
-                comparison_result = run_trench_depo_legacy_sputter(config)
-                comparison_label = "GapSim angle-only"
+            baseline_config = config
+            comparison_result = run_trench_depo_legacy_sputter(config)
+            comparison_label = "GapSim angle-only"
             comparison_elapsed = time.perf_counter() - t1
             cases = [
                 TrenchSweepResult(
                     parameter="model_compare",
-                    label=f"Current emulator ({mini_elapsed:.2f}s)",
+                    label=f"Current Emulator {self.active_emulator_number():02d} ({mini_elapsed:.2f}s)",
                     value=0.0,
                     config=config,
                     result=mini_result,
@@ -4163,17 +4302,13 @@ class TrenchDepoWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(
                 self,
-                "Model Compare" if compare_to_emulator_01 else "GapSim Angle Compare",
-                (
-                    f"Failed to run Emulator 01 comparison:\n{exc}"
-                    if compare_to_emulator_01
-                    else f"Failed to run GapSim angle-only comparison:\n{exc}"
-                ),
+                "GapSim Angle Compare",
+                f"Failed to run GapSim angle-only comparison:\n{exc}",
             )
             return
         finally:
             QApplication.restoreOverrideCursor()
-            self.btn_compare_gapsim_angle.setEnabled(True)
+            self.btn_run_compare.setEnabled(True)
 
         window = SplitTestWindow(cases)
         window.destroyed.connect(lambda _obj=None, w=window: self._forget_split_window(w))
@@ -4181,7 +4316,7 @@ class TrenchDepoWindow(QMainWindow):
         window.show()
         window.raise_()
         window.activateWindow()
-        self.statusBar().showMessage("Emulator 01 비교 완료" if compare_to_emulator_01 else "GapSim angle-only 비교 완료", 5000)
+        self.statusBar().showMessage("GapSim angle-only 비교 완료", 5000)
 
     def _forget_split_window(self, window: SplitTestWindow) -> None:
         if window in self._split_windows:

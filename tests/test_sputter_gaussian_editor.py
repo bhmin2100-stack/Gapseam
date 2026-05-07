@@ -299,8 +299,9 @@ class SputterGaussianEditorTest(unittest.TestCase):
             self.assertTrue(window._active_emulator_supports_reflected_ion())
             self.assertFalse(window._active_emulator_supports_ion_transmission())
             self.assertFalse(window.gaussian_group.isHidden())
-            self.assertFalse(window.btn_compare_gapsim_angle.isHidden())
-            self.assertEqual(window.btn_compare_gapsim_angle.text(), "Compare Emulator 01")
+            self.assertFalse(window.btn_compare_options.isHidden())
+            self.assertEqual(window.cmb_compare_target.currentData(), 1)
+            self.assertIn("Emulator 01", window.cmb_compare_target.currentText())
             self.assertEqual(window.lbl_etch_section.text(), "Etch switch (1번 direct + 3번 reflected)")
             self.assertEqual(window.lbl_sputter_section.text(), "기존 1번 Direct sputter kernel")
             self.assertEqual(window.lbl_reflected_section.text(), "3번 신규 Reflected ion")
@@ -349,7 +350,8 @@ class SputterGaussianEditorTest(unittest.TestCase):
             self.assertFalse(window._active_emulator_supports_ion_transmission())
             self.assertFalse(window._active_emulator_supports_reflected_ion())
             self.assertFalse(window.gaussian_group.isHidden())
-            self.assertEqual(window.btn_compare_gapsim_angle.text(), "Compare Emulator 01")
+            self.assertEqual(window.cmb_compare_target.currentData(), 1)
+            self.assertIn("Emulator 01", window.cmb_compare_target.currentText())
             self.assertEqual(window.lbl_etch_section.text(), "Etch switch (2번 source + 4번 redepo)")
             self.assertEqual(window.lbl_sputter_section.text(), "기존 1번 Direct sputter kernel")
             self.assertTrue(all(not widget.isHidden() for widget in window._sputter_widgets))
@@ -388,6 +390,40 @@ class SputterGaussianEditorTest(unittest.TestCase):
             self.assertNotIn("reflected_ion_strength_pct", split_keys)
         finally:
             window.close()
+
+    def test_compare_options_run_selected_emulator_target(self) -> None:
+        result = TrenchDepoResult(
+            frame_steps=[0],
+            frame_profiles=[[(0.0, 0.0), (1.0, 0.0)]],
+            frame_voids=[[]],
+            final_profile=[(0.0, 0.0), (1.0, 0.0)],
+            meta={"cycles": 0},
+        )
+        with (
+            mock.patch("gapsim.emulation.trench_depo_ui.run_trench_depo", return_value=result) as run_mock,
+            mock.patch("gapsim.emulation.trench_depo_ui.QTimer.singleShot"),
+        ):
+            window = TrenchDepoWindow()
+            try:
+                window.set_active_emulator_number(4, run=False)
+                target_idx = window.cmb_compare_target.findData(3)
+                self.assertGreaterEqual(target_idx, 0)
+                window.cmb_compare_target.setCurrentIndex(target_idx)
+
+                window.run_compare_for_active_emulator()
+
+                self.assertEqual(run_mock.call_count, 2)
+                current_cfg = run_mock.call_args_list[0].args[0]
+                target_cfg = run_mock.call_args_list[1].args[0]
+                self.assertTrue(current_cfg.redepo_enabled)
+                self.assertFalse(current_cfg.reflected_ion_enabled)
+                self.assertTrue(target_cfg.reflected_ion_enabled)
+                self.assertFalse(target_cfg.redepo_enabled)
+                self.assertEqual(len(window._split_windows), 1)
+            finally:
+                for split_window in list(window._split_windows):
+                    split_window.close()
+                window.close()
 
     def test_etch_dominant_run_uses_mixed_history_view(self) -> None:
         result = TrenchDepoResult(
@@ -539,6 +575,17 @@ class SputterGaussianEditorTest(unittest.TestCase):
             self.assertIs(window.params_group.parent(), window.results_panel_content)
             self.assertIs(window.action_group.parent(), window.results_panel_content)
             self.assertIs(window.split_group.parent(), window.results_panel_content)
+            self.assertIs(window.compare_group.parent(), window.results_panel_content)
+            self.assertTrue(window.split_group.isHidden())
+            self.assertTrue(window.compare_group.isHidden())
+
+            window.btn_split_options.click()
+            self.assertFalse(window.split_group.isHidden())
+            self.assertTrue(window.compare_group.isHidden())
+
+            window.btn_compare_options.click()
+            self.assertTrue(window.split_group.isHidden())
+            self.assertFalse(window.compare_group.isHidden())
 
             window.btn_structure_next.click()
             self.assertEqual(window.view_tabs.currentIndex(), 1)
