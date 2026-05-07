@@ -50,7 +50,7 @@ if errorlevel 1 (
   echo Installing Python dependencies...
   ".venv\Scripts\python.exe" -m pip install --upgrade pip
   if errorlevel 1 goto FAIL
-  ".venv\Scripts\python.exe" -m pip install -e .
+  ".venv\Scripts\python.exe" -m pip install -e . openpyxl
   if errorlevel 1 goto FAIL
 )
 

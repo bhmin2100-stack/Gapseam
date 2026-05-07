@@ -36,7 +36,7 @@ if errorlevel 1 (
 echo [2/6] Installing build dependencies...
 "%PYTHON_EXE%" -m pip install --upgrade pip
 if errorlevel 1 exit /b 1
-"%PYTHON_EXE%" -m pip install -e . pyinstaller
+"%PYTHON_EXE%" -m pip install -e . pyinstaller openpyxl
 if errorlevel 1 exit /b 1
 
 echo [3/6] Cleaning old build artifacts...
