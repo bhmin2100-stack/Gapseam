@@ -827,6 +827,42 @@ class SputterGaussianEditorTest(unittest.TestCase):
         finally:
             window.close()
 
+    def test_emulator_switch_preserves_completed_smoothing_geometry(self) -> None:
+        result = TrenchDepoResult(
+            frame_steps=[0],
+            frame_profiles=[[(0.0, 0.0), (1.0, 0.0)]],
+            frame_voids=[[]],
+            final_profile=[(0.0, 0.0), (1.0, 0.0)],
+            meta={"cycles": 0},
+        )
+        with (
+            mock.patch("gapsim.emulation.trench_depo_ui.run_trench_depo", return_value=result),
+            mock.patch("gapsim.emulation.trench_depo_ui.QTimer.singleShot"),
+        ):
+            window = TrenchDepoWindow()
+
+        try:
+            raw_points = [(-180.0, 0.0), (-90.0, -220.0), (0.0, -280.0), (90.0, -220.0), (180.0, 0.0)]
+            window._set_structure_points(raw_points, fit=False)
+            window.spin_smooth_segments.setValue(16)
+            window.spin_smooth_iterations.setValue(1)
+            window.apply_structure_smoothing()
+            smoothed_points = tuple(window._smoothed_points)
+
+            window.btn_smoothing_next.click()
+            self.assertEqual(window.view_tabs.currentIndex(), 2)
+            window.set_active_emulator_number(5, run=False)
+
+            self.assertEqual(window.active_emulator_number(), 5)
+            self.assertEqual(window.view_tabs.currentIndex(), 2)
+            self.assertTrue(window._use_smoothed_geometry)
+            self.assertEqual(tuple(window._smoothed_points), smoothed_points)
+            self.assertEqual(tuple(window.current_config().points), smoothed_points)
+            self.assertEqual(tuple(window.depth_deposition_editor._structure_points), smoothed_points)
+            self.assertIn("Input preview: smooth", window.lbl_status.text())
+        finally:
+            window.close()
+
     def test_window_starts_on_emulator_zero_with_only_existing_toggles(self) -> None:
         result = TrenchDepoResult(
             frame_steps=[0],

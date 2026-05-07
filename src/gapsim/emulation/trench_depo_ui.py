@@ -3066,6 +3066,9 @@ class TrenchDepoWindow(QMainWindow):
             return "smooth"
         return "raw"
 
+    def _has_active_smoothed_geometry(self) -> bool:
+        return bool(self._use_smoothed_geometry and len(self._smoothed_points) >= 2)
+
     def _result_has_run_frames(self) -> bool:
         return self._result is not None and bool(self._result.frame_profiles)
 
@@ -3360,10 +3363,13 @@ class TrenchDepoWindow(QMainWindow):
         button = self._emulator_buttons.get(target)
         if button is None:
             return
+        preserve_smoothed_geometry = self._has_active_smoothed_geometry()
         button.setChecked(True)
-        self.apply_emulator_mode(run=run)
-        if target != previous:
+        self.apply_emulator_mode(run=run, preserve_geometry=preserve_smoothed_geometry)
+        if target != previous and not preserve_smoothed_geometry:
             self._set_workflow_step("structure")
+        elif target != previous:
+            self._refresh_result_input_preview_if_idle(fit=True)
 
     def _active_emulator_supports_sputter(self) -> bool:
         return self.active_emulator_number() in (1, 2, 3, 4)
@@ -3584,14 +3590,20 @@ class TrenchDepoWindow(QMainWindow):
         self.sync_depth_deposition_editor_from_spins()
         self.sync_etch_control_availability()
 
-    def apply_emulator_mode(self, _index: int = 0, *, run: bool = True) -> None:
+    def apply_emulator_mode(
+        self,
+        _index: int = 0,
+        *,
+        run: bool = True,
+        preserve_geometry: bool = False,
+    ) -> None:
         number = self.active_emulator_number()
         changed = number != self._active_emulator_number
         self._active_emulator_number = number
         supports_sputter = self._active_emulator_supports_sputter()
 
         self.setWindowTitle(f"Trench Depo Emulation - Emulator {number:02d}")
-        if changed:
+        if changed and not preserve_geometry:
             self._reset_geometry_to_default()
         if supports_sputter:
             if number == 2:
