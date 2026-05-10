@@ -284,7 +284,7 @@ class SputterGaussianEditorTest(unittest.TestCase):
             self.assertAlmostEqual(window.spin_depth_min_ratio_pct.value(), 11.0, places=6)
             self.assertTrue(window.chk_sputter.isChecked())
             self.assertTrue(window.chk_ion_transmission.isChecked())
-            self.assertFalse(window.chk_redepo.isChecked())
+            self.assertTrue(window.chk_redepo.isChecked())
             self.assertTrue(window.chk_depth_deposition.isChecked())
             self.assertFalse(window.chk_reflected_ion.isChecked())
         finally:
@@ -988,7 +988,7 @@ class SputterGaussianEditorTest(unittest.TestCase):
         finally:
             window.close()
 
-    def test_emulator_zero_integrates_active_models_without_redepo_or_reflected_ion(self) -> None:
+    def test_emulator_zero_integrates_active_models_with_model_six_redepo(self) -> None:
         result = TrenchDepoResult(
             frame_steps=[0],
             frame_profiles=[[(0.0, 0.0), (1.0, 0.0)]],
@@ -1008,12 +1008,15 @@ class SputterGaussianEditorTest(unittest.TestCase):
             self.assertTrue(window._active_emulator_supports_sputter())
             self.assertTrue(window._active_emulator_supports_ion_transmission())
             self.assertTrue(window._active_emulator_supports_depth_deposition())
-            self.assertFalse(window._active_emulator_supports_redeposition())
+            self.assertTrue(window._active_emulator_supports_redeposition())
             self.assertFalse(window._active_emulator_supports_lf_overhang())
             self.assertFalse(window._active_emulator_supports_reflected_ion())
             self.assertFalse(window.chk_sputter.isHidden())
             self.assertTrue(all(not widget.isHidden() for widget in window._ion_transmission_widgets))
-            self.assertTrue(all(widget.isHidden() for widget in window._redeposition_widgets))
+            self.assertFalse(window.chk_redepo.isHidden())
+            self.assertFalse(window.lbl_redepo_efficiency.isHidden())
+            self.assertTrue(window.cmb_redepo_source_model.isHidden())
+            self.assertTrue(window.redepo_lobe_group.isHidden())
             self.assertTrue(all(widget.isHidden() for widget in window._lf_overhang_widgets))
             self.assertTrue(all(not widget.isHidden() for widget in [
                 window.lbl_depth_depo_section,
@@ -1044,7 +1047,9 @@ class SputterGaussianEditorTest(unittest.TestCase):
             }
             self.assertIn("sputter_strength_a_per_cycle", split_parameters)
             self.assertIn("ion_transmission_start_depth_pct", split_parameters)
-            self.assertNotIn("redepo_efficiency_pct", split_parameters)
+            self.assertIn("redepo_efficiency_pct", split_parameters)
+            self.assertIn("redepo_emit_power", split_parameters)
+            self.assertIn("redepo_distance_power", split_parameters)
             self.assertNotIn("lf_overhang_dose", split_parameters)
             self.assertIn("deposition_depth_decay_k", split_parameters)
             self.assertIn("inhibition_strength_pct", split_parameters)
@@ -1054,11 +1059,63 @@ class SputterGaussianEditorTest(unittest.TestCase):
             self.assertEqual(tuple(config.points), tuple(window._current_geometry_points()))
             self.assertTrue(config.sputter_enabled)
             self.assertTrue(config.ion_transmission_enabled)
-            self.assertFalse(config.redepo_enabled)
+            self.assertTrue(config.redepo_enabled)
+            self.assertAlmostEqual(config.redepo_emit_power, 22.0, places=6)
+            self.assertAlmostEqual(config.redepo_distance_power, 25.0, places=6)
             self.assertFalse(config.lf_overhang_enabled)
             self.assertTrue(config.deposition_depth_enabled)
             self.assertTrue(config.inhibition_enabled)
             self.assertFalse(config.reflected_ion_enabled)
+        finally:
+            window.close()
+
+    def test_emulator_six_exposes_reflection_gaussian_redepo_controls(self) -> None:
+        result = TrenchDepoResult(
+            frame_steps=[0],
+            frame_profiles=[[(0.0, 0.0), (1.0, 0.0)]],
+            frame_voids=[[]],
+            final_profile=[(0.0, 0.0), (1.0, 0.0)],
+            meta={"cycles": 0},
+        )
+        with (
+            mock.patch("gapsim.emulation.trench_depo_ui.run_trench_depo", return_value=result),
+            mock.patch("gapsim.emulation.trench_depo_ui.QTimer.singleShot"),
+        ):
+            window = TrenchDepoWindow()
+
+        try:
+            window.set_active_emulator_number(6, run=False)
+
+            self.assertTrue(window._active_emulator_supports_sputter())
+            self.assertTrue(window._active_emulator_supports_redeposition())
+            self.assertFalse(window._active_emulator_supports_ion_transmission())
+            self.assertFalse(window._active_emulator_supports_depth_deposition())
+            self.assertEqual(window.cmb_compare_target.currentData(), 2)
+            self.assertIn("reflection", window.lbl_etch_section.text().lower())
+            self.assertIn("Reflection", window.lbl_redepo_section.text())
+            self.assertEqual(window.lbl_redepo_emit_power.text(), "Angular spread deg")
+            self.assertEqual(window.lbl_redepo_distance_power.text(), "Specular bias %")
+            self.assertGreaterEqual(window.spin_redepo_emit_power.maximum(), 80.0)
+            self.assertGreaterEqual(window.spin_redepo_distance_power.maximum(), 100.0)
+            self.assertFalse(window.lbl_redepo_efficiency.isHidden())
+            self.assertTrue(window.cmb_redepo_source_model.isHidden())
+            self.assertTrue(window.redepo_lobe_group.isHidden())
+
+            split_parameters = {
+                str(window.cmb_split_parameter.itemData(idx))
+                for idx in range(window.cmb_split_parameter.count())
+            }
+            self.assertIn("redepo_efficiency_pct", split_parameters)
+            self.assertIn("redepo_emit_power", split_parameters)
+            self.assertIn("redepo_distance_power", split_parameters)
+            self.assertNotIn("ion_transmission_start_depth_pct", split_parameters)
+
+            config = window.current_config()
+            self.assertEqual(config.emulator_number, 6)
+            self.assertTrue(config.sputter_enabled)
+            self.assertTrue(config.redepo_enabled)
+            self.assertAlmostEqual(config.redepo_emit_power, 22.0, places=6)
+            self.assertAlmostEqual(config.redepo_distance_power, 25.0, places=6)
         finally:
             window.close()
 

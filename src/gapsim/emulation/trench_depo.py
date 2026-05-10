@@ -1882,6 +1882,23 @@ def _model6_reflection_axis(normal: Point) -> Point:
     return (rx / rlen, ry / rlen)
 
 
+def _model6_blended_emission_axis(normal: Point, specular_bias: float) -> Point:
+    nx, ny = float(normal[0]), float(normal[1])
+    nlen = math.hypot(nx, ny)
+    if nlen <= 1e-12:
+        nx, ny = 0.0, 1.0
+    else:
+        nx, ny = nx / nlen, ny / nlen
+    rx, ry = _model6_reflection_axis((nx, ny))
+    beta = _clamp01(float(specular_bias))
+    ax = ((1.0 - beta) * nx) + (beta * rx)
+    ay = ((1.0 - beta) * ny) + (beta * ry)
+    alen = math.hypot(ax, ay)
+    if alen <= 1e-12:
+        return (rx, ry)
+    return (ax / alen, ay / alen)
+
+
 def _model6_ray_segment_intersection(
     origin: Point,
     direction: Point,
@@ -1947,6 +1964,8 @@ def _model6_first_opposite_reflection_hit(
         ny = ((1.0 - u) * float(n0[1])) + (u * float(n1[1]))
         nlen = math.hypot(nx, ny)
         hit_normal = (nx / nlen, ny / nlen) if nlen > 1e-12 else (0.0, 1.0)
+        if abs(float(hit_normal[0])) < 0.20:
+            continue
         best = (int(seg_idx), float(u), float(dist), (float(hx), float(hy)), hit_normal)
     return best
 
@@ -1961,11 +1980,21 @@ def _apply_model6_reflection_gaussian_redepo_step(
     sputter_width_deg: float,
     sputter_smoothing_a: float,
     reparam_ds_a: float,
-    redepo_efficiency_pct: float,
-    gaussian_width_a: float,
-    ballistic_mix_pct: float,
-    redepo_neighbor_exclusion: int,
-    redepo_max_distance_a: float,
+    ion_transmission_enabled: bool = False,
+    ion_transmission_override: Optional[float] = None,
+    ion_transmission_start_depth_pct: float = 0.0,
+    ion_transmission_end_depth_pct: float = 100.0,
+    ion_transmission_decay_strength_pct: float = 100.0,
+    ion_transmission_floor_pct: float = 0.0,
+    ion_transmission_curve_power: float = 1.0,
+    ion_transmission_aperture_shadow_pct: float = 100.0,
+    ion_transmission_lateral_shadow_pct: float = 100.0,
+    ion_transmission_edge_shadow_pct: float = 100.0,
+    redepo_efficiency_pct: float = 0.0,
+    angular_spread_deg: float = 22.0,
+    specular_bias_pct: float = 25.0,
+    redepo_neighbor_exclusion: int = 2,
+    redepo_max_distance_a: float = 1800.0,
 ) -> Tuple[List[float], List[float], float]:
     source_state = _clone_simulation_state(state)
     angles, responses, etch_clamp_a = _apply_direct_sputter_step(
@@ -1977,8 +2006,16 @@ def _apply_model6_reflection_gaussian_redepo_step(
         sputter_width_deg=sputter_width_deg,
         sputter_smoothing_a=sputter_smoothing_a,
         reparam_ds_a=reparam_ds_a,
-        ion_transmission_enabled=False,
-        ion_transmission_override=None,
+        ion_transmission_enabled=ion_transmission_enabled,
+        ion_transmission_override=ion_transmission_override,
+        ion_transmission_start_depth_pct=ion_transmission_start_depth_pct,
+        ion_transmission_end_depth_pct=ion_transmission_end_depth_pct,
+        ion_transmission_decay_strength_pct=ion_transmission_decay_strength_pct,
+        ion_transmission_floor_pct=ion_transmission_floor_pct,
+        ion_transmission_curve_power=ion_transmission_curve_power,
+        ion_transmission_aperture_shadow_pct=ion_transmission_aperture_shadow_pct,
+        ion_transmission_lateral_shadow_pct=ion_transmission_lateral_shadow_pct,
+        ion_transmission_edge_shadow_pct=ion_transmission_edge_shadow_pct,
         reflected_ion_enabled=False,
         reflected_ion_strength_pct=0.0,
     )
@@ -2008,22 +2045,28 @@ def _apply_model6_reflection_gaussian_redepo_step(
     removed_mass = [max(0.0, float(dh)) * area for dh, area in zip(dh_etch, areas)]
     total_removed_mass = float(sum(removed_mass))
     efficiency = max(0.0, min(100.0, float(redepo_efficiency_pct))) / 100.0
-    ballistic_mix = max(0.0, min(100.0, float(ballistic_mix_pct))) / 100.0
-    gaussian_width = max(1.0, float(gaussian_width_a))
+    specular_bias = max(0.0, min(100.0, float(specular_bias_pct))) / 100.0
+    angular_spread = max(1.0, min(80.0, float(angular_spread_deg)))
+    spread_rad = math.radians(angular_spread)
     max_distance = max(1.0, float(redepo_max_distance_a))
     source_cutoff = max(1e-12, total_removed_mass * 1e-9)
 
-    ballistic_mass = [0.0 for _ in grown_surface]
+    center_hit_mass = [0.0 for _ in grown_surface]
+    footprint_mass = [0.0 for _ in grown_surface]
     transport_lines: List[TransportLineSample] = []
     active_source_count = 0
     active_hit_count = 0
+    hit_source_removed_mass = 0.0
     escaped_mass = 0.0
     raw_hit_mass = 0.0
     for idx, mass in enumerate(removed_mass):
         if mass <= source_cutoff:
             continue
         active_source_count += 1
-        direction = _model6_reflection_axis(normals[idx] if idx < len(normals) else (0.0, 1.0))
+        direction = _model6_blended_emission_axis(
+            normals[idx] if idx < len(normals) else (0.0, 1.0),
+            specular_bias,
+        )
         hit = _model6_first_opposite_reflection_hit(
             grown_surface,
             normals,
@@ -2056,41 +2099,73 @@ def _apply_model6_reflection_gaussian_redepo_step(
             escaped_mass += float(mass)
             continue
         active_hit_count += 1
+        hit_source_removed_mass += float(mass)
         raw_hit_mass += hit_mass
         left_weight = max(0.0, min(1.0, 1.0 - float(u)))
         right_weight = max(0.0, min(1.0, float(u)))
-        if 0 <= seg_idx < len(ballistic_mass):
-            ballistic_mass[seg_idx] += hit_mass * left_weight
-        if 0 <= seg_idx + 1 < len(ballistic_mass):
-            ballistic_mass[seg_idx + 1] += hit_mass * right_weight
+        if 0 <= seg_idx < len(center_hit_mass):
+            center_hit_mass[seg_idx] += hit_mass * left_weight
+        if 0 <= seg_idx + 1 < len(center_hit_mass):
+            center_hit_mass[seg_idx + 1] += hit_mass * right_weight
+
+        hit_s = (
+            ((1.0 - float(u)) * float(arc_s[seg_idx])) + (float(u) * float(arc_s[seg_idx + 1]))
+            if arc_s and 0 <= seg_idx < len(arc_s) - 1
+            else 0.0
+        )
+        hit_side = -1 if float(hit_point[0]) < center_x else 1
+        footprint_sigma = max(
+            float(reparam_ds_a) * 1.5,
+            min(max_distance, float(distance) * math.tan(spread_rad)),
+        )
+        footprint_radius = max(float(reparam_ds_a) * 2.0, footprint_sigma * 3.0)
+        target_weights: List[Tuple[int, float]] = []
+        for target_idx, (tx, _ty) in enumerate(grown_surface):
+            if target_idx >= len(arc_s):
+                continue
+            if (-1 if float(tx) < center_x else 1) != hit_side:
+                continue
+            if target_idx < len(normals) and abs(float(normals[target_idx][0])) < 0.12:
+                continue
+            ds = abs(float(arc_s[target_idx]) - hit_s)
+            if ds > footprint_radius:
+                continue
+            weight = areas[target_idx] * math.exp(-0.5 * (ds / max(footprint_sigma, 1e-9)) ** 2)
+            if weight > 0.0:
+                target_weights.append((target_idx, weight))
+        if not target_weights:
+            if 0 <= seg_idx < len(grown_surface):
+                target_weights.append((seg_idx, max(1e-9, left_weight)))
+            if 0 <= seg_idx + 1 < len(grown_surface):
+                target_weights.append((seg_idx + 1, max(1e-9, right_weight)))
+        weight_sum = float(sum(weight for _target_idx, weight in target_weights))
+        if weight_sum > 1e-12:
+            for target_idx, weight in target_weights:
+                footprint_mass[target_idx] += hit_mass * (weight / weight_sum)
         sx, sy = grown_surface[idx]
         hx, hy = hit_point
         transport_lines.append((float(sx), float(sy), float(hx), float(hy), float(hit_mass)))
 
-    target_total_mass = efficiency * total_removed_mass if raw_hit_mass > 1e-12 else 0.0
+    target_total_mass = efficiency * hit_source_removed_mass if raw_hit_mass > 1e-12 else 0.0
 
-    ballistic_sum = float(sum(ballistic_mass))
-    ballistic_norm = (
-        [(value / ballistic_sum) * target_total_mass for value in ballistic_mass]
-        if ballistic_sum > 1e-12 and target_total_mass > 0.0
+    center_hit_sum = float(sum(center_hit_mass))
+    footprint_sum = float(sum(footprint_mass))
+    redepo_mass = (
+        [(value / footprint_sum) * target_total_mass for value in footprint_mass]
+        if footprint_sum > 1e-12 and target_total_mass > 0.0
         else [0.0 for _ in grown_surface]
     )
-    peak_idx = max(range(len(ballistic_mass)), key=lambda i: ballistic_mass[i]) if ballistic_sum > 0.0 else -1
-    gaussian_mass = [0.0 for _ in grown_surface]
-    if peak_idx >= 0 and target_total_mass > 0.0 and arc_s:
-        center_s = float(arc_s[peak_idx])
-        gaussian_weights = [
-            area * math.exp(-0.5 * ((float(s) - center_s) / gaussian_width) ** 2)
-            for s, area in zip(arc_s, areas)
-        ]
-        gaussian_sum = float(sum(gaussian_weights))
-        if gaussian_sum > 1e-12:
-            gaussian_mass = [(w / gaussian_sum) * target_total_mass for w in gaussian_weights]
-
-    redepo_mass = [
-        ((1.0 - ballistic_mix) * float(g_mass)) + (ballistic_mix * float(b_mass))
-        for g_mass, b_mass in zip(gaussian_mass, ballistic_norm)
-    ]
+    peak_idx = max(range(len(redepo_mass)), key=lambda i: redepo_mass[i]) if any(v > 0.0 for v in redepo_mass) else -1
+    gaussian_mass = (
+        [(value / footprint_sum) * target_total_mass for value in footprint_mass]
+        if footprint_sum > 1e-12 and target_total_mass > 0.0
+        else [0.0 for _ in grown_surface]
+    )
+    ballistic_norm = (
+        [(value / center_hit_sum) * target_total_mass for value in center_hit_mass]
+        if center_hit_sum > 1e-12 and target_total_mass > 0.0
+        else [0.0 for _ in grown_surface]
+    )
     redepo_sum = float(sum(redepo_mass))
     if redepo_sum > target_total_mass + 1e-12 and redepo_sum > 0.0:
         scale = target_total_mass / redepo_sum
@@ -2138,7 +2213,8 @@ def _apply_model6_reflection_gaussian_redepo_step(
     fields["direct_sputter_field"] = [round(float(v), 6) for v in dh_etch]
     fields["redepo_source_etch_field"] = [round(float(v), 6) for v in dh_etch]
     fields["removed_mass_field"] = [round(float(v), 6) for v in removed_mass]
-    fields["reflection_hit_mass_field"] = [round(float(v), 6) for v in ballistic_mass]
+    fields["reflection_hit_mass_field"] = [round(float(v), 6) for v in center_hit_mass]
+    fields["source_lobe_redepo_mass_field"] = [round(float(v), 6) for v in footprint_mass]
     fields["gaussian_redepo_mass_field"] = [round(float(v), 6) for v in gaussian_mass]
     fields["ballistic_redepo_mass_field"] = [round(float(v), 6) for v in ballistic_norm]
     fields["redepo_mass_field"] = [round(float(v), 6) for v in redepo_mass]
@@ -2170,14 +2246,15 @@ def _apply_model6_reflection_gaussian_redepo_step(
         "redepo_capture_ratio": float(redepo_sum / total_removed_mass) if total_removed_mass > 1e-12 else 0.0,
         "target_total_mass": float(target_total_mass),
         "efficiency": float(efficiency),
-        "gaussian_width_a": float(gaussian_width),
-        "ballistic_mix_pct": float(ballistic_mix * 100.0),
+        "angular_spread_deg": float(angular_spread),
+        "specular_bias_pct": float(specular_bias * 100.0),
+        "hit_source_removed_mass": float(hit_source_removed_mass),
         "active_source_count": int(active_source_count),
         "active_hit_count": int(active_hit_count),
         "active_target_count": int(active_target_count),
-        "gaussian_center_index": int(peak_idx),
-        "gaussian_center_x": float(peak_point[0]),
-        "gaussian_center_y": float(peak_point[1]),
+        "peak_target_index": int(peak_idx),
+        "peak_target_x": float(peak_point[0]),
+        "peak_target_y": float(peak_point[1]),
         "escaped_mass": float(escaped_mass),
         "raw_hit_mass": float(raw_hit_mass),
         "transport_line_count": int(len(transport_lines)),
@@ -2198,7 +2275,7 @@ def _apply_model6_reflection_gaussian_redepo_step(
     state.meta["model6_reflection_redepo_total_mass_last"] = float(redepo_sum)
     state.meta["model6_reflection_redepo_active_source_count_last"] = int(active_source_count)
     state.meta["model6_reflection_redepo_active_target_count_last"] = int(active_target_count)
-    state.meta["model6_reflection_redepo_transport_model_last"] = "specular_hit_gaussian_ballistic"
+    state.meta["model6_reflection_redepo_transport_model_last"] = "normal_specular_lobe_los"
     state.meta["direct_sputter_total_last"] = float(sum(dh_etch))
     return angles, responses, etch_clamp_a
 
@@ -4098,7 +4175,7 @@ def run_trench_depo(
     allowed_ion_transmission = emulator_number in (0, 3)
     allowed_depth_deposition = emulator_number in (0, 4, 5)
     allowed_inhibition = emulator_number in (0, 5)
-    allowed_reflection_redepo = emulator_number == 6
+    allowed_reflection_redepo = emulator_number in (0, 6)
     cycles = _coerce_cycles(cfg.cycles)
     angstrom_per_cycle = _coerce_non_negative_float(cfg.angstrom_per_cycle, name="angstrom_per_cycle")
     reparam_ds_a = _coerce_positive_float(cfg.reparam_ds_a, name="reparam_ds_a")
@@ -4546,6 +4623,10 @@ def run_trench_depo(
                     if inhibition_active and redepo_active and not model6_redepo_active
                     else "integrated_depth_model4_redepo_substep"
                     if depth_deposition_active and redepo_active and not model6_redepo_active
+                    else "integrated_inhibition_model6_redepo_substep"
+                    if inhibition_active and model6_redepo_active
+                    else "integrated_depth_model6_redepo_substep"
+                    if depth_deposition_active and model6_redepo_active
                     else "model6_reflection_redepo_substep"
                     if model6_redepo_active
                     else "integrated_inhibition_direct_sputter_substep"
@@ -4665,9 +4746,19 @@ def run_trench_depo(
                         sputter_width_deg=sputter_width_deg,
                         sputter_smoothing_a=sputter_smoothing_a,
                         reparam_ds_a=reparam_ds_a,
+                        ion_transmission_enabled=ion_transmission_enabled,
+                        ion_transmission_override=ion_transmission_override,
+                        ion_transmission_start_depth_pct=ion_transmission_start_depth_pct,
+                        ion_transmission_end_depth_pct=ion_transmission_end_depth_pct,
+                        ion_transmission_decay_strength_pct=ion_transmission_decay_strength_pct,
+                        ion_transmission_floor_pct=ion_transmission_floor_pct,
+                        ion_transmission_curve_power=ion_transmission_curve_power,
+                        ion_transmission_aperture_shadow_pct=ion_transmission_aperture_shadow_pct,
+                        ion_transmission_lateral_shadow_pct=ion_transmission_lateral_shadow_pct,
+                        ion_transmission_edge_shadow_pct=ion_transmission_edge_shadow_pct,
                         redepo_efficiency_pct=redepo_efficiency_pct,
-                        gaussian_width_a=redepo_emit_power,
-                        ballistic_mix_pct=redepo_distance_power,
+                        angular_spread_deg=redepo_emit_power,
+                        specular_bias_pct=redepo_distance_power,
                         redepo_neighbor_exclusion=redepo_neighbor_exclusion,
                         redepo_max_distance_a=redepo_max_distance_a,
                     )
@@ -4902,7 +4993,7 @@ def run_trench_depo(
         if sputter_active and redepo_active and depth_deposition_active
         else "integrated_depo_sputter_redepo"
         if sputter_active and redepo_active and not model6_redepo_active
-        else "reflection_gaussian_ballistic_redepo"
+        else "normal_specular_lobe_redepo"
         if sputter_active and model6_redepo_active
         else "integrated_inhibition_depo_sputter"
         if sputter_active and inhibition_active
@@ -4942,7 +5033,7 @@ def run_trench_depo(
         if sputter_active and redepo_active and inhibition_active
         else "offset_boolean_plus_depth_depo_direct_angle_sputter_redepo"
         if sputter_active and redepo_active and depth_deposition_active and not model6_redepo_active
-        else "offset_boolean_plus_direct_angle_sputter_reflection_gaussian_redepo"
+        else "offset_boolean_plus_direct_angle_sputter_normal_specular_lobe_redepo"
         if sputter_active and model6_redepo_active
         else "offset_boolean_plus_inhibition_depo_direct_angle_sputter"
         if sputter_active and inhibition_active
@@ -5014,7 +5105,7 @@ def run_trench_depo(
             "redepo_enabled": bool(model6_redepo_requested),
             "redepo_active": bool(redepo_active and redepo_total_mass > 0.0),
             "redepo_model": (
-                "specular_reflection_hit_gaussian_ballistic"
+                "normal_specular_lobe_los"
                 if model6_redepo_active
                 else str(state.meta.get("model4_redepo_transport_model_last", redepo_transport_model))
                 if redepo_active

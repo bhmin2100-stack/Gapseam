@@ -44,7 +44,7 @@ EMULATOR_RESEARCH_SLOTS = (
         slug="integrated_depo_etch_depth_inhibition",
         title_ko="통합_데포_에치_감쇠_인히비션",
         title_en="Integrated Depo Etch Depth Inhibition",
-        status_ko="통합: conformal deposition + direct/ion etch + depth/inhibition deposition, redepo 제외",
+        status_ko="통합: conformal deposition + direct/ion etch + 6번 normal/specular lobe redepo + depth/inhibition deposition",
         module="gapsim.emulation.trench_depo",
     ),
     EmulatorResearchSlot(
@@ -89,10 +89,10 @@ EMULATOR_RESEARCH_SLOTS = (
     ),
     EmulatorResearchSlot(
         number=6,
-        slug="reflection_gaussian_ballistic_redeposition",
-        title_ko="반사_가우시안_볼리스틱_리데포",
-        title_en="Reflection Gaussian Ballistic Redeposition",
-        status_ko="진행중: etch source의 specular reflection hit 최대점을 기준으로 Gaussian redepo 후 ballistic correction",
+        slug="normal_specular_lobe_redeposition",
+        title_ko="노멀_반사_로브_리데포",
+        title_en="Normal Specular Reflection Lobe Redeposition",
+        status_ko="진행중: etch source별 surface-normal/specular blend lobe를 LOS target에 부드럽게 분배",
         module="gapsim.emulation.trench_depo",
     ),
 )

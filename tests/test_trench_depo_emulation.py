@@ -130,7 +130,7 @@ class TrenchDepoEmulationTest(unittest.TestCase):
         self.assertAlmostEqual(config.lf_overhang_dose, 1.0, places=9)
 
     @unittest.skipIf(pyclipper is None, "pyclipper is not installed")
-    def test_rebuilt_active_emulators_ignore_removed_redepo_reflected_lf_closure(self) -> None:
+    def test_rebuilt_active_emulators_enable_redepo_only_for_integrated_and_model_six(self) -> None:
         removed_effects = {
             "redepo_enabled": True,
             "reflected_ion_enabled": True,
@@ -197,7 +197,12 @@ class TrenchDepoEmulationTest(unittest.TestCase):
 
         results = {number: run_trench_depo(config).meta for number, config in cases.items()}
 
-        for meta in results.values():
+        self.assertTrue(results[0]["redepo_enabled"])
+        self.assertTrue(results[0]["redepo_active"])
+        self.assertEqual(results[0]["redepo_model"], "normal_specular_lobe_los")
+        for number, meta in results.items():
+            if number == 0:
+                continue
             self.assertFalse(meta["redepo_enabled"])
             self.assertFalse(meta["redepo_active"])
             self.assertFalse(meta["reflected_ion_enabled"])
@@ -206,12 +211,85 @@ class TrenchDepoEmulationTest(unittest.TestCase):
             self.assertFalse(meta["lf_overhang_requested"])
             self.assertFalse(meta["closure_redepo_enabled"])
             self.assertFalse(meta["closure_redepo_requested"])
-        self.assertEqual(results[0]["growth_model"], "integrated_inhibition_depo_sputter")
+        self.assertFalse(results[0]["reflected_ion_enabled"])
+        self.assertFalse(results[0]["reflected_ion_active"])
+        self.assertFalse(results[0]["lf_overhang_enabled"])
+        self.assertFalse(results[0]["lf_overhang_requested"])
+        self.assertFalse(results[0]["closure_redepo_enabled"])
+        self.assertFalse(results[0]["closure_redepo_requested"])
+        self.assertEqual(results[0]["growth_model"], "integrated_inhibition_depo_sputter_redepo")
         self.assertEqual(results[1]["growth_model"], "conformal_offset")
         self.assertEqual(results[2]["growth_model"], "direct_angle_sputter")
         self.assertEqual(results[3]["growth_model"], "ion_transmission_direct_sputter")
         self.assertEqual(results[4]["growth_model"], "depth_dependent_deposition")
         self.assertEqual(results[5]["growth_model"], "inhibition_weighted_deposition")
+
+    @unittest.skipIf(pyclipper is None, "pyclipper is not installed")
+    def test_model_six_reflection_redepo_records_gaussian_ballistic_fields(self) -> None:
+        result = run_trench_depo(
+            TrenchDepoConfig(
+                emulator_number=6,
+                cycles=2,
+                reparam_ds_a=20.0,
+                sputter_enabled=True,
+                sputter_strength_a_per_cycle=4.0,
+                redepo_enabled=True,
+                redepo_efficiency_pct=30.0,
+                redepo_emit_power=22.0,
+                redepo_distance_power=25.0,
+            )
+        )
+        meta = result.meta
+        summary = meta["redepo_debug_summary_last"]["reflection_redepo"]
+        fields = meta["redepo_debug_fields_last"]
+
+        self.assertEqual(meta["growth_model"], "normal_specular_lobe_redepo")
+        self.assertTrue(meta["redepo_enabled"])
+        self.assertTrue(meta["redepo_active"])
+        self.assertEqual(meta["redepo_model"], "normal_specular_lobe_los")
+        self.assertGreater(summary["active_source_count"], 0)
+        self.assertGreater(summary["active_hit_count"], 0)
+        self.assertGreater(summary["active_target_count"], 0)
+        self.assertAlmostEqual(summary["angular_spread_deg"], 22.0, places=6)
+        self.assertAlmostEqual(summary["specular_bias_pct"], 25.0, places=6)
+        self.assertLessEqual(
+            meta["redepo_total_mass_last"],
+            (0.30 * meta["redepo_total_removed_mass_last"]) + 1e-6,
+        )
+        self.assertIn("reflection_hit_mass_field", fields)
+        self.assertIn("gaussian_redepo_field", fields)
+        self.assertIn("ballistic_redepo_field", fields)
+        self.assertTrue(any(frame for frame in meta["frame_redepo_overlays"]))
+        self.assertTrue(any(frame for frame in meta["frame_etch_overlays"]))
+
+    @unittest.skipIf(pyclipper is None, "pyclipper is not installed")
+    def test_model_six_zero_efficiency_matches_direct_sputter(self) -> None:
+        common = dict(
+            cycles=2,
+            reparam_ds_a=20.0,
+            sputter_enabled=True,
+            sputter_strength_a_per_cycle=4.0,
+            sputter_peak_angle_deg=55.0,
+            sputter_width_deg=14.0,
+        )
+        direct = run_trench_depo(TrenchDepoConfig(emulator_number=2, **common))
+        zero_redepo = run_trench_depo(
+            TrenchDepoConfig(
+                emulator_number=6,
+                redepo_enabled=True,
+                redepo_efficiency_pct=0.0,
+                redepo_emit_power=22.0,
+                redepo_distance_power=25.0,
+                **common,
+            )
+        )
+
+        self.assertFalse(zero_redepo.meta["redepo_active"])
+        self.assertEqual(zero_redepo.meta["redepo_model"], "off")
+        self.assertEqual(len(direct.final_profile), len(zero_redepo.final_profile))
+        for point_a, point_b in zip(direct.final_profile, zero_redepo.final_profile):
+            self.assertAlmostEqual(point_a[0], point_b[0], delta=1e-6)
+            self.assertAlmostEqual(point_a[1], point_b[1], delta=1e-6)
 
     @unittest.skipIf(pyclipper is None, "pyclipper is not installed")
     def test_cycles_create_n_plus_one_frames(self) -> None:

@@ -204,7 +204,7 @@ EMULATOR_MODE_TITLES = {
     3: "Ion transmission etch",
     4: "Depth-dependent depo fill",
     5: "Inhibition deposition fill",
-    6: "Reflection Gaussian ballistic redepo",
+    6: "Normal/specular lobe redepo",
 }
 
 
@@ -221,9 +221,9 @@ def _emulator_mode_label(number: int) -> str:
 
 EMULATOR_PROCESS_PRESETS: dict[int, list[tuple[str, dict[str, object]]]] = {
     0: [
-        ("Integrated default", {"cycles": 20, "depo": 10.0, "sputter": True, "ion": True, "depth": True, "etch": 4.0, "peak": 55.0, "width": 14.0, "depth_k": 0.55, "depth_power": 1.2, "depth_min": 8.0}),
-        ("Soft integrated", {"cycles": 20, "depo": 10.0, "sputter": True, "ion": True, "depth": True, "etch": 2.5, "peak": 55.0, "width": 18.0, "depth_k": 0.35, "depth_power": 1.0, "depth_min": 12.0}),
-        ("Strong etch/depletion", {"cycles": 20, "depo": 10.0, "sputter": True, "ion": True, "depth": True, "etch": 6.0, "peak": 58.0, "width": 12.0, "depth_k": 0.9, "depth_power": 1.4, "depth_min": 5.0}),
+        ("Integrated default", {"cycles": 20, "depo": 10.0, "sputter": True, "ion": True, "redepo": True, "depth": True, "etch": 4.0, "peak": 55.0, "width": 14.0, "redepo_eff": 30.0, "redepo_emit": 22.0, "redepo_dist": 25.0, "depth_k": 0.55, "depth_power": 1.2, "depth_min": 8.0}),
+        ("Soft integrated", {"cycles": 20, "depo": 10.0, "sputter": True, "ion": True, "redepo": True, "depth": True, "etch": 2.5, "peak": 55.0, "width": 18.0, "redepo_eff": 22.0, "redepo_emit": 28.0, "redepo_dist": 15.0, "depth_k": 0.35, "depth_power": 1.0, "depth_min": 12.0}),
+        ("Strong etch/depletion", {"cycles": 20, "depo": 10.0, "sputter": True, "ion": True, "redepo": True, "depth": True, "etch": 6.0, "peak": 58.0, "width": 12.0, "redepo_eff": 35.0, "redepo_emit": 18.0, "redepo_dist": 35.0, "depth_k": 0.9, "depth_power": 1.4, "depth_min": 5.0}),
     ],
     1: [
         ("Baseline conformal", {"cycles": 20, "depo": 10.0}),
@@ -250,9 +250,9 @@ EMULATOR_PROCESS_PRESETS: dict[int, list[tuple[str, dict[str, object]]]] = {
         ("Strong inhibition", {"cycles": 20, "depo": 10.0, "depth": True, "depth_k": 1.25, "depth_power": 1.5, "depth_min": 5.0}),
     ],
     6: [
-        ("Reflection redepo default", {"cycles": 20, "depo": 10.0, "sputter": True, "redepo": True, "etch": 4.0, "peak": 55.0, "width": 14.0, "redepo_eff": 30.0, "redepo_emit": 180.0, "redepo_dist": 35.0}),
-        ("Narrow reflection band", {"cycles": 20, "depo": 10.0, "sputter": True, "redepo": True, "etch": 5.0, "peak": 58.0, "width": 12.0, "redepo_eff": 35.0, "redepo_emit": 90.0, "redepo_dist": 55.0}),
-        ("Wide Gaussian correction", {"cycles": 20, "depo": 10.0, "sputter": True, "redepo": True, "etch": 3.5, "peak": 55.0, "width": 18.0, "redepo_eff": 25.0, "redepo_emit": 260.0, "redepo_dist": 20.0}),
+        ("Reflection lobe default", {"cycles": 20, "depo": 10.0, "sputter": True, "redepo": True, "etch": 4.0, "peak": 55.0, "width": 14.0, "redepo_eff": 30.0, "redepo_emit": 22.0, "redepo_dist": 25.0}),
+        ("Narrow normal lobe", {"cycles": 20, "depo": 10.0, "sputter": True, "redepo": True, "etch": 5.0, "peak": 58.0, "width": 12.0, "redepo_eff": 35.0, "redepo_emit": 12.0, "redepo_dist": 15.0}),
+        ("Wide specular-biased lobe", {"cycles": 20, "depo": 10.0, "sputter": True, "redepo": True, "etch": 3.5, "peak": 55.0, "width": 18.0, "redepo_eff": 25.0, "redepo_emit": 34.0, "redepo_dist": 45.0}),
     ],
 }
 
@@ -4515,7 +4515,7 @@ class TrenchDepoWindow(QMainWindow):
         return False
 
     def _active_emulator_supports_redeposition(self) -> bool:
-        return self.active_emulator_number() == 6
+        return self.active_emulator_number() in (0, 6)
 
     def _active_emulator_supports_depth_deposition(self) -> bool:
         return self.active_emulator_number() in (0, 4, 5)
@@ -4540,7 +4540,7 @@ class TrenchDepoWindow(QMainWindow):
 
     @staticmethod
     def _emulator_supports_redeposition(number: int) -> bool:
-        return int(number) == 6
+        return int(number) in (0, 6)
 
     @staticmethod
     def _emulator_supports_depth_deposition(number: int) -> bool:
@@ -4583,7 +4583,11 @@ class TrenchDepoWindow(QMainWindow):
         if self._emulator_supports_sputter(active):
             self.cmb_compare_target.addItem("GapSim angle-only legacy", "legacy_gapsim_angle")
 
-        prefer_previous = not ((active == 0 and previous != 1) or (active == 4 and previous != 5))
+        prefer_previous = not (
+            (active == 0 and previous != 1)
+            or (active == 4 and previous != 5)
+            or (active == 6 and previous != 2)
+        )
         restored_idx = self.cmb_compare_target.findData(previous)
         default_idx = self.cmb_compare_target.findData(default_target)
         if prefer_previous and restored_idx >= 0:
@@ -4638,8 +4642,8 @@ class TrenchDepoWindow(QMainWindow):
         if self._active_emulator_supports_redeposition():
             options = [
                 ("Reflection redepo %", "redepo_efficiency_pct"),
-                ("Gaussian width A", "redepo_emit_power"),
-                ("Ballistic mix %", "redepo_distance_power"),
+                ("Angular spread deg", "redepo_emit_power"),
+                ("Specular bias %", "redepo_distance_power"),
                 *options,
             ]
         if self._active_emulator_supports_lf_overhang():
@@ -4787,7 +4791,7 @@ class TrenchDepoWindow(QMainWindow):
         preserve_geometry: bool = False,
     ) -> None:
         number = self.active_emulator_number()
-        changed = number != self._active_emulator_number
+        changed = number != self._active_emulator_number or not getattr(self, "_emulator_mode_initialized", False)
         self._active_emulator_number = number
         supports_sputter = self._active_emulator_supports_sputter()
         supports_ion_transmission = self._active_emulator_supports_ion_transmission()
@@ -4833,22 +4837,23 @@ class TrenchDepoWindow(QMainWindow):
         self._populate_compare_targets()
         self.ion_map_group.setTitle("2 Ion Transmission Depth Map")
         self.gaussian_group.setTitle("1 Direct Sputter Gaussian")
-        if number == 6:
+        if number in (0, 6):
             self.chk_redepo.setText("Reflection redepo enabled")
-            self.lbl_redepo_section.setText("6 Reflection Gaussian redepo")
+            self.lbl_redepo_section.setText(
+                "0/6 Normal/specular Reflection lobe redepo" if number == 0 else "6 Normal/specular Reflection lobe redepo"
+            )
             self.lbl_redepo_efficiency.setText("Redepo efficiency %")
-            self.lbl_redepo_emit_power.setText("Gaussian width A")
-            self.lbl_redepo_distance_power.setText("Ballistic mix %")
+            self.lbl_redepo_emit_power.setText("Angular spread deg")
+            self.lbl_redepo_distance_power.setText("Specular bias %")
             self.spin_redepo_emit_power.setDecimals(1)
-            self.spin_redepo_emit_power.setRange(1.0, 5000.0)
-            self.spin_redepo_emit_power.setSingleStep(20.0)
+            self.spin_redepo_emit_power.setRange(1.0, 80.0)
+            self.spin_redepo_emit_power.setSingleStep(2.0)
             self.spin_redepo_distance_power.setDecimals(1)
             self.spin_redepo_distance_power.setRange(0.0, 100.0)
             self.spin_redepo_distance_power.setSingleStep(5.0)
-            if changed and self.spin_redepo_emit_power.value() <= 8.0:
-                self.spin_redepo_efficiency.setValue(30.0)
-                self.spin_redepo_emit_power.setValue(180.0)
-                self.spin_redepo_distance_power.setValue(35.0)
+            if changed and (self.spin_redepo_emit_power.value() <= 8.0 or self.spin_redepo_emit_power.value() > 80.0):
+                self.spin_redepo_emit_power.setValue(22.0)
+                self.spin_redepo_distance_power.setValue(25.0)
         else:
             self.chk_redepo.setText("Redeposition")
             self.lbl_redepo_section.setText("4 Redeposition")
@@ -4885,9 +4890,9 @@ class TrenchDepoWindow(QMainWindow):
                 self.chk_depth_deposition.setText("Depth/Inhibition deposition")
                 self.lbl_depth_depo_section.setText("0 Depth/Inhibition deposition")
                 self.lbl_depth_parameter_help.setText(
-                    "통합 모델: conformal deposition 위에 direct/ion etch와 depth/inhibition deposition만 결합합니다. Redepo/reflected/LF/closure는 제외됩니다."
+                    "통합 모델: conformal deposition 위에 direct/ion etch, 6번 normal/specular lobe redepo, depth/inhibition deposition을 결합합니다. Reflected/LF/closure는 제외됩니다."
                 )
-                self.edit_request_note.setPlaceholderText("요청사항 / 통합모델에서 제외할 항목이나 관찰 메모를 적으면 run 파일명과 요약에 같이 들어갑니다.")
+                self.edit_request_note.setPlaceholderText("요청사항 / 통합모델 리데포/감쇠/인히비션 관찰 메모를 적으면 run 파일명과 요약에 같이 들어갑니다.")
             elif supports_ion_transmission:
                 self.chk_depth_deposition.setText("Depth-dependent deposition")
                 self.edit_request_note.setPlaceholderText("요청사항 / ion transmission, shadowing 메모를 적으면 run 파일명과 요약에 같이 들어갑니다.")
@@ -4941,6 +4946,7 @@ class TrenchDepoWindow(QMainWindow):
         self._populate_split_parameters()
         self.sync_etch_control_availability()
         self._sync_depth_advanced_visibility()
+        self._emulator_mode_initialized = True
         if run:
             self._schedule_emulator_preview_run()
 
@@ -5285,7 +5291,6 @@ class TrenchDepoWindow(QMainWindow):
             and self.chk_redepo.isChecked()
         )
         redepo_source_widgets = [
-            self.lbl_redepo_section,
             self.lbl_redepo_efficiency,
             self.spin_redepo_efficiency,
             self.lbl_redepo_emit_power,
@@ -5302,7 +5307,7 @@ class TrenchDepoWindow(QMainWindow):
         ]
         for widget in [*redepo_source_widgets, *redepo_advanced_widgets]:
             widget.setEnabled(redepo_enabled)
-        if self.active_emulator_number() == 6:
+        if self.active_emulator_number() in (0, 6):
             redepo_detail_widgets = redepo_source_widgets
         else:
             redepo_detail_widgets = [*redepo_source_widgets, *redepo_advanced_widgets]
@@ -5315,7 +5320,7 @@ class TrenchDepoWindow(QMainWindow):
             expanded=redepo_enabled,
             detail_enabled=redepo_enabled,
         )
-        if self.active_emulator_number() == 6:
+        if self.active_emulator_number() in (0, 6):
             for widget in redepo_advanced_widgets:
                 widget.setVisible(False)
 
@@ -5485,10 +5490,10 @@ class TrenchDepoWindow(QMainWindow):
         self.spin_reflected_microtrench.setValue(1.0)
         self.spin_reflected_range.setValue(1600.0)
         self.cmb_redepo_source_model.setCurrentIndex(0)
-        if self.active_emulator_number() == 6:
+        if self.active_emulator_number() in (0, 6):
             self.spin_redepo_efficiency.setValue(30.0)
-            self.spin_redepo_emit_power.setValue(180.0)
-            self.spin_redepo_distance_power.setValue(35.0)
+            self.spin_redepo_emit_power.setValue(22.0)
+            self.spin_redepo_distance_power.setValue(25.0)
         else:
             self.spin_redepo_efficiency.setValue(25.0)
             self.spin_redepo_emit_power.setValue(1.0)
@@ -5533,7 +5538,7 @@ class TrenchDepoWindow(QMainWindow):
         self._populate_split_parameters()
         self.sync_etch_control_availability()
         if self.active_emulator_number() == 0:
-            self.edit_request_note.setPlainText("통합모델: conformal + direct/ion etch + depth/inhibition deposition. 리데포/reflected/LF/closure 제외")
+            self.edit_request_note.setPlainText("통합모델: conformal + direct/ion etch + 6번 normal/specular lobe redepo + depth/inhibition deposition. reflected/LF/closure 제외")
         elif self.active_emulator_number() == 5:
             self.edit_request_note.setPlainText("PECVD/PEALD inhibition-weighted deposition: top/opening growth suppression with smooth trench fill")
         elif self.active_emulator_number() == 4:
@@ -5589,10 +5594,10 @@ class TrenchDepoWindow(QMainWindow):
             values = (600.0, 2400.0, 600.0, 0, 50.0, 10000.0)
         elif parameter == "redepo_efficiency_pct":
             values = (0.0, 50.0, 10.0, 1, 0.0, 100.0)
-        elif parameter == "redepo_emit_power" and self.active_emulator_number() == 6:
-            values = (80.0, 320.0, 80.0, 0, 1.0, 5000.0)
-        elif parameter == "redepo_distance_power" and self.active_emulator_number() == 6:
-            values = (0.0, 80.0, 20.0, 1, 0.0, 100.0)
+        elif parameter == "redepo_emit_power" and self.active_emulator_number() in (0, 6):
+            values = (8.0, 40.0, 8.0, 1, 1.0, 80.0)
+        elif parameter == "redepo_distance_power" and self.active_emulator_number() in (0, 6):
+            values = (0.0, 60.0, 15.0, 1, 0.0, 100.0)
         elif parameter in {"redepo_emit_power", "redepo_distance_power"}:
             values = (0.5, 2.0, 0.5, 2, 0.0, 8.0)
         elif parameter == "redepo_soft_los_radius_points":
@@ -5851,8 +5856,8 @@ class TrenchDepoWindow(QMainWindow):
             lines.extend(
                 [
                     f"Redepo efficiency: {self._fmt_pct(config.redepo_efficiency_pct)}",
-                    f"Gaussian width: {self._fmt_a(config.redepo_emit_power)}",
-                    f"Ballistic mix: {self._fmt_pct(config.redepo_distance_power)}",
+                    f"Angular spread: {float(config.redepo_emit_power):.1f} deg",
+                    f"Specular bias: {self._fmt_pct(config.redepo_distance_power)}",
                 ]
             )
         excluded = ["reflected ion", "LF proxy", "closure redepo"]

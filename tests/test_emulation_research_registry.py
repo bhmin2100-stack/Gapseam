@@ -35,7 +35,8 @@ class EmulationResearchRegistryTest(unittest.TestCase):
         self.assertEqual(slot.module, "gapsim.emulation.trench_depo")
         self.assertIn("통합", slot.title_ko)
         self.assertIn("Integrated", slot.title_en)
-        self.assertIn("redepo 제외", slot.status_ko)
+        self.assertIn("6번", slot.status_ko)
+        self.assertIn("redepo", slot.status_ko)
         self.assertIn("에뮬레이터00", slot.presentation_filename)
 
     def test_slot_one_is_conformal_baseline(self) -> None:
