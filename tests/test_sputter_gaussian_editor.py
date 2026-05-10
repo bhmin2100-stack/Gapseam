@@ -1096,10 +1096,13 @@ class SputterGaussianEditorTest(unittest.TestCase):
             self.assertEqual(window.lbl_redepo_emit_power.text(), "Angular spread deg")
             self.assertEqual(window.lbl_redepo_distance_power.text(), "Specular bias %")
             self.assertGreaterEqual(window.spin_redepo_emit_power.maximum(), 80.0)
+            self.assertLessEqual(window.spin_redepo_distance_power.minimum(), -100.0)
             self.assertGreaterEqual(window.spin_redepo_distance_power.maximum(), 100.0)
             self.assertFalse(window.lbl_redepo_efficiency.isHidden())
             self.assertTrue(window.cmb_redepo_source_model.isHidden())
             self.assertTrue(window.redepo_lobe_group.isHidden())
+            self.assertFalse(window.chk_show_redepo_overlay.isHidden())
+            self.assertFalse(window.chk_show_redepo_overlay.isEnabled())
 
             split_parameters = {
                 str(window.cmb_split_parameter.itemData(idx))
@@ -1116,6 +1119,31 @@ class SputterGaussianEditorTest(unittest.TestCase):
             self.assertTrue(config.redepo_enabled)
             self.assertAlmostEqual(config.redepo_emit_power, 22.0, places=6)
             self.assertAlmostEqual(config.redepo_distance_power, 25.0, places=6)
+            window.spin_redepo_distance_power.setValue(-35.0)
+            self.assertAlmostEqual(window.current_config().redepo_distance_power, -35.0, places=6)
+
+            overlay_result = TrenchDepoResult(
+                frame_steps=[0, 1],
+                frame_profiles=[
+                    [(-10.0, 0.0), (10.0, 0.0)],
+                    [(-12.0, 0.0), (12.0, 0.0)],
+                ],
+                frame_voids=[[], []],
+                final_profile=[(-12.0, 0.0), (12.0, 0.0)],
+                meta={
+                    "cycles": 1,
+                    "frame_redepo_overlays": [[], [(0.0, -2.0, 1.0)]],
+                    "frame_etch_overlays": [[], [(-2.0, -1.0, 1.0)]],
+                },
+            )
+            window._apply_emulation_result(config, overlay_result, None, use_preview_cache=True)
+            self.assertFalse(window.chk_show_redepo_overlay.isHidden())
+            self.assertTrue(window.chk_show_redepo_overlay.isEnabled())
+            window.chk_show_redepo_overlay.setChecked(True)
+            window.show_frame(1)
+            self.assertTrue(window.view._redepo_overlay_items)
+            window.chk_show_redepo_overlay.setChecked(False)
+            self.assertFalse(window.view._redepo_overlay_items)
         finally:
             window.close()
 

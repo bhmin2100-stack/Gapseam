@@ -292,6 +292,26 @@ class TrenchDepoEmulationTest(unittest.TestCase):
             self.assertAlmostEqual(point_a[1], point_b[1], delta=1e-6)
 
     @unittest.skipIf(pyclipper is None, "pyclipper is not installed")
+    def test_model_six_accepts_negative_specular_bias(self) -> None:
+        result = run_trench_depo(
+            TrenchDepoConfig(
+                emulator_number=6,
+                cycles=1,
+                reparam_ds_a=20.0,
+                sputter_enabled=True,
+                sputter_strength_a_per_cycle=4.0,
+                redepo_enabled=True,
+                redepo_efficiency_pct=30.0,
+                redepo_emit_power=22.0,
+                redepo_distance_power=-40.0,
+            )
+        )
+        summary = result.meta["redepo_debug_summary_last"]["reflection_redepo"]
+
+        self.assertEqual(result.meta["redepo_model"], "normal_specular_lobe_los")
+        self.assertAlmostEqual(summary["specular_bias_pct"], -40.0, places=6)
+
+    @unittest.skipIf(pyclipper is None, "pyclipper is not installed")
     def test_cycles_create_n_plus_one_frames(self) -> None:
         result = run_trench_depo(TrenchDepoConfig(cycles=2))
 

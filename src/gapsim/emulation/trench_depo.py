@@ -1890,7 +1890,7 @@ def _model6_blended_emission_axis(normal: Point, specular_bias: float) -> Point:
     else:
         nx, ny = nx / nlen, ny / nlen
     rx, ry = _model6_reflection_axis((nx, ny))
-    beta = _clamp01(float(specular_bias))
+    beta = max(-1.0, min(1.0, float(specular_bias)))
     ax = ((1.0 - beta) * nx) + (beta * rx)
     ay = ((1.0 - beta) * ny) + (beta * ry)
     alen = math.hypot(ax, ay)
@@ -2045,7 +2045,7 @@ def _apply_model6_reflection_gaussian_redepo_step(
     removed_mass = [max(0.0, float(dh)) * area for dh, area in zip(dh_etch, areas)]
     total_removed_mass = float(sum(removed_mass))
     efficiency = max(0.0, min(100.0, float(redepo_efficiency_pct))) / 100.0
-    specular_bias = max(0.0, min(100.0, float(specular_bias_pct))) / 100.0
+    specular_bias = max(-100.0, min(100.0, float(specular_bias_pct))) / 100.0
     angular_spread = max(1.0, min(80.0, float(angular_spread_deg)))
     spread_rad = math.radians(angular_spread)
     max_distance = max(1.0, float(redepo_max_distance_a))
@@ -3978,8 +3978,10 @@ def _validate_sweep_value(parameter: str, value: float) -> float:
         if strength < 0.0 or strength > 100.0:
             raise ValueError("redepo_efficiency_pct must be between 0 and 100")
         return strength
-    if parameter in {"redepo_emit_power", "redepo_distance_power"}:
+    if parameter == "redepo_emit_power":
         return _coerce_non_negative_float(value, name=parameter)
+    if parameter == "redepo_distance_power":
+        return _coerce_finite_float(value, name=parameter)
     if parameter == "redepo_neighbor_exclusion":
         return float(_coerce_cycles(value))
     if parameter == "redepo_max_distance_a":
@@ -4292,7 +4294,7 @@ def run_trench_depo(
         min(100.0, _coerce_finite_float(cfg.redepo_efficiency_pct, name="redepo_efficiency_pct")),
     )
     redepo_emit_power = _coerce_non_negative_float(cfg.redepo_emit_power, name="redepo_emit_power")
-    redepo_distance_power = _coerce_non_negative_float(cfg.redepo_distance_power, name="redepo_distance_power")
+    redepo_distance_power = _coerce_finite_float(cfg.redepo_distance_power, name="redepo_distance_power")
     redepo_neighbor_exclusion = _coerce_cycles(cfg.redepo_neighbor_exclusion)
     redepo_max_distance_a = _coerce_non_negative_float(cfg.redepo_max_distance_a, name="redepo_max_distance_a")
     redepo_soft_los_radius_points = max(0, min(2, _coerce_cycles(cfg.redepo_soft_los_radius_points)))

@@ -3439,6 +3439,7 @@ class TrenchDepoWindow(QMainWindow):
         self.apply_emulator_mode(run=False)
         self._reset_geometry_to_default()
         self.sync_depth_deposition_editor_from_spins()
+        self._sync_field_overlay_toggles()
         self._set_workflow_step("structure")
 
     def _install_value_control_wheel_guards(self) -> None:
@@ -4146,6 +4147,28 @@ class TrenchDepoWindow(QMainWindow):
     def _result_has_run_frames(self) -> bool:
         return self._result is not None and bool(self._result.frame_profiles)
 
+    def _result_meta_has_overlay_samples(self, key: str) -> bool:
+        if self._result is None:
+            return False
+        raw = self._result.meta.get(key)
+        if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
+            return False
+        return any(bool(frame) for frame in raw)
+
+    def _sync_field_overlay_toggles(self) -> None:
+        if not all(hasattr(self, name) for name in ("chk_show_etch_overlay", "chk_show_redepo_overlay", "view")):
+            return
+        has_etch = self._result_meta_has_overlay_samples("frame_etch_overlays")
+        has_redepo = self._result_meta_has_overlay_samples("frame_redepo_overlays")
+        show_etch_toggle = bool(self._active_emulator_supports_sputter() or has_etch)
+        show_redepo_toggle = bool(self._active_emulator_supports_redeposition() or has_redepo)
+        self.chk_show_etch_overlay.setVisible(show_etch_toggle)
+        self.chk_show_redepo_overlay.setVisible(show_redepo_toggle)
+        self.chk_show_etch_overlay.setEnabled(has_etch)
+        self.chk_show_redepo_overlay.setEnabled(has_redepo)
+        self.view.set_etch_overlay_visible(bool(has_etch and self.chk_show_etch_overlay.isChecked()))
+        self.view.set_redepo_overlay_visible(bool(has_redepo and self.chk_show_redepo_overlay.isChecked()))
+
     def _invalidate_result_for_input_change(self, *, fit: bool = False) -> None:
         self._stop_result_playback()
         self._result = None
@@ -4160,6 +4183,7 @@ class TrenchDepoWindow(QMainWindow):
         finally:
             self.slider_frame.blockSignals(False)
         self._set_result_playback_available(False)
+        self._sync_field_overlay_toggles()
         if hasattr(self, "edit_result_parameters"):
             self.edit_result_parameters.setPlainText("입력이 바뀌어서 기존 결과가 무효화됐습니다. 다시 실행하면 최신 파라미터가 여기에 표시됩니다.")
         if hasattr(self, "view_tabs") and self.view_tabs.currentIndex() == 3:
@@ -4239,6 +4263,7 @@ class TrenchDepoWindow(QMainWindow):
         if hasattr(self, "edit_result_parameters"):
             self._update_result_parameter_summary(self.current_config(), None)
         self._set_result_playback_available(False)
+        self._sync_field_overlay_toggles()
 
     def _update_geometry_labels(self) -> None:
         raw_count = len(self._structure_points)
@@ -4849,7 +4874,7 @@ class TrenchDepoWindow(QMainWindow):
             self.spin_redepo_emit_power.setRange(1.0, 80.0)
             self.spin_redepo_emit_power.setSingleStep(2.0)
             self.spin_redepo_distance_power.setDecimals(1)
-            self.spin_redepo_distance_power.setRange(0.0, 100.0)
+            self.spin_redepo_distance_power.setRange(-100.0, 100.0)
             self.spin_redepo_distance_power.setSingleStep(5.0)
             if changed and (self.spin_redepo_emit_power.value() <= 8.0 or self.spin_redepo_emit_power.value() > 80.0):
                 self.spin_redepo_emit_power.setValue(22.0)
@@ -4945,6 +4970,7 @@ class TrenchDepoWindow(QMainWindow):
         self.sync_depth_deposition_editor_from_spins()
         self._populate_split_parameters()
         self.sync_etch_control_availability()
+        self._sync_field_overlay_toggles()
         self._sync_depth_advanced_visibility()
         self._emulator_mode_initialized = True
         if run:
@@ -5597,7 +5623,7 @@ class TrenchDepoWindow(QMainWindow):
         elif parameter == "redepo_emit_power" and self.active_emulator_number() in (0, 6):
             values = (8.0, 40.0, 8.0, 1, 1.0, 80.0)
         elif parameter == "redepo_distance_power" and self.active_emulator_number() in (0, 6):
-            values = (0.0, 60.0, 15.0, 1, 0.0, 100.0)
+            values = (-60.0, 60.0, 30.0, 1, -100.0, 100.0)
         elif parameter in {"redepo_emit_power", "redepo_distance_power"}:
             values = (0.5, 2.0, 0.5, 2, 0.0, 8.0)
         elif parameter == "redepo_soft_los_radius_points":
@@ -6270,6 +6296,7 @@ class TrenchDepoWindow(QMainWindow):
             dynamic_substrate_fill=solid_playback,
             history_mode="mixed_etch" if solid_playback else "film",
         )
+        self._sync_field_overlay_toggles()
         max_idx = max(0, len(result.frame_profiles) - 1)
         self.slider_frame.blockSignals(True)
         self.slider_frame.setRange(0, max_idx)
@@ -6885,6 +6912,7 @@ class TrenchDepoWindow(QMainWindow):
             dynamic_substrate_fill=solid_playback,
             history_mode="mixed_etch" if solid_playback else "film",
         )
+        self._sync_field_overlay_toggles()
         max_idx = max(0, len(result.frame_profiles) - 1)
         self.slider_frame.blockSignals(True)
         self.slider_frame.setRange(0, max_idx)
