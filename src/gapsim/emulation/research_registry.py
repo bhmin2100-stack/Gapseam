@@ -16,8 +16,8 @@ def _default_research_root() -> Path:
 DEFAULT_RESEARCH_ROOT = _default_research_root()
 PRESENTATIONS_DIRNAME = "presentations"
 RESEARCH_MANIFEST_FILENAME = "research_manifest.json"
-MAX_EMULATOR_NUMBER = 10
-DEFAULT_CREATED_EMULATOR_NUMBERS = (0, 1, 2, 3, 4, 5, 6)
+MAX_EMULATOR_NUMBER = 6
+DEFAULT_CREATED_EMULATOR_NUMBERS = tuple(range(0, MAX_EMULATOR_NUMBER + 1))
 
 
 @dataclass(frozen=True)
@@ -41,6 +41,14 @@ class EmulatorResearchSlot:
 EMULATOR_RESEARCH_SLOTS = (
     EmulatorResearchSlot(
         number=0,
+        slug="integrated_depo_etch_depth_inhibition",
+        title_ko="통합_데포_에치_감쇠_인히비션",
+        title_en="Integrated Depo Etch Depth Inhibition",
+        status_ko="통합: conformal deposition + direct/ion etch + depth/inhibition deposition, redepo 제외",
+        module="gapsim.emulation.trench_depo",
+    ),
+    EmulatorResearchSlot(
+        number=1,
         slug="conformal_depo_baseline",
         title_ko="컨포멀_데포_기준",
         title_en="Conformal Deposition Baseline",
@@ -48,7 +56,7 @@ EMULATOR_RESEARCH_SLOTS = (
         module="gapsim.emulation.trench_depo",
     ),
     EmulatorResearchSlot(
-        number=1,
+        number=2,
         slug="direct_angle_sputter_etch",
         title_ko="각도기반_직접_스퍼터_에치",
         title_en="Direct Angle Sputter Etch",
@@ -56,7 +64,7 @@ EMULATOR_RESEARCH_SLOTS = (
         module="gapsim.emulation.trench_depo",
     ),
     EmulatorResearchSlot(
-        number=2,
+        number=3,
         slug="ion_transmission_shadowing",
         title_ko="이온_도달률_섀도잉",
         title_en="Ion Transmission Shadowing",
@@ -64,41 +72,29 @@ EMULATOR_RESEARCH_SLOTS = (
         module="gapsim.emulation.trench_depo",
     ),
     EmulatorResearchSlot(
-        number=3,
-        slug="reflected_ion_etch",
-        title_ko="반사_이온_에치",
-        title_en="Reflected Ion Etch",
-        status_ko="폐기: 형상 차이 대비 실행 부담이 커서 채택하지 않음",
-        module="gapsim.emulation.trench_depo",
-    ),
-    EmulatorResearchSlot(
         number=4,
-        slug="sputter_redeposition",
-        title_ko="스퍼터_리데포",
-        title_en="Sputter Redeposition",
-        status_ko="진행중: 1번 direct sputter 출력 위에 single-bounce LOS redeposition 결합",
+        slug="depth_dependent_depo_fill",
+        title_ko="깊이감쇠_데포_잔류충전",
+        title_en="Depth-Dependent Deposition Fill",
+        status_ko="진행중: redepo 없이 depth-dependent deposition과 closure 후 내부 잔류 fill 검증",
         module="gapsim.emulation.trench_depo",
     ),
     EmulatorResearchSlot(
-        5,
-        "depth_dependent_depo_fill",
-        "깊이감쇠_데포_잔류충전",
-        "Depth-Dependent Deposition Fill",
-        "진행중: etch/redepo 없이 depth-dependent deposition과 closure 후 내부 잔류 fill 검증",
+        number=5,
+        slug="inhibition_deposition_fill",
+        title_ko="인히비션_증착_필",
+        title_en="Inhibition Deposition Fill",
+        status_ko="진행중: PECVD/PEALD inhibition coverage field 기반 top/opening suppression fill",
         module="gapsim.emulation.trench_depo",
     ),
     EmulatorResearchSlot(
-        6,
-        "inhibition_deposition_fill",
-        "인히비션_증착_필",
-        "Inhibition Deposition Fill",
-        "진행중: PECVD/PEALD inhibition coverage field 기반 top/opening suppression fill",
+        number=6,
+        slug="reflection_gaussian_ballistic_redeposition",
+        title_ko="반사_가우시안_볼리스틱_리데포",
+        title_en="Reflection Gaussian Ballistic Redeposition",
+        status_ko="진행중: etch source의 specular reflection hit 최대점을 기준으로 Gaussian redepo 후 ballistic correction",
         module="gapsim.emulation.trench_depo",
     ),
-    EmulatorResearchSlot(7, "unassigned", "연구슬롯_미정", "Unassigned Research Slot", "대기중"),
-    EmulatorResearchSlot(8, "unassigned", "연구슬롯_미정", "Unassigned Research Slot", "대기중"),
-    EmulatorResearchSlot(9, "unassigned", "연구슬롯_미정", "Unassigned Research Slot", "대기중"),
-    EmulatorResearchSlot(10, "unassigned", "연구슬롯_미정", "Unassigned Research Slot", "대기중"),
 )
 
 
@@ -110,12 +106,12 @@ def get_emulator_research_slot(number: int) -> EmulatorResearchSlot:
     try:
         slot_number = int(number)
     except Exception as exc:
-        raise ValueError("emulator number must be an integer from 0 to 10") from exc
+        raise ValueError("emulator number must be an integer from 0 to 6") from exc
 
     for slot in EMULATOR_RESEARCH_SLOTS:
         if slot.number == slot_number:
             return slot
-    raise ValueError("emulator number must be an integer from 0 to 10")
+    raise ValueError("emulator number must be an integer from 0 to 6")
 
 
 def next_emulator_number(existing_numbers: Iterable[int]) -> Optional[int]:

@@ -17,13 +17,13 @@ Point = Tuple[float, float]
 
 DEFAULT_STRUCTURE_LIBRARY_PATH = DEFAULT_RESEARCH_ROOT / "structures.xlsx"
 DEFAULT_EMULATOR_STRUCTURE_SHEETS = {
-    0: "em00_conformal",
-    1: "em01_direct_sputter",
-    2: "em02_stepped_trench",
-    3: "em03_reflected_ion",
-    4: "em04_redeposition",
-    5: "em05_bowed_jar",
-    6: "em06_bowed_jar",
+    0: "em00_integrated_depo_etch_depth",
+    1: "em01_conformal",
+    2: "em02_direct_sputter",
+    3: "em03_ion_transmission_etch",
+    4: "em04_depth_depletion",
+    5: "em05_inhibition",
+    6: "em06_reflection_redepo",
 }
 
 _INVALID_SHEET_CHARS = re.compile(r"[\[\]\:\*\?\/\\]")
@@ -35,15 +35,15 @@ class StructureLibraryError(ValueError):
 
 def default_emulator_structures() -> Dict[str, List[Point]]:
     return {
-        DEFAULT_EMULATOR_STRUCTURE_SHEETS[0]: [(float(x), float(y)) for x, y in DEFAULT_TRENCH_POINTS],
+        DEFAULT_EMULATOR_STRUCTURE_SHEETS[0]: [(float(x), float(y)) for x, y in BOWED_JAR_TRENCH_POINTS],
         DEFAULT_EMULATOR_STRUCTURE_SHEETS[1]: [(float(x), float(y)) for x, y in DEFAULT_TRENCH_POINTS],
-        DEFAULT_EMULATOR_STRUCTURE_SHEETS[2]: [
+        DEFAULT_EMULATOR_STRUCTURE_SHEETS[2]: [(float(x), float(y)) for x, y in DEFAULT_TRENCH_POINTS],
+        DEFAULT_EMULATOR_STRUCTURE_SHEETS[3]: [
             (float(x), float(y)) for x, y in ION_TRANSMISSION_STEPPED_TRENCH_POINTS
         ],
-        DEFAULT_EMULATOR_STRUCTURE_SHEETS[3]: [(float(x), float(y)) for x, y in DEFAULT_TRENCH_POINTS],
-        DEFAULT_EMULATOR_STRUCTURE_SHEETS[4]: [(float(x), float(y)) for x, y in DEFAULT_TRENCH_POINTS],
+        DEFAULT_EMULATOR_STRUCTURE_SHEETS[4]: [(float(x), float(y)) for x, y in BOWED_JAR_TRENCH_POINTS],
         DEFAULT_EMULATOR_STRUCTURE_SHEETS[5]: [(float(x), float(y)) for x, y in BOWED_JAR_TRENCH_POINTS],
-        DEFAULT_EMULATOR_STRUCTURE_SHEETS[6]: [(float(x), float(y)) for x, y in BOWED_JAR_TRENCH_POINTS],
+        DEFAULT_EMULATOR_STRUCTURE_SHEETS[6]: [(float(x), float(y)) for x, y in DEFAULT_TRENCH_POINTS],
     }
 
 
@@ -132,6 +132,27 @@ def save_structure_points(
     ws.column_dimensions["B"].width = 16
     wb.save(workbook_path)
     wb.close()
+    return safe_name
+
+
+def delete_structure_sheet(path: Path, sheet_name: str) -> str:
+    workbook_path = Path(path)
+    if not workbook_path.exists():
+        raise StructureLibraryError(f"Structure workbook does not exist: {workbook_path}")
+    safe_name = sanitize_structure_name(sheet_name)
+    wb = load_workbook(workbook_path)
+    try:
+        if safe_name not in wb.sheetnames:
+            raise StructureLibraryError(f"Structure sheet not found: {safe_name}")
+        del wb[safe_name]
+        if wb.sheetnames:
+            wb.save(workbook_path)
+        else:
+            wb.close()
+            workbook_path.unlink(missing_ok=True)
+            return safe_name
+    finally:
+        wb.close()
     return safe_name
 
 

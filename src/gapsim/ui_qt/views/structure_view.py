@@ -113,6 +113,7 @@ class StructureView(QGraphicsView):
         self._overlay_origin = (0.0, 0.0)
         self._current_color = QColor(Qt.GlobalColor.blue)
         self._reference_color = QColor(125, 125, 125, 220)
+        self._editing_enabled = True
         self._overlay_drag_enabled = False
         self._overlay_dragging = False
         self._overlay_drag_last_scene: Optional[QPointF] = None
@@ -187,6 +188,13 @@ class StructureView(QGraphicsView):
             changed = True
         if changed:
             self._rebuild_items()
+
+    def set_editing_enabled(self, enabled: bool) -> None:
+        enabled_bool = bool(enabled)
+        if self._editing_enabled == enabled_bool:
+            return
+        self._editing_enabled = enabled_bool
+        self._rebuild_items()
 
     def fit_points(self, padding: float = 50.0, center_x_on_origin: bool = True) -> None:
         all_profiles: List[List[Tuple[float, float]]] = []
@@ -298,6 +306,10 @@ class StructureView(QGraphicsView):
         return sx, sy
 
     def _on_item_move_raw(self, idx: int, x: float, y: float) -> Tuple[float, float]:
+        if not self._editing_enabled:
+            if 0 <= idx < len(self._pts):
+                return self._pts[idx]
+            return float(x), float(y)
         sx, sy = self._snap(x, y)
         if 0 <= idx < len(self._pts):
             self._pts[idx] = (sx, sy)
@@ -359,6 +371,10 @@ class StructureView(QGraphicsView):
                 self._on_item_drag_start_raw,
                 self._on_item_drag_finish_raw,
             )
+            if not self._editing_enabled:
+                it.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, False)
+                it.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
+                it.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
             it.setBrush(QBrush(QColor(self._current_color)))
             it.setPen(QPen(QColor(self._current_color)))
             self._scene.addItem(it)
@@ -580,13 +596,21 @@ class StructureView(QGraphicsView):
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
             event.accept()
             return
-        if event.button() == Qt.MouseButton.RightButton and not (event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+        if (
+            self._editing_enabled
+            and event.button() == Qt.MouseButton.RightButton
+            and not (event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+        ):
             scene_pos = self.mapToScene(event.pos())
             pidx = self._find_point_near_click(scene_pos)
             if pidx is not None and self._delete_point_at(pidx):
                 event.accept()
                 return
-        if event.button() == Qt.MouseButton.LeftButton and not (event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+        if (
+            self._editing_enabled
+            and event.button() == Qt.MouseButton.LeftButton
+            and not (event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+        ):
             scene_pos = self.mapToScene(event.pos())
             pidx = self._find_point_near_click(scene_pos)
             if pidx is None:

@@ -17,6 +17,7 @@ dist/
 # Run/output folders
 runs/
 exports/
+outputs/
 
 # Archive / backup / dump
 archive/

@@ -6,6 +6,7 @@ from pathlib import Path
 
 from gapsim.emulation.structure_library import (
     DEFAULT_EMULATOR_STRUCTURE_SHEETS,
+    delete_structure_sheet,
     ensure_default_structures,
     list_structure_names,
     read_structure_points,
@@ -24,6 +25,10 @@ class StructureLibraryTest(unittest.TestCase):
             self.assertEqual(saved_name, "My_ Structure_01")
             self.assertEqual(list_structure_names(path), [saved_name])
             self.assertEqual(read_structure_points(path, saved_name), [(-10.0, 0.0), (0.0, -5.0)])
+
+            deleted_name = delete_structure_sheet(path, saved_name)
+            self.assertEqual(deleted_name, saved_name)
+            self.assertEqual(list_structure_names(path), [])
 
     def test_export_default_structures_preserves_existing_sheets(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

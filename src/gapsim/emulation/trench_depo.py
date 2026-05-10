@@ -26,6 +26,7 @@ from gapsim.engine.deposition_pipeline import (
 )
 from gapsim.emulation.model4_redeposition import (
     Model4RedepositionParams,
+    compute_arc_weights,
     compute_redeposition,
 )
 
@@ -79,6 +80,7 @@ BOWED_JAR_TRENCH_POINTS: Tuple[Point, ...] = (
 class TrenchDepoConfig:
     points: Sequence[Point] = DEFAULT_TRENCH_POINTS
     cycles: int = 20
+    emulator_number: int = 0
     angstrom_per_cycle: float = 10.0
     reparam_ds_a: float = REPARAM_DS_A
     sputter_enabled: bool = False
@@ -110,6 +112,22 @@ class TrenchDepoConfig:
     redepo_neighbor_exclusion: int = 2
     redepo_max_distance_a: float = 1800.0
     redepo_soft_los_radius_points: int = 0
+    redepo_transport_model: str = "gapsim_binned_lobe_los"
+    redepo_ray_count: int = 7
+    redepo_footprint_sigma_a: float = 55.0
+    redepo_footprint_radius_sigma: float = 3.0
+    lf_overhang_enabled: bool = False
+    lf_overhang_dose: float = 1.0
+    lf_overhang_sputter_gain: float = 1.0
+    lf_overhang_redepo_fraction_pct: float = 30.0
+    lf_overhang_survival_penalty: float = 0.75
+    lf_overhang_width_a: float = 180.0
+    closure_redepo_enabled: bool = False
+    closure_redepo_efficiency_pct: float = 35.0
+    closure_redepo_shadow_gain: float = 2.0
+    closure_redepo_width_a: float = 160.0
+    closure_redepo_survival_penalty: float = 0.85
+    closure_redepo_smoothing_a: float = 160.0
     deposition_depth_enabled: bool = False
     deposition_feature_type: str = "hole"
     deposition_feature_width_a: float = 240.0
@@ -165,6 +183,11 @@ class TrenchSweepResult:
     result: TrenchDepoResult
 
 
+FieldOverlaySample = Tuple[float, float, float]
+RedepoOverlaySample = FieldOverlaySample
+TransportLineSample = Tuple[float, float, float, float, float]
+
+
 class _ConstantFluxModel(FluxModel):
     def __init__(self, value: float) -> None:
         self.value = float(value)
@@ -198,6 +221,18 @@ SWEEP_PARAMETER_LABELS: Dict[str, str] = {
     "redepo_neighbor_exclusion": "Neighbor skip",
     "redepo_max_distance_a": "Redepo range",
     "redepo_soft_los_radius_points": "Soft LOS",
+    "redepo_ray_count": "Redepo rays",
+    "redepo_footprint_sigma_a": "Footprint sigma",
+    "lf_overhang_dose": "LF dose",
+    "lf_overhang_sputter_gain": "LF sputter gain",
+    "lf_overhang_redepo_fraction_pct": "LF redepo %",
+    "lf_overhang_survival_penalty": "LF survival loss",
+    "lf_overhang_width_a": "LF width",
+    "closure_redepo_efficiency_pct": "Closure redepo %",
+    "closure_redepo_shadow_gain": "Closure capture",
+    "closure_redepo_width_a": "Closure width",
+    "closure_redepo_survival_penalty": "Closure survival loss",
+    "closure_redepo_smoothing_a": "Closure smooth",
     "deposition_depth_decay_k": "Depth decay",
     "deposition_depth_decay_power": "Depth power",
     "deposition_min_ratio": "Min depo ratio",
@@ -253,6 +288,28 @@ _REDEPO_SWEEP_PARAMETERS = frozenset(
         "redepo_neighbor_exclusion",
         "redepo_max_distance_a",
         "redepo_soft_los_radius_points",
+        "redepo_ray_count",
+        "redepo_footprint_sigma_a",
+    }
+)
+
+_LF_OVERHANG_SWEEP_PARAMETERS = frozenset(
+    {
+        "lf_overhang_dose",
+        "lf_overhang_sputter_gain",
+        "lf_overhang_redepo_fraction_pct",
+        "lf_overhang_survival_penalty",
+        "lf_overhang_width_a",
+    }
+)
+
+_CLOSURE_REDEPO_SWEEP_PARAMETERS = frozenset(
+    {
+        "closure_redepo_efficiency_pct",
+        "closure_redepo_shadow_gain",
+        "closure_redepo_width_a",
+        "closure_redepo_survival_penalty",
+        "closure_redepo_smoothing_a",
     }
 )
 
@@ -1798,6 +1855,354 @@ def _clone_simulation_state(state: SimulationState) -> SimulationState:
     )
 
 
+def _model6_arc_coordinates(points: Sequence[Point]) -> List[float]:
+    pts = [(float(x), float(y)) for x, y in points]
+    if not pts:
+        return []
+    coords = [0.0]
+    for a, b in zip(pts, pts[1:]):
+        coords.append(coords[-1] + math.hypot(float(b[0]) - float(a[0]), float(b[1]) - float(a[1])))
+    return coords
+
+
+def _model6_reflection_axis(normal: Point) -> Point:
+    nx, ny = float(normal[0]), float(normal[1])
+    length = math.hypot(nx, ny)
+    if length <= 1e-12:
+        nx, ny = 0.0, 1.0
+    else:
+        nx, ny = nx / length, ny / length
+    incoming = (0.0, -1.0)
+    dot_in = (incoming[0] * nx) + (incoming[1] * ny)
+    rx = incoming[0] - (2.0 * dot_in * nx)
+    ry = incoming[1] - (2.0 * dot_in * ny)
+    rlen = math.hypot(rx, ry)
+    if rlen <= 1e-12:
+        return (nx, ny)
+    return (rx / rlen, ry / rlen)
+
+
+def _model6_ray_segment_intersection(
+    origin: Point,
+    direction: Point,
+    a: Point,
+    b: Point,
+    *,
+    eps: float = 1e-9,
+) -> Optional[Tuple[float, float]]:
+    ox, oy = float(origin[0]), float(origin[1])
+    dx, dy = float(direction[0]), float(direction[1])
+    ax, ay = float(a[0]), float(a[1])
+    sx = float(b[0]) - ax
+    sy = float(b[1]) - ay
+    denom = (dx * sy) - (dy * sx)
+    if abs(denom) <= eps:
+        return None
+    qx = ax - ox
+    qy = ay - oy
+    t = ((qx * sy) - (qy * sx)) / denom
+    u = ((qx * dy) - (qy * dx)) / denom
+    if t <= eps or u < -1e-9 or u > 1.0 + 1e-9:
+        return None
+    return float(t), float(max(0.0, min(1.0, u)))
+
+
+def _model6_first_opposite_reflection_hit(
+    points: Sequence[Point],
+    normals: Sequence[Point],
+    *,
+    source_index: int,
+    direction: Point,
+    center_x: float,
+    neighbor_exclusion: int,
+    max_distance_a: float,
+) -> Optional[Tuple[int, float, float, Point, Point]]:
+    pts = [(float(x), float(y)) for x, y in points]
+    if len(pts) < 2 or source_index < 0 or source_index >= len(pts):
+        return None
+    sx, sy = pts[source_index]
+    source_side = -1 if sx < center_x else 1
+    best: Optional[Tuple[int, float, float, Point, Point]] = None
+    max_dist = max(1e-9, float(max_distance_a))
+    skip = max(0, int(neighbor_exclusion))
+    for seg_idx in range(len(pts) - 1):
+        if abs(seg_idx - source_index) <= skip or abs((seg_idx + 1) - source_index) <= skip:
+            continue
+        hit = _model6_ray_segment_intersection(pts[source_index], direction, pts[seg_idx], pts[seg_idx + 1])
+        if hit is None:
+            continue
+        dist, u = hit
+        if dist <= 1e-9 or dist > max_dist:
+            continue
+        hx = pts[seg_idx][0] + (u * (pts[seg_idx + 1][0] - pts[seg_idx][0]))
+        hy = pts[seg_idx][1] + (u * (pts[seg_idx + 1][1] - pts[seg_idx][1]))
+        hit_side = -1 if hx < center_x else 1
+        if hit_side == source_side:
+            continue
+        if best is not None and dist >= best[2]:
+            continue
+        n0 = normals[seg_idx] if seg_idx < len(normals) else (0.0, 1.0)
+        n1 = normals[seg_idx + 1] if (seg_idx + 1) < len(normals) else n0
+        nx = ((1.0 - u) * float(n0[0])) + (u * float(n1[0]))
+        ny = ((1.0 - u) * float(n0[1])) + (u * float(n1[1]))
+        nlen = math.hypot(nx, ny)
+        hit_normal = (nx / nlen, ny / nlen) if nlen > 1e-12 else (0.0, 1.0)
+        best = (int(seg_idx), float(u), float(dist), (float(hx), float(hy)), hit_normal)
+    return best
+
+
+def _apply_model6_reflection_gaussian_redepo_step(
+    state: SimulationState,
+    *,
+    deposition_a: float,
+    sputter_strength_a: float,
+    sputter_peak_pct: float,
+    sputter_peak_angle_deg: float,
+    sputter_width_deg: float,
+    sputter_smoothing_a: float,
+    reparam_ds_a: float,
+    redepo_efficiency_pct: float,
+    gaussian_width_a: float,
+    ballistic_mix_pct: float,
+    redepo_neighbor_exclusion: int,
+    redepo_max_distance_a: float,
+) -> Tuple[List[float], List[float], float]:
+    source_state = _clone_simulation_state(state)
+    angles, responses, etch_clamp_a = _apply_direct_sputter_step(
+        source_state,
+        deposition_a=deposition_a,
+        sputter_strength_a=sputter_strength_a,
+        sputter_peak_pct=sputter_peak_pct,
+        sputter_peak_angle_deg=sputter_peak_angle_deg,
+        sputter_width_deg=sputter_width_deg,
+        sputter_smoothing_a=sputter_smoothing_a,
+        reparam_ds_a=reparam_ds_a,
+        ion_transmission_enabled=False,
+        ion_transmission_override=None,
+        reflected_ion_enabled=False,
+        reflected_ion_strength_pct=0.0,
+    )
+    source_fields = dict(source_state.meta.get("direct_sputter_debug_fields_last", {}))
+
+    grown_solid = OffsetBoolean.grow_solid_external_air_limited(state, dr_ref=deposition_a)
+    grown_surface = _extract_surface_from_solid(state, grown_solid, state.surface.points)
+    grown_surface = equal_arc_resample(grown_surface, reparam_ds_a)
+    if not grown_surface:
+        state.surface.points = [(float(x), float(y)) for x, y in source_state.surface.points]
+        state.solid_paths_i = [list(path) for path in source_state.solid_paths_i]
+        state.meta.update(source_state.meta)
+        return angles, responses, etch_clamp_a
+
+    dh_source = [max(0.0, float(v)) for v in source_fields.get("sputter_effective_field", [])]
+    if len(dh_source) != len(grown_surface):
+        dh_source = [0.0 for _ in grown_surface]
+    dh_etch = [min(float(etch_clamp_a), max(0.0, value)) for value in dh_source]
+
+    areas = [max(1e-9, float(v)) for v in compute_arc_weights(grown_surface)]
+    smooth_radius = max(0, int(round(float(sputter_smoothing_a) / max(float(reparam_ds_a), 1e-9))))
+    normals = _smooth_unit_vectors(vertex_air_normals(grown_surface), smooth_radius)
+    arc_s = _model6_arc_coordinates(grown_surface)
+    xs = [float(x) for x, _y in grown_surface]
+    center_x = (min(xs) + max(xs)) * 0.5 if xs else 0.0
+
+    removed_mass = [max(0.0, float(dh)) * area for dh, area in zip(dh_etch, areas)]
+    total_removed_mass = float(sum(removed_mass))
+    efficiency = max(0.0, min(100.0, float(redepo_efficiency_pct))) / 100.0
+    ballistic_mix = max(0.0, min(100.0, float(ballistic_mix_pct))) / 100.0
+    gaussian_width = max(1.0, float(gaussian_width_a))
+    max_distance = max(1.0, float(redepo_max_distance_a))
+    source_cutoff = max(1e-12, total_removed_mass * 1e-9)
+
+    ballistic_mass = [0.0 for _ in grown_surface]
+    transport_lines: List[TransportLineSample] = []
+    active_source_count = 0
+    active_hit_count = 0
+    escaped_mass = 0.0
+    raw_hit_mass = 0.0
+    for idx, mass in enumerate(removed_mass):
+        if mass <= source_cutoff:
+            continue
+        active_source_count += 1
+        direction = _model6_reflection_axis(normals[idx] if idx < len(normals) else (0.0, 1.0))
+        hit = _model6_first_opposite_reflection_hit(
+            grown_surface,
+            normals,
+            source_index=idx,
+            direction=direction,
+            center_x=center_x,
+            neighbor_exclusion=redepo_neighbor_exclusion,
+            max_distance_a=max_distance,
+        )
+        if hit is None:
+            escaped_mass += float(mass)
+            continue
+        seg_idx, u, distance, hit_point, hit_normal = hit
+        if distance <= 1e-9:
+            escaped_mass += float(mass)
+            continue
+        receive = max(
+            0.0,
+            -(
+                float(hit_normal[0]) * float(direction[0])
+                + float(hit_normal[1]) * float(direction[1])
+            ),
+        )
+        if receive <= 1e-9:
+            escaped_mass += float(mass)
+            continue
+        distance_soft = 1.0 / math.sqrt(max(1.0, distance / max(float(reparam_ds_a), 1e-9)))
+        hit_mass = float(mass) * receive * distance_soft
+        if hit_mass <= 0.0:
+            escaped_mass += float(mass)
+            continue
+        active_hit_count += 1
+        raw_hit_mass += hit_mass
+        left_weight = max(0.0, min(1.0, 1.0 - float(u)))
+        right_weight = max(0.0, min(1.0, float(u)))
+        if 0 <= seg_idx < len(ballistic_mass):
+            ballistic_mass[seg_idx] += hit_mass * left_weight
+        if 0 <= seg_idx + 1 < len(ballistic_mass):
+            ballistic_mass[seg_idx + 1] += hit_mass * right_weight
+        sx, sy = grown_surface[idx]
+        hx, hy = hit_point
+        transport_lines.append((float(sx), float(sy), float(hx), float(hy), float(hit_mass)))
+
+    target_total_mass = efficiency * total_removed_mass if raw_hit_mass > 1e-12 else 0.0
+
+    ballistic_sum = float(sum(ballistic_mass))
+    ballistic_norm = (
+        [(value / ballistic_sum) * target_total_mass for value in ballistic_mass]
+        if ballistic_sum > 1e-12 and target_total_mass > 0.0
+        else [0.0 for _ in grown_surface]
+    )
+    peak_idx = max(range(len(ballistic_mass)), key=lambda i: ballistic_mass[i]) if ballistic_sum > 0.0 else -1
+    gaussian_mass = [0.0 for _ in grown_surface]
+    if peak_idx >= 0 and target_total_mass > 0.0 and arc_s:
+        center_s = float(arc_s[peak_idx])
+        gaussian_weights = [
+            area * math.exp(-0.5 * ((float(s) - center_s) / gaussian_width) ** 2)
+            for s, area in zip(arc_s, areas)
+        ]
+        gaussian_sum = float(sum(gaussian_weights))
+        if gaussian_sum > 1e-12:
+            gaussian_mass = [(w / gaussian_sum) * target_total_mass for w in gaussian_weights]
+
+    redepo_mass = [
+        ((1.0 - ballistic_mix) * float(g_mass)) + (ballistic_mix * float(b_mass))
+        for g_mass, b_mass in zip(gaussian_mass, ballistic_norm)
+    ]
+    redepo_sum = float(sum(redepo_mass))
+    if redepo_sum > target_total_mass + 1e-12 and redepo_sum > 0.0:
+        scale = target_total_mass / redepo_sum
+        redepo_mass = [value * scale for value in redepo_mass]
+        redepo_sum = float(sum(redepo_mass))
+
+    dh_redepo = [
+        max(0.0, float(mass)) / max(1e-9, float(area))
+        for mass, area in zip(redepo_mass, areas)
+    ]
+    profile_delta = [
+        max(0.0, float(redepo)) - max(0.0, float(etch))
+        for redepo, etch in zip(dh_redepo, dh_etch)
+    ]
+
+    proposed: List[Point] = []
+    has_negative_net = False
+    for idx, (x, y) in enumerate(grown_surface):
+        nx, ny = normals[idx] if idx < len(normals) else (0.0, 1.0)
+        move_delta = float(profile_delta[idx]) if idx < len(profile_delta) else 0.0
+        if float(deposition_a) + move_delta < 0.0:
+            has_negative_net = True
+        x2 = float(x + move_delta * nx)
+        y2 = float(y + move_delta * ny)
+        if idx == 0 or idx == (len(grown_surface) - 1):
+            x2 = float(x)
+        proposed.append((x2, y2))
+
+    clean_surface, clean_solid = TopologyCleanup().cleanup(
+        proposed,
+        state,
+        solid_ref_paths_i=grown_solid,
+        solid_merge_mode=("candidate" if has_negative_net else "union"),
+    )
+    state.surface.points = equal_arc_resample(clean_surface, reparam_ds_a)
+    if clean_solid:
+        state.solid_paths_i = clean_solid
+
+    total_etch = [max(0.0, etch - redepo) for etch, redepo in zip(dh_etch, dh_redepo)]
+    fields = dict(source_fields)
+    fields["x"] = [round(float(x), 6) for x, _y in grown_surface]
+    fields["y"] = [round(float(y), 6) for _x, y in grown_surface]
+    fields["depo_field"] = [round(float(deposition_a), 6) for _ in grown_surface]
+    fields["sputter_effective_field"] = [round(float(v), 6) for v in dh_etch]
+    fields["direct_sputter_field"] = [round(float(v), 6) for v in dh_etch]
+    fields["redepo_source_etch_field"] = [round(float(v), 6) for v in dh_etch]
+    fields["removed_mass_field"] = [round(float(v), 6) for v in removed_mass]
+    fields["reflection_hit_mass_field"] = [round(float(v), 6) for v in ballistic_mass]
+    fields["gaussian_redepo_mass_field"] = [round(float(v), 6) for v in gaussian_mass]
+    fields["ballistic_redepo_mass_field"] = [round(float(v), 6) for v in ballistic_norm]
+    fields["redepo_mass_field"] = [round(float(v), 6) for v in redepo_mass]
+    fields["gaussian_redepo_field"] = [
+        round(float(mass) / max(1e-9, float(area)), 6)
+        for mass, area in zip(gaussian_mass, areas)
+    ]
+    fields["ballistic_redepo_field"] = [
+        round(float(mass) / max(1e-9, float(area)), 6)
+        for mass, area in zip(ballistic_norm, areas)
+    ]
+    fields["redepo_field"] = [round(float(v), 6) for v in dh_redepo]
+    fields["profile_delta_field"] = [round(float(v), 6) for v in profile_delta]
+    fields["total_etch_field"] = [round(float(v), 6) for v in total_etch]
+    fields["net_growth_field"] = [
+        round(float(deposition_a) + float(delta), 6)
+        for delta in profile_delta
+    ]
+    fields["reflection_transport_lines"] = [
+        [round(float(x1), 6), round(float(y1), 6), round(float(x2), 6), round(float(y2), 6), round(float(v), 6)]
+        for x1, y1, x2, y2, v in sorted(transport_lines, key=lambda item: item[4], reverse=True)[:64]
+    ]
+
+    peak_point = grown_surface[peak_idx] if 0 <= peak_idx < len(grown_surface) else (0.0, 0.0)
+    active_target_count = sum(1 for value in redepo_mass if value > max(1e-12, target_total_mass * 1e-9))
+    reflection_summary = {
+        "total_removed_mass": float(total_removed_mass),
+        "total_redepo_mass": float(redepo_sum),
+        "redepo_capture_ratio": float(redepo_sum / total_removed_mass) if total_removed_mass > 1e-12 else 0.0,
+        "target_total_mass": float(target_total_mass),
+        "efficiency": float(efficiency),
+        "gaussian_width_a": float(gaussian_width),
+        "ballistic_mix_pct": float(ballistic_mix * 100.0),
+        "active_source_count": int(active_source_count),
+        "active_hit_count": int(active_hit_count),
+        "active_target_count": int(active_target_count),
+        "gaussian_center_index": int(peak_idx),
+        "gaussian_center_x": float(peak_point[0]),
+        "gaussian_center_y": float(peak_point[1]),
+        "escaped_mass": float(escaped_mass),
+        "raw_hit_mass": float(raw_hit_mass),
+        "transport_line_count": int(len(transport_lines)),
+    }
+    summary = dict(source_state.meta.get("direct_sputter_debug_summary_last", {}))
+    summary["reflection_redepo"] = dict(reflection_summary)
+    summary["total_etch"] = _field_summary_by_depth(grown_surface, total_etch)
+    summary["net_growth"] = _field_summary_by_depth(
+        grown_surface,
+        [float(deposition_a) + float(delta) for delta in profile_delta],
+    )
+
+    state.meta["direct_sputter_debug_fields_last"] = fields
+    state.meta["direct_sputter_debug_summary_last"] = summary
+    state.meta["model6_reflection_redepo_debug_fields_last"] = fields
+    state.meta["model6_reflection_redepo_debug_summary_last"] = summary
+    state.meta["model6_reflection_redepo_total_removed_mass_last"] = float(total_removed_mass)
+    state.meta["model6_reflection_redepo_total_mass_last"] = float(redepo_sum)
+    state.meta["model6_reflection_redepo_active_source_count_last"] = int(active_source_count)
+    state.meta["model6_reflection_redepo_active_target_count_last"] = int(active_target_count)
+    state.meta["model6_reflection_redepo_transport_model_last"] = "specular_hit_gaussian_ballistic"
+    state.meta["direct_sputter_total_last"] = float(sum(dh_etch))
+    return angles, responses, etch_clamp_a
+
+
 def _redepo_source_model_key(_value: str) -> str:
     return "model2"
 
@@ -1819,6 +2224,10 @@ def _apply_model4_redeposition_step(
     redepo_neighbor_exclusion: int,
     redepo_max_distance_a: float,
     redepo_soft_los_radius_points: int,
+    redepo_transport_model: str,
+    redepo_ray_count: int,
+    redepo_footprint_sigma_a: float,
+    redepo_footprint_radius_sigma: float,
     ion_transmission_start_depth_pct: float = 0.0,
     ion_transmission_end_depth_pct: float = 100.0,
     ion_transmission_decay_strength_pct: float = 100.0,
@@ -1882,6 +2291,10 @@ def _apply_model4_redeposition_step(
             distance_power=max(0.0, float(redepo_distance_power)),
             neighbor_exclusion=max(0, int(redepo_neighbor_exclusion)),
             max_redepo_distance=max(0.0, float(redepo_max_distance_a)),
+            lateral_spread_a=max(0.0, float(redepo_footprint_sigma_a)),
+            transport_model=str(redepo_transport_model or "gapsim_binned_lobe_los"),
+            ray_count=max(3, int(redepo_ray_count)),
+            footprint_radius_sigma=max(1.0, float(redepo_footprint_radius_sigma)),
             soft_los_radius_points=max(0, int(redepo_soft_los_radius_points)),
         ),
     )
@@ -1935,6 +2348,8 @@ def _apply_model4_redeposition_step(
     fields["redepo_field"] = [round(float(v), 6) for v in dh_redepo]
     fields["redepo_mass_field"] = list(redepo.debug_fields.get("redepo_mass_field", []))
     fields["removed_mass_field"] = list(redepo.debug_fields.get("removed_mass_field", []))
+    fields["redepo_source_etch_field"] = list(redepo.debug_fields.get("redepo_source_etch_field", []))
+    fields["redepo_source_mass_field"] = list(redepo.debug_fields.get("redepo_source_mass_field", []))
     fields["profile_delta_field"] = [round(float(v), 6) for v in profile_delta]
     fields["total_etch_field"] = [round(float(v), 6) for v in total_etch]
     fields["net_growth_field"] = [
@@ -1957,6 +2372,1251 @@ def _apply_model4_redeposition_step(
     state.meta["model4_redepo_total_removed_mass_last"] = float(redepo.debug_summary.get("total_removed_mass", 0.0))
     state.meta["model4_redepo_total_mass_last"] = float(redepo.debug_summary.get("total_redepo_mass", 0.0))
     state.meta["model4_redepo_active_source_count_last"] = int(redepo.debug_summary.get("active_source_count", 0))
+    state.meta["model4_redepo_transport_model_last"] = str(redepo.debug_summary.get("transport_model", redepo_transport_model))
+    state.meta["direct_sputter_total_last"] = float(sum(dh_etch))
+    return angles, responses, etch_clamp_a
+
+
+def _normal_change_field(normals: Sequence[Point]) -> List[float]:
+    values = [(float(nx), float(ny)) for nx, ny in normals]
+    if not values:
+        return []
+    out: List[float] = []
+    for idx in range(len(values)):
+        left = values[max(0, idx - 1)]
+        right = values[min(len(values) - 1, idx + 1)]
+        out.append(math.hypot(right[0] - left[0], right[1] - left[1]))
+    return out
+
+
+def _profile_diagonal_a(points: Sequence[Point]) -> float:
+    pts = [(float(x), float(y)) for x, y in points]
+    if not pts:
+        return 0.0
+    xs = [x for x, _y in pts]
+    ys = [y for _x, y in pts]
+    return math.hypot(max(xs) - min(xs), max(ys) - min(ys))
+
+
+def _closure_transport_horizon_a(points: Sequence[Point], footprint_width_a: float) -> float:
+    pts = [(float(x), float(y)) for x, y in points]
+    if not pts:
+        return max(600.0, float(footprint_width_a) * 6.0)
+    xs = [float(x) for x, _y in pts]
+    ys = [float(y) for _x, y in pts]
+    center_x = 0.5 * (min(xs) + max(xs))
+    surface_y = max(ys)
+    bottom_y = min(ys)
+    depth_span = max(surface_y - bottom_y, 1e-9)
+    probe_depth = max(40.0, min(300.0, depth_span * 0.02))
+    opening_width, _center, _left, _right = _gap_for_point_at_y(pts, center_x, surface_y - probe_depth)
+    local_range = (0.70 * max(1.0, float(opening_width))) + (2.4 * max(0.0, float(footprint_width_a)))
+    return max(600.0, min(_profile_diagonal_a(pts), local_range))
+
+
+def _lf_overhang_side_indices(points: Sequence[Point], center_x: float, side: int) -> List[int]:
+    return [
+        idx
+        for idx, (x, _y) in enumerate(points)
+        if (float(x) - float(center_x)) * float(side) >= 0.0
+    ]
+
+
+def _lf_overhang_toe_scores(
+    points: Sequence[Point],
+    normals: Sequence[Point],
+    ion_factors: Sequence[float],
+    *,
+    center_x: float,
+) -> List[float]:
+    pts = [(float(x), float(y)) for x, y in points]
+    n = len(pts)
+    if n == 0:
+        return []
+    if len(normals) != n or len(ion_factors) != n:
+        return [0.0 for _ in pts]
+    surface_y = max(y for _x, y in pts)
+    bottom_y = min(y for _x, y in pts)
+    depth_span = max(surface_y - bottom_y, 1e-9)
+    depth_frac = [_clamp01((surface_y - y) / depth_span) for _x, y in pts]
+    normal_change = _normal_change_field(normals)
+    scores = [0.0 for _ in pts]
+    for side in (-1, 1):
+        side_indices = _lf_overhang_side_indices(pts, center_x, side)
+        ordered = sorted(side_indices, key=lambda idx: depth_frac[idx])
+        previous_visibility = 1.0
+        for idx in ordered:
+            nx, _ny = normals[idx]
+            depth = depth_frac[idx]
+            lateral = abs(float(nx))
+            if depth < 0.025 or depth > 0.72 or lateral < 0.10:
+                previous_visibility = max(previous_visibility, _clamp01(float(ion_factors[idx])))
+                continue
+            visibility = _clamp01(float(ion_factors[idx]))
+            visibility_drop = max(0.0, previous_visibility - visibility)
+            kink = max(0.0, float(normal_change[idx]))
+            upper_bias = 1.0 - _clamp01(max(0.0, depth - 0.12) / 0.58)
+            scores[idx] = kink * (0.20 + 0.80 * visibility_drop) * (0.30 + 0.70 * lateral) * (0.50 + 0.50 * upper_bias)
+            previous_visibility = max(visibility, previous_visibility * 0.96)
+    return scores
+
+
+def _select_lf_overhang_toe_index(
+    points: Sequence[Point],
+    normals: Sequence[Point],
+    scores: Sequence[float],
+    *,
+    center_x: float,
+    side: int,
+) -> Optional[int]:
+    pts = [(float(x), float(y)) for x, y in points]
+    if not pts:
+        return None
+    surface_y = max(y for _x, y in pts)
+    bottom_y = min(y for _x, y in pts)
+    depth_span = max(surface_y - bottom_y, 1e-9)
+    side_indices = _lf_overhang_side_indices(pts, center_x, side)
+    candidates: List[Tuple[float, int]] = []
+    for idx in side_indices:
+        depth = _clamp01((surface_y - pts[idx][1]) / depth_span)
+        if depth < 0.025 or depth > 0.72:
+            continue
+        lateral = abs(float(normals[idx][0])) if idx < len(normals) else 0.0
+        if lateral < 0.08:
+            continue
+        score = float(scores[idx]) if idx < len(scores) else 0.0
+        candidates.append((score, idx))
+    if not candidates:
+        return None
+    best_score, best_idx = max(candidates, key=lambda item: item[0])
+    if best_score > 1e-12:
+        return int(best_idx)
+    target_depth = 0.20
+    return int(
+        min(
+            (idx for _score, idx in candidates),
+            key=lambda idx: abs(_clamp01((surface_y - pts[idx][1]) / depth_span) - target_depth),
+        )
+    )
+
+
+def _compute_lf_overhang_proxy_fields(
+    points: Sequence[Point],
+    normals: Sequence[Point],
+    ion_factors: Sequence[float],
+    dh_etch: Sequence[float],
+    *,
+    redepo_fraction_pct: float,
+    survival_penalty: float,
+    width_a: float,
+) -> Tuple[List[float], Dict[str, Any], Dict[str, float]]:
+    pts = [(float(x), float(y)) for x, y in points]
+    n = len(pts)
+    if n == 0:
+        return [], {}, {}
+    normal_values = [(float(nx), float(ny)) for nx, ny in normals]
+    if len(normal_values) != n:
+        normal_values = vertex_air_normals(pts)
+    ions = [_clamp01(float(v)) for v in ion_factors]
+    if len(ions) != n:
+        ions = [1.0 for _ in pts]
+    etch = [max(0.0, float(v)) for v in dh_etch]
+    if len(etch) != n:
+        etch = [0.0 for _ in pts]
+    areas = compute_arc_weights(pts)
+    xs = [x for x, _y in pts]
+    center_x = 0.5 * (min(xs) + max(xs))
+    surface_y = max(y for _x, y in pts)
+    bottom_y = min(y for _x, y in pts)
+    depth_span = max(surface_y - bottom_y, 1e-9)
+    depth_frac = [_clamp01((surface_y - y) / depth_span) for _x, y in pts]
+    toe_scores = _lf_overhang_toe_scores(pts, normal_values, ions, center_x=center_x)
+    survival = [_clamp01(1.0 - max(0.0, float(survival_penalty)) * ion) for ion in ions]
+    source_field = [0.0 for _ in pts]
+    source_mass_field = [0.0 for _ in pts]
+    source_mass_by_side = {-1: 0.0, 1: 0.0}
+
+    for idx, ((x, _y), (nx, _ny), etch_a, area) in enumerate(zip(pts, normal_values, etch, areas)):
+        if etch_a <= 0.0:
+            continue
+        depth = depth_frac[idx]
+        if depth > 0.62:
+            continue
+        lateral = abs(float(nx))
+        upper_gate = 1.0 - _clamp01(depth / 0.62)
+        facet_gate = 0.25 + 0.75 * lateral
+        source_mass = max(0.0, etch_a) * max(0.0, float(area)) * upper_gate * facet_gate * max(0.20, ions[idx])
+        if source_mass <= 0.0:
+            continue
+        side = -1 if float(x) < center_x else 1
+        source_field[idx] = source_mass / max(float(area), 1e-12)
+        source_mass_field[idx] = source_mass
+        source_mass_by_side[side] += source_mass
+
+    fraction = _clamp01(float(redepo_fraction_pct) / 100.0)
+    spread_a = max(0.0, float(width_a))
+    dh_redepo = [0.0 for _ in pts]
+    target_mass = [0.0 for _ in pts]
+    transport_lines: List[TransportLineSample] = []
+    toe_indices: Dict[int, Optional[int]] = {}
+
+    for side in (-1, 1):
+        toe_indices[side] = _select_lf_overhang_toe_index(
+            pts,
+            normal_values,
+            toe_scores,
+            center_x=center_x,
+            side=side,
+        )
+
+    if fraction > 0.0 and max(source_field, default=0.0) > 0.0:
+        redepo = compute_redeposition(
+            pts,
+            normal_values,
+            source_field,
+            Model4RedepositionParams(
+                redepo_efficiency=fraction,
+                emit_power=1.0,
+                distance_power=1.0,
+                neighbor_exclusion=2,
+                max_redepo_distance=max(250.0, _profile_diagonal_a(pts)),
+                lateral_spread_a=spread_a,
+                transport_model="gapsim_binned_lobe_los",
+                ray_count=7,
+                footprint_radius_sigma=3.0,
+                max_transport_sources=80,
+                max_los_candidates_per_source=192,
+                los_candidate_weight_fraction=0.985,
+                soft_los_radius_points=0,
+            ),
+        )
+        raw_mass = [max(0.0, float(v)) for v in redepo.debug_fields.get("redepo_mass_field", [])]
+        if len(raw_mass) != n:
+            raw_mass = [
+                max(0.0, float(dh)) * max(float(area), 1e-12)
+                for dh, area in zip(redepo.dh_redepo, areas)
+            ]
+        if len(raw_mass) != n:
+            raw_mass = [0.0 for _ in pts]
+        target_mass = [
+            max(0.0, float(mass)) * max(0.0, float(survival[idx]))
+            for idx, mass in enumerate(raw_mass)
+        ]
+
+        for source_side in (-1, 1):
+            source_mass = source_mass_by_side[source_side]
+            if source_mass <= 1e-12:
+                continue
+            sx = sum(pts[idx][0] * source_mass_field[idx] for idx in range(n) if source_mass_field[idx] > 0.0 and ((pts[idx][0] < center_x) == (source_side < 0))) / source_mass
+            sy = sum(pts[idx][1] * source_mass_field[idx] for idx in range(n) if source_mass_field[idx] > 0.0 and ((pts[idx][0] < center_x) == (source_side < 0))) / source_mass
+            opposite_targets = [
+                idx
+                for idx, mass in enumerate(target_mass)
+                if mass > 0.0 and ((pts[idx][0] - center_x) * float(source_side) < 0.0)
+            ]
+            target_indices = opposite_targets or [idx for idx, mass in enumerate(target_mass) if mass > 0.0]
+            target_total = sum(target_mass[idx] for idx in target_indices)
+            if target_total <= 1e-12:
+                continue
+            tx = sum(pts[idx][0] * target_mass[idx] for idx in target_indices) / target_total
+            ty = sum(pts[idx][1] * target_mass[idx] for idx in target_indices) / target_total
+            transport_lines.append((float(sx), float(sy), float(tx), float(ty), float(target_total)))
+
+    for idx, mass in enumerate(target_mass):
+        dh_redepo[idx] = max(0.0, float(mass)) / max(float(areas[idx]), 1e-12)
+
+    debug_fields: Dict[str, Any] = {
+        "lf_source_field": [round(float(v), 6) for v in source_field],
+        "lf_toe_score_field": [round(float(v), 6) for v in toe_scores],
+        "lf_survival_field": [round(float(v), 6) for v in survival],
+        "lf_redepo_field": [round(float(v), 6) for v in dh_redepo],
+        "lf_redepo_mass_field": [round(float(v), 6) for v in target_mass],
+        "lf_transport_lines": [
+            [round(float(x1), 6), round(float(y1), 6), round(float(x2), 6), round(float(y2), 6), round(float(value), 6)]
+            for x1, y1, x2, y2, value in transport_lines
+        ],
+    }
+    summary = {
+        "lf_source_mass_left": float(source_mass_by_side[-1]),
+        "lf_source_mass_right": float(source_mass_by_side[1]),
+        "lf_total_source_mass": float(source_mass_by_side[-1] + source_mass_by_side[1]),
+        "lf_total_redepo_mass": float(sum(target_mass)),
+        "lf_redepo_fraction": float(fraction),
+        "lf_active_source_count": float(sum(1 for value in source_field if value > 0.0)),
+        "lf_active_target_count": float(sum(1 for value in target_mass if value > 0.0)),
+        "lf_transport_line_count": float(len(transport_lines)),
+        "lf_transport_model": "normal_lobe_los_survival",
+        "lf_width_a": float(spread_a),
+        "lf_toe_left_index": float(-1 if toe_indices.get(-1) is None else int(toe_indices[-1])),
+        "lf_toe_right_index": float(-1 if toe_indices.get(1) is None else int(toe_indices[1])),
+    }
+    return dh_redepo, debug_fields, summary
+
+
+def _closure_target_capture_weights(
+    points: Sequence[Point],
+    normals: Sequence[Point],
+    ion_factors: Sequence[float],
+    *,
+    shadow_gain: float,
+    survival_penalty: float,
+) -> Tuple[List[float], List[float], List[float], List[float], List[float], List[float], List[float]]:
+    pts = [(float(x), float(y)) for x, y in points]
+    n = len(pts)
+    if n == 0:
+        return [], [], [], [], [], [], []
+    normal_values = [(float(nx), float(ny)) for nx, ny in normals]
+    if len(normal_values) != n:
+        normal_values = vertex_air_normals(pts)
+    ions = [_clamp01(float(v)) for v in ion_factors]
+    if len(ions) != n:
+        ions = [1.0 for _ in pts]
+    xs = [x for x, _y in pts]
+    center_x = 0.5 * (min(xs) + max(xs))
+    surface_y = max(y for _x, y in pts)
+    depth_a = [max(0.0, float(surface_y - y)) for _x, y in pts]
+    normal_change = _normal_change_field(normal_values)
+    visibility_drop = [0.0 for _ in pts]
+
+    for side in (-1, 1):
+        side_indices = _lf_overhang_side_indices(pts, center_x, side)
+        ordered = sorted(side_indices, key=lambda idx: depth_a[idx])
+        previous_visibility = 1.0
+        for idx in ordered:
+            visibility = ions[idx]
+            visibility_drop[idx] = max(0.0, previous_visibility - visibility)
+            previous_visibility = max(visibility, previous_visibility * 0.985)
+
+    side_drop_peak = [0.0 for _ in pts]
+    side_kink_peak = [0.0 for _ in pts]
+    for side in (-1, 1):
+        side_indices = _lf_overhang_side_indices(pts, center_x, side)
+        max_drop = max((visibility_drop[idx] for idx in side_indices), default=0.0)
+        max_kink = max((normal_change[idx] for idx in side_indices), default=0.0)
+        for idx in side_indices:
+            if max_drop > 1e-9:
+                side_drop_peak[idx] = _clamp01(visibility_drop[idx] / max_drop)
+            if max_kink > 1e-9:
+                side_kink_peak[idx] = _clamp01(normal_change[idx] / max_kink)
+
+    survival = [_clamp01(1.0 - max(0.0, float(survival_penalty)) * ion) for ion in ions]
+    capture_signal: List[float] = []
+    capture_weights: List[float] = []
+    gain = max(0.0, float(shadow_gain))
+    survival_signal: List[float] = []
+    inward_wall_gate: List[float] = []
+    exposed_suppression: List[float] = []
+    for idx, ((nx, _ny), ion, drop, kink) in enumerate(
+        zip(normal_values, ions, visibility_drop, normal_change)
+    ):
+        x, _y = pts[idx]
+        lateral = abs(float(nx))
+        wall_gate = _clamp01(lateral) ** 1.35
+        side_sign = -1.0 if float(x) > center_x else 1.0
+        inward_gate = _clamp01(max(0.0, side_sign * float(nx)) / 0.18)
+        shadow_signal = max(0.0, float(side_drop_peak[idx])) ** 2.0
+        kink_signal = min(1.0, max(0.0, float(side_kink_peak[idx]))) ** 1.4
+        low_ion_survival = 1.0 - ion
+        survival_gate = _clamp01(float(survival[idx]) ** 2.2)
+        signal = max(
+            0.0,
+            inward_gate
+            * wall_gate
+            * survival_gate
+            * (
+                (0.82 * shadow_signal * (0.35 + 0.65 * kink_signal))
+                + (0.18 * kink_signal * (low_ion_survival**2.0))
+            ),
+        )
+        weight = _clamp01(signal * (0.20 + gain))
+        inward_wall_gate.append(inward_gate * wall_gate)
+        exposed_suppression.append(survival_gate)
+        survival_signal.append(low_ion_survival)
+        capture_signal.append(signal)
+        capture_weights.append(weight)
+    return (
+        capture_weights,
+        capture_signal,
+        survival,
+        visibility_drop,
+        survival_signal,
+        inward_wall_gate,
+        exposed_suppression,
+    )
+
+
+def _smooth_profile_field_by_arc(
+    points: Sequence[Point],
+    values: Sequence[float],
+    smoothing_a: float,
+) -> List[float]:
+    vals = [float(v) for v in values]
+    pts = [(float(x), float(y)) for x, y in points]
+    if len(vals) <= 2 or len(pts) != len(vals) or float(smoothing_a) <= 0.0:
+        return vals
+    distances = [
+        math.hypot(pts[idx][0] - pts[idx - 1][0], pts[idx][1] - pts[idx - 1][1])
+        for idx in range(1, len(pts))
+    ]
+    positive = [value for value in distances if value > 1e-9]
+    if not positive:
+        return vals
+    avg_ds = sum(positive) / len(positive)
+    radius = max(1, int(round(float(smoothing_a) / max(avg_ds, 1e-9))))
+    return _smooth_scalar_values(vals, radius)
+
+
+def _closure_shadow_boundary_envelope(
+    points: Sequence[Point],
+    capture_signal: Sequence[float],
+    width_a: float,
+) -> List[float]:
+    pts = [(float(x), float(y)) for x, y in points]
+    signals = [max(0.0, float(v)) for v in capture_signal]
+    n = len(pts)
+    if n == 0 or len(signals) != n:
+        return [1.0 for _ in pts]
+    xs = [x for x, _y in pts]
+    surface_y = max(y for _x, y in pts)
+    center_x = 0.5 * (min(xs) + max(xs))
+    arc = [0.0]
+    for idx in range(1, n):
+        arc.append(
+            arc[-1]
+            + math.hypot(pts[idx][0] - pts[idx - 1][0], pts[idx][1] - pts[idx - 1][1])
+        )
+    sigma = max(1.0, float(width_a) * 0.42)
+    envelope = [0.0 for _ in pts]
+    for side in (-1, 1):
+        side_indices = _lf_overhang_side_indices(pts, center_x, side)
+        if not side_indices:
+            continue
+        peak_value = max((signals[idx] for idx in side_indices), default=0.0)
+        if peak_value <= 1e-9:
+            for idx in side_indices:
+                envelope[idx] = max(envelope[idx], 1.0)
+            continue
+        significant = [
+            idx
+            for idx in side_indices
+            if signals[idx] >= max(peak_value * 0.10, 1e-9)
+        ]
+        peak_idx = min(
+            significant or side_indices,
+            key=lambda idx: (max(0.0, surface_y - pts[idx][1]), -signals[idx]),
+        )
+        peak_s = arc[peak_idx]
+        for idx in side_indices:
+            ds = abs(float(arc[idx]) - float(peak_s))
+            envelope[idx] = max(envelope[idx], math.exp(-0.5 * (ds / sigma) ** 2))
+    return [max(0.0, min(1.0, value)) for value in envelope]
+
+
+def _compute_closure_redepo_fields(
+    points: Sequence[Point],
+    normals: Sequence[Point],
+    ion_factors: Sequence[float],
+    dh_etch: Sequence[float],
+    *,
+    efficiency_pct: float,
+    shadow_gain: float,
+    width_a: float,
+    survival_penalty: float,
+    smoothing_a: float,
+) -> Tuple[List[float], Dict[str, Any], Dict[str, float]]:
+    pts = [(float(x), float(y)) for x, y in points]
+    n = len(pts)
+    if n == 0:
+        return [], {}, {}
+    normal_values = [(float(nx), float(ny)) for nx, ny in normals]
+    if len(normal_values) != n:
+        normal_values = vertex_air_normals(pts)
+    ions = [_clamp01(float(v)) for v in ion_factors]
+    if len(ions) != n:
+        ions = [1.0 for _ in pts]
+    etch = [max(0.0, float(v)) for v in dh_etch]
+    if len(etch) != n:
+        etch = [0.0 for _ in pts]
+    areas = compute_arc_weights(pts)
+    removed_mass = [
+        max(0.0, float(etch_a)) * max(0.0, float(area))
+        for etch_a, area in zip(etch, areas)
+    ]
+    total_removed_mass = float(sum(removed_mass))
+    efficiency = _clamp01(float(efficiency_pct) / 100.0)
+    budget_mass = efficiency * total_removed_mass
+    source_count = int(sum(1 for mass in removed_mass if mass > 1e-12))
+    (
+        capture_weights,
+        capture_signal,
+        survival,
+        visibility_drop,
+        low_ion_survival,
+        inward_wall_gate,
+        exposed_suppression,
+    ) = _closure_target_capture_weights(
+        pts,
+        normal_values,
+        ions,
+        shadow_gain=shadow_gain,
+        survival_penalty=survival_penalty,
+    )
+    shadow_boundary_envelope = _closure_shadow_boundary_envelope(pts, capture_signal, width_a)
+    capture_weights = [
+        _clamp01(float(weight)) * _clamp01(float(envelope))
+        for weight, envelope in zip(capture_weights, shadow_boundary_envelope)
+    ]
+    if budget_mass <= 1e-12 or source_count <= 0:
+        zeros = [0.0 for _ in pts]
+        fields = {
+            "closure_source_etch_field": [round(float(v), 6) for v in etch],
+            "closure_removed_mass_field": [round(float(v), 6) for v in removed_mass],
+            "closure_capture_field": [round(float(v), 6) for v in capture_signal],
+            "closure_shadow_boundary_envelope_field": [round(float(v), 6) for v in shadow_boundary_envelope],
+            "closure_low_ion_survival_signal_field": [round(float(v), 6) for v in low_ion_survival],
+            "closure_inward_wall_gate_field": [round(float(v), 6) for v in inward_wall_gate],
+            "closure_exposed_suppression_field": [round(float(v), 6) for v in exposed_suppression],
+            "closure_survival_field": [round(float(v), 6) for v in survival],
+            "closure_visibility_drop_field": [round(float(v), 6) for v in visibility_drop],
+            "closure_weighted_redepo_mass_raw_field": [0.0 for _ in pts],
+            "closure_weighted_redepo_mass_smoothed_field": [0.0 for _ in pts],
+            "closure_redepo_field": [0.0 for _ in pts],
+            "closure_redepo_mass_field": [0.0 for _ in pts],
+            "closure_transport_lines": [],
+        }
+        summary = {
+            "closure_total_removed_mass": total_removed_mass,
+            "closure_budget_mass": budget_mass,
+            "closure_total_redepo_mass": 0.0,
+            "closure_efficiency": efficiency,
+            "closure_active_source_count": float(source_count),
+            "closure_active_target_count": 0.0,
+            "closure_smoothing_a": float(smoothing_a),
+            "closure_transport_horizon_a": float(_closure_transport_horizon_a(pts, width_a)),
+            "closure_transport_model": "all_etch_sources_first_hit_normal_lobe_survival",
+        }
+        return zeros, fields, summary
+
+    redepo = compute_redeposition(
+        pts,
+        normal_values,
+        etch,
+        Model4RedepositionParams(
+            redepo_efficiency=efficiency,
+            emit_power=1.0,
+            distance_power=2.0,
+            neighbor_exclusion=2,
+            max_redepo_distance=_closure_transport_horizon_a(pts, width_a),
+            lateral_spread_a=max(0.0, float(width_a)),
+            transport_model="fast_first_hit_cone",
+            ray_count=7,
+            footprint_radius_sigma=3.0,
+            max_transport_sources=128,
+            max_los_candidates_per_source=224,
+            los_candidate_weight_fraction=0.990,
+            soft_los_radius_points=0,
+            emission_axis_model="normal_reflection_mix",
+        ),
+    )
+    raw_target_mass = [max(0.0, float(v)) for v in redepo.debug_fields.get("redepo_mass_field", [])]
+    if len(raw_target_mass) != n:
+        raw_target_mass = [
+            max(0.0, float(dh)) * max(float(area), 1e-12)
+            for dh, area in zip(redepo.dh_redepo, areas)
+        ]
+    if len(raw_target_mass) != n:
+        raw_target_mass = [0.0 for _ in pts]
+    weighted_target_mass_raw = [
+        max(0.0, float(mass)) * max(0.0, float(weight))
+        for mass, weight in zip(raw_target_mass, capture_weights)
+    ]
+    weighted_target_mass = list(weighted_target_mass_raw)
+    if float(smoothing_a) > 0.0:
+        weighted_target_mass = _smooth_profile_field_by_arc(pts, weighted_target_mass, float(smoothing_a))
+        weighted_target_mass = [
+            max(0.0, float(mass)) * _clamp01(float(weight))
+            for mass, weight in zip(weighted_target_mass, capture_weights)
+        ]
+    weighted_total = float(sum(weighted_target_mass))
+    max_capture_weight = max((_clamp01(float(v)) for v in capture_weights), default=0.0)
+    retained_budget_mass = min(budget_mass, budget_mass * (max_capture_weight ** 0.85))
+    if weighted_total > 1e-12 and retained_budget_mass > 1e-12:
+        scale = retained_budget_mass / weighted_total
+        target_mass = [max(0.0, float(mass)) * scale for mass in weighted_target_mass]
+    else:
+        target_mass = [0.0 for _ in pts]
+    target_total = float(sum(target_mass))
+    total_redepo_mass = min(target_total, budget_mass)
+    if target_total > total_redepo_mass + 1e-12 and target_total > 1e-12:
+        correction = total_redepo_mass / target_total
+        target_mass = [float(mass) * correction for mass in target_mass]
+    dh_redepo = [
+        max(0.0, float(mass)) / max(float(area), 1e-12)
+        for mass, area in zip(target_mass, areas)
+    ]
+
+    xs = [x for x, _y in pts]
+    center_x = 0.5 * (min(xs) + max(xs))
+    transport_lines: List[TransportLineSample] = []
+    for side in (-1, 1):
+        source_indices = [
+            idx
+            for idx, mass in enumerate(removed_mass)
+            if mass > 1e-12 and ((pts[idx][0] - center_x) * float(side) >= 0.0)
+        ]
+        if not source_indices:
+            continue
+        source_mass = sum(removed_mass[idx] for idx in source_indices)
+        if source_mass <= 1e-12:
+            continue
+        sx = sum(pts[idx][0] * removed_mass[idx] for idx in source_indices) / source_mass
+        sy = sum(pts[idx][1] * removed_mass[idx] for idx in source_indices) / source_mass
+        target_indices = [
+            idx
+            for idx, mass in enumerate(target_mass)
+            if mass > 1e-12 and ((pts[idx][0] - center_x) * float(side) < 0.0)
+        ]
+        if not target_indices:
+            target_indices = [idx for idx, mass in enumerate(target_mass) if mass > 1e-12]
+        target_total = sum(target_mass[idx] for idx in target_indices)
+        if target_total <= 1e-12:
+            continue
+        tx = sum(pts[idx][0] * target_mass[idx] for idx in target_indices) / target_total
+        ty = sum(pts[idx][1] * target_mass[idx] for idx in target_indices) / target_total
+        transport_lines.append((float(sx), float(sy), float(tx), float(ty), float(target_total)))
+
+    fields = {
+        "closure_source_etch_field": [round(float(v), 6) for v in etch],
+        "closure_removed_mass_field": [round(float(v), 6) for v in removed_mass],
+        "closure_raw_redepo_mass_field": [round(float(v), 6) for v in raw_target_mass],
+        "closure_capture_field": [round(float(v), 6) for v in capture_signal],
+        "closure_capture_weight_field": [round(float(v), 6) for v in capture_weights],
+        "closure_shadow_boundary_envelope_field": [round(float(v), 6) for v in shadow_boundary_envelope],
+        "closure_low_ion_survival_signal_field": [round(float(v), 6) for v in low_ion_survival],
+        "closure_inward_wall_gate_field": [round(float(v), 6) for v in inward_wall_gate],
+        "closure_exposed_suppression_field": [round(float(v), 6) for v in exposed_suppression],
+        "closure_survival_field": [round(float(v), 6) for v in survival],
+        "closure_visibility_drop_field": [round(float(v), 6) for v in visibility_drop],
+        "closure_weighted_redepo_mass_raw_field": [round(float(v), 6) for v in weighted_target_mass_raw],
+        "closure_weighted_redepo_mass_smoothed_field": [round(float(v), 6) for v in weighted_target_mass],
+        "closure_redepo_field": [round(float(v), 6) for v in dh_redepo],
+        "closure_redepo_mass_field": [round(float(v), 6) for v in target_mass],
+        "closure_ion_factor_field": [round(float(v), 6) for v in ions],
+        "closure_transport_lines": [
+            [round(float(x1), 6), round(float(y1), 6), round(float(x2), 6), round(float(y2), 6), round(float(value), 6)]
+            for x1, y1, x2, y2, value in transport_lines
+        ],
+    }
+    summary = {
+        "closure_total_removed_mass": total_removed_mass,
+        "closure_budget_mass": budget_mass,
+        "closure_total_redepo_mass": float(sum(target_mass)),
+        "closure_retained_budget_mass": float(retained_budget_mass),
+        "closure_max_capture_weight": float(max_capture_weight),
+        "closure_efficiency": efficiency,
+        "closure_active_source_count": float(source_count),
+        "closure_active_target_count": float(sum(1 for mass in target_mass if mass > 1e-12)),
+        "closure_shadow_gain": float(shadow_gain),
+        "closure_survival_penalty": float(survival_penalty),
+        "closure_width_a": float(width_a),
+        "closure_smoothing_a": float(smoothing_a),
+        "closure_transport_horizon_a": float(_closure_transport_horizon_a(pts, width_a)),
+        "closure_transport_model": "all_etch_sources_first_hit_normal_lobe_survival",
+    }
+    return dh_redepo, fields, summary
+
+
+def _apply_model8_closure_redepo_step(
+    state: SimulationState,
+    *,
+    deposition_a: float,
+    sputter_strength_a: float,
+    sputter_peak_pct: float,
+    sputter_peak_angle_deg: float,
+    sputter_width_deg: float,
+    sputter_smoothing_a: float,
+    reparam_ds_a: float,
+    ion_transmission_enabled: bool,
+    ion_transmission_override: Optional[float],
+    ion_transmission_start_depth_pct: float,
+    ion_transmission_end_depth_pct: float,
+    ion_transmission_decay_strength_pct: float,
+    ion_transmission_floor_pct: float,
+    ion_transmission_curve_power: float,
+    ion_transmission_aperture_shadow_pct: float,
+    ion_transmission_lateral_shadow_pct: float,
+    ion_transmission_edge_shadow_pct: float,
+    closure_redepo_efficiency_pct: float,
+    closure_redepo_shadow_gain: float,
+    closure_redepo_width_a: float,
+    closure_redepo_survival_penalty: float,
+    closure_redepo_smoothing_a: float,
+    closure_threshold_a: float,
+    include_model4_redepo: bool = False,
+    redepo_efficiency_pct: float = 0.0,
+    redepo_emit_power: float = 1.0,
+    redepo_distance_power: float = 1.0,
+    redepo_neighbor_exclusion: int = 2,
+    redepo_max_distance_a: float = 1800.0,
+    redepo_soft_los_radius_points: int = 0,
+    redepo_transport_model: str = "gapsim_binned_lobe_los",
+    redepo_ray_count: int = 7,
+    redepo_footprint_sigma_a: float = 55.0,
+    redepo_footprint_radius_sigma: float = 3.0,
+    include_lf_overhang: bool = False,
+    lf_overhang_dose: float = 1.0,
+    lf_overhang_sputter_gain: float = 1.0,
+    lf_overhang_redepo_fraction_pct: float = 30.0,
+    lf_overhang_survival_penalty: float = 0.75,
+    lf_overhang_width_a: float = 180.0,
+) -> Tuple[List[float], List[float], float]:
+    if (
+        float(closure_redepo_efficiency_pct) <= 0.0
+        and not include_model4_redepo
+        and not include_lf_overhang
+    ):
+        angles, responses, etch_clamp_a = _apply_direct_sputter_step(
+            state,
+            deposition_a=deposition_a,
+            sputter_strength_a=sputter_strength_a,
+            sputter_peak_pct=sputter_peak_pct,
+            sputter_peak_angle_deg=sputter_peak_angle_deg,
+            sputter_width_deg=sputter_width_deg,
+            sputter_smoothing_a=sputter_smoothing_a,
+            reparam_ds_a=reparam_ds_a,
+            ion_transmission_enabled=ion_transmission_enabled,
+            ion_transmission_override=ion_transmission_override,
+            ion_transmission_start_depth_pct=ion_transmission_start_depth_pct,
+            ion_transmission_end_depth_pct=ion_transmission_end_depth_pct,
+            ion_transmission_decay_strength_pct=ion_transmission_decay_strength_pct,
+            ion_transmission_floor_pct=ion_transmission_floor_pct,
+            ion_transmission_curve_power=ion_transmission_curve_power,
+            ion_transmission_aperture_shadow_pct=ion_transmission_aperture_shadow_pct,
+            ion_transmission_lateral_shadow_pct=ion_transmission_lateral_shadow_pct,
+            ion_transmission_edge_shadow_pct=ion_transmission_edge_shadow_pct,
+            reflected_ion_enabled=False,
+            reflected_ion_strength_pct=0.0,
+        )
+        fields = dict(state.meta.get("direct_sputter_debug_fields_last", {}))
+        x_values = list(fields.get("x", []))
+        zeros = [0.0 for _ in x_values]
+        fields["closure_source_etch_field"] = list(fields.get("sputter_effective_field", zeros))
+        fields["closure_redepo_field"] = zeros
+        fields["closure_capture_field"] = zeros
+        state.meta["model8_closure_redepo_debug_fields_last"] = fields
+        state.meta["model8_closure_redepo_debug_summary_last"] = {
+            "closure_total_removed_mass": float(state.meta.get("direct_sputter_total_last", 0.0) or 0.0),
+            "closure_budget_mass": 0.0,
+            "closure_total_redepo_mass": 0.0,
+            "closure_efficiency": 0.0,
+            "closure_active_source_count": float(sum(1 for value in fields.get("closure_source_etch_field", []) if float(value) > 0.0)),
+            "closure_active_target_count": 0.0,
+            "closure_transport_model": "off",
+        }
+        state.meta["model8_closure_redepo_total_removed_mass_last"] = float(
+            state.meta.get("direct_sputter_total_last", 0.0) or 0.0
+        )
+        state.meta["model8_closure_redepo_total_mass_last"] = 0.0
+        state.meta["model8_closure_redepo_active_source_count_last"] = int(
+            state.meta["model8_closure_redepo_debug_summary_last"]["closure_active_source_count"]
+        )
+        state.meta["model8_closure_redepo_active_target_count_last"] = 0
+        return angles, responses, etch_clamp_a
+
+    source_state = _clone_simulation_state(state)
+    angles, responses, etch_clamp_a = _apply_direct_sputter_step(
+        source_state,
+        deposition_a=deposition_a,
+        sputter_strength_a=sputter_strength_a,
+        sputter_peak_pct=sputter_peak_pct,
+        sputter_peak_angle_deg=sputter_peak_angle_deg,
+        sputter_width_deg=sputter_width_deg,
+        sputter_smoothing_a=sputter_smoothing_a,
+        reparam_ds_a=reparam_ds_a,
+        ion_transmission_enabled=ion_transmission_enabled,
+        ion_transmission_override=ion_transmission_override,
+        ion_transmission_start_depth_pct=ion_transmission_start_depth_pct,
+        ion_transmission_end_depth_pct=ion_transmission_end_depth_pct,
+        ion_transmission_decay_strength_pct=ion_transmission_decay_strength_pct,
+        ion_transmission_floor_pct=ion_transmission_floor_pct,
+        ion_transmission_curve_power=ion_transmission_curve_power,
+        ion_transmission_aperture_shadow_pct=ion_transmission_aperture_shadow_pct,
+        ion_transmission_lateral_shadow_pct=ion_transmission_lateral_shadow_pct,
+        ion_transmission_edge_shadow_pct=ion_transmission_edge_shadow_pct,
+        reflected_ion_enabled=False,
+        reflected_ion_strength_pct=0.0,
+    )
+    source_fields = dict(source_state.meta.get("direct_sputter_debug_fields_last", {}))
+
+    grown_solid = OffsetBoolean.grow_solid_external_air_limited(state, dr_ref=deposition_a)
+    grown_surface = _extract_surface_from_solid(state, grown_solid, state.surface.points)
+    grown_surface = equal_arc_resample(grown_surface, reparam_ds_a)
+    if not grown_surface:
+        state.surface.points = [(float(x), float(y)) for x, y in source_state.surface.points]
+        state.solid_paths_i = [list(path) for path in source_state.solid_paths_i]
+        state.meta.update(source_state.meta)
+        return angles, responses, etch_clamp_a
+
+    smooth_radius = max(0, int(round(float(sputter_smoothing_a) / max(float(reparam_ds_a), 1e-9))))
+    normals = _smooth_unit_vectors(vertex_air_normals(grown_surface), smooth_radius)
+    dh_etch = [max(0.0, float(v)) for v in source_fields.get("sputter_effective_field", [])]
+    if len(dh_etch) != len(grown_surface):
+        dh_etch = [0.0 for _ in grown_surface]
+    closure_ion_factors = compute_ion_transmission_factors(
+        grown_surface,
+        enabled=True,
+        override=ion_transmission_override,
+        start_depth_pct=ion_transmission_start_depth_pct,
+        end_depth_pct=ion_transmission_end_depth_pct,
+        decay_strength_pct=ion_transmission_decay_strength_pct,
+        floor_pct=ion_transmission_floor_pct,
+        curve_power=ion_transmission_curve_power,
+        aperture_shadow_pct=ion_transmission_aperture_shadow_pct,
+        lateral_shadow_pct=ion_transmission_lateral_shadow_pct,
+        edge_shadow_pct=ion_transmission_edge_shadow_pct,
+        reparam_ds_a=reparam_ds_a,
+    )
+    dh_redepo, closure_fields, closure_summary = _compute_closure_redepo_fields(
+        grown_surface,
+        normals,
+        closure_ion_factors,
+        dh_etch,
+        efficiency_pct=closure_redepo_efficiency_pct,
+        shadow_gain=closure_redepo_shadow_gain,
+        width_a=closure_redepo_width_a,
+        survival_penalty=closure_redepo_survival_penalty,
+        smoothing_a=closure_redepo_smoothing_a,
+    )
+    dh_model4_redepo = [0.0 for _ in grown_surface]
+    model4_summary: Dict[str, Any] = {}
+    model4_fields: Dict[str, Any] = {}
+    if include_model4_redepo and redepo_efficiency_pct > 0.0 and max(dh_etch, default=0.0) > 0.0:
+        redepo = compute_redeposition(
+            grown_surface,
+            normals,
+            dh_etch,
+            Model4RedepositionParams(
+                redepo_efficiency=max(0.0, min(100.0, float(redepo_efficiency_pct))) / 100.0,
+                emit_power=max(0.0, float(redepo_emit_power)),
+                distance_power=max(0.0, float(redepo_distance_power)),
+                neighbor_exclusion=max(0, int(redepo_neighbor_exclusion)),
+                max_redepo_distance=max(0.0, float(redepo_max_distance_a)),
+                lateral_spread_a=max(0.0, float(redepo_footprint_sigma_a)),
+                transport_model=str(redepo_transport_model or "gapsim_binned_lobe_los"),
+                ray_count=max(3, int(redepo_ray_count)),
+                footprint_radius_sigma=max(1.0, float(redepo_footprint_radius_sigma)),
+                soft_los_radius_points=max(0, int(redepo_soft_los_radius_points)),
+            ),
+        )
+        if len(redepo.dh_redepo) == len(grown_surface):
+            dh_model4_redepo = [max(0.0, float(v)) for v in redepo.dh_redepo]
+        model4_summary = dict(redepo.debug_summary)
+        model4_fields = dict(redepo.debug_fields)
+
+    dh_lf_redepo = [0.0 for _ in grown_surface]
+    lf_fields: Dict[str, Any] = {}
+    lf_summary: Dict[str, float] = {}
+    lf_dose_scale = max(0.0, float(lf_overhang_dose)) * max(0.0, float(lf_overhang_sputter_gain))
+    if include_lf_overhang and lf_dose_scale > 1e-12 and max(dh_etch, default=0.0) > 0.0:
+        max_etch_a = max(float(deposition_a) * 2.0, float(reparam_ds_a) * 4.0)
+        lf_source_etch = [
+            min(max_etch_a, max(0.0, float(value)) * lf_dose_scale)
+            for value in dh_etch
+        ]
+        dh_lf_redepo, lf_fields, lf_summary = _compute_lf_overhang_proxy_fields(
+            grown_surface,
+            normals,
+            closure_ion_factors,
+            lf_source_etch,
+            redepo_fraction_pct=lf_overhang_redepo_fraction_pct,
+            survival_penalty=lf_overhang_survival_penalty,
+            width_a=lf_overhang_width_a,
+        )
+    dh_total_redepo = [
+        max(0.0, float(closure_v)) + max(0.0, float(model4_v)) + max(0.0, float(lf_v))
+        for closure_v, model4_v, lf_v in zip(dh_redepo, dh_model4_redepo, dh_lf_redepo)
+    ]
+    profile_delta = [
+        max(0.0, float(redepo_a)) - max(0.0, float(etch_a))
+        for redepo_a, etch_a in zip(dh_total_redepo, dh_etch)
+    ]
+    proposed: List[Point] = []
+    has_negative_net = False
+    for idx, (x, y) in enumerate(grown_surface):
+        nx, ny = normals[idx] if idx < len(normals) else (0.0, 1.0)
+        move_delta = float(profile_delta[idx]) if idx < len(profile_delta) else 0.0
+        if float(deposition_a) + move_delta < 0.0:
+            has_negative_net = True
+        x2 = float(x + move_delta * nx)
+        y2 = float(y + move_delta * ny)
+        if idx == 0 or idx == (len(grown_surface) - 1):
+            x2 = float(x)
+        proposed.append((x2, y2))
+
+    clean_surface, clean_solid = TopologyCleanup().cleanup(
+        proposed,
+        state,
+        solid_ref_paths_i=grown_solid,
+        solid_merge_mode=("candidate" if has_negative_net else "union"),
+    )
+    state.surface.points = equal_arc_resample(clean_surface, reparam_ds_a)
+    if clean_solid:
+        state.solid_paths_i = clean_solid
+
+    fields = dict(source_fields)
+    fields["x"] = [round(float(x), 6) for x, _y in grown_surface]
+    fields["y"] = [round(float(y), 6) for _x, y in grown_surface]
+    fields["depo_field"] = [round(float(deposition_a), 6) for _ in grown_surface]
+    fields["sputter_effective_field"] = [round(float(v), 6) for v in dh_etch]
+    fields["direct_sputter_field"] = [round(float(v), 6) for v in dh_etch]
+    fields["redepo_field"] = [round(float(v), 6) for v in dh_total_redepo]
+    fields["model4_redepo_field"] = [round(float(v), 6) for v in dh_model4_redepo]
+    fields["lf_overhang_redepo_field"] = [round(float(v), 6) for v in dh_lf_redepo]
+    fields["redepo_source_etch_field"] = [round(float(v), 6) for v in dh_etch]
+    fields["profile_delta_field"] = [round(float(v), 6) for v in profile_delta]
+    fields["total_etch_field"] = [round(max(0.0, float(e) - float(r)), 6) for e, r in zip(dh_etch, dh_total_redepo)]
+    fields["net_growth_field"] = [round(float(deposition_a) + float(delta), 6) for delta in profile_delta]
+    fields.update(closure_fields)
+    fields.update(lf_fields)
+    if model4_fields:
+        fields["model4_redepo_mass_field"] = list(model4_fields.get("redepo_mass_field", []))
+        fields["model4_removed_mass_field"] = list(model4_fields.get("removed_mass_field", []))
+
+    summary = dict(source_state.meta.get("direct_sputter_debug_summary_last", {}))
+    summary["closure_redepo"] = dict(closure_summary)
+    if model4_summary:
+        summary["redepo"] = model4_summary
+    if lf_summary:
+        summary["lf_overhang"] = dict(lf_summary)
+    summary["total_etch"] = _field_summary_by_depth(grown_surface, [max(0.0, e - r) for e, r in zip(dh_etch, dh_total_redepo)])
+    summary["net_growth"] = _field_summary_by_depth(
+        grown_surface,
+        [float(deposition_a) + float(delta) for delta in profile_delta],
+    )
+    probe = detect_depth_deposition_closure(
+        state.surface.points,
+        closure_threshold_a=max(0.0, float(closure_threshold_a)),
+        reparam_ds_a=reparam_ds_a,
+    )
+    summary["closure_probe"] = dict(probe)
+    state.meta["direct_sputter_debug_fields_last"] = fields
+    state.meta["direct_sputter_debug_summary_last"] = summary
+    state.meta["model8_closure_redepo_debug_fields_last"] = fields
+    state.meta["model8_closure_redepo_debug_summary_last"] = summary
+    state.meta["model8_closure_redepo_total_removed_mass_last"] = float(
+        closure_summary.get("closure_total_removed_mass", 0.0)
+    )
+    state.meta["model8_closure_redepo_total_mass_last"] = float(
+        closure_summary.get("closure_total_redepo_mass", 0.0)
+    )
+    state.meta["model8_closure_redepo_active_source_count_last"] = int(
+        closure_summary.get("closure_active_source_count", 0.0)
+    )
+    state.meta["model8_closure_redepo_active_target_count_last"] = int(
+        closure_summary.get("closure_active_target_count", 0.0)
+    )
+    state.meta["model8_closure_redepo_closure_probe_last"] = probe
+    if include_model4_redepo:
+        model4_total_mass = sum(
+            max(0.0, float(v)) * max(0.0, float(a))
+            for v, a in zip(dh_model4_redepo, compute_arc_weights(grown_surface))
+        )
+        state.meta["model4_redepo_debug_fields_last"] = fields
+        state.meta["model4_redepo_debug_summary_last"] = summary
+        state.meta["model4_redepo_total_removed_mass_last"] = float(
+            closure_summary.get("closure_total_removed_mass", 0.0)
+        )
+        state.meta["model4_redepo_total_mass_last"] = float(model4_total_mass)
+        state.meta["model4_redepo_active_source_count_last"] = int(
+            model4_summary.get("active_source_count", 0) or 0
+        )
+        state.meta["model4_redepo_transport_model_last"] = str(
+            model4_summary.get("transport_model", redepo_transport_model)
+        )
+    if include_lf_overhang:
+        lf_total_mass = sum(
+            max(0.0, float(v)) * max(0.0, float(a))
+            for v, a in zip(dh_lf_redepo, compute_arc_weights(grown_surface))
+        )
+        state.meta["model7_lf_overhang_debug_fields_last"] = fields
+        state.meta["model7_lf_overhang_debug_summary_last"] = summary
+        state.meta["model7_lf_overhang_total_removed_mass_last"] = float(
+            closure_summary.get("closure_total_removed_mass", 0.0)
+        )
+        state.meta["model7_lf_overhang_total_redepo_mass_last"] = float(lf_total_mass)
+        state.meta["model7_lf_overhang_active_source_count_last"] = int(
+            lf_summary.get("lf_active_source_count", 0.0)
+        )
+        state.meta["model7_lf_overhang_active_target_count_last"] = int(
+            lf_summary.get("lf_active_target_count", 0.0)
+        )
+    state.meta["direct_sputter_total_last"] = float(sum(dh_etch))
+    return angles, responses, etch_clamp_a
+
+
+def _apply_model7_lf_overhang_step(
+    state: SimulationState,
+    *,
+    deposition_a: float,
+    sputter_strength_a: float,
+    sputter_peak_pct: float,
+    sputter_peak_angle_deg: float,
+    sputter_width_deg: float,
+    sputter_smoothing_a: float,
+    reparam_ds_a: float,
+    ion_transmission_enabled: bool,
+    ion_transmission_override: Optional[float],
+    ion_transmission_start_depth_pct: float,
+    ion_transmission_end_depth_pct: float,
+    ion_transmission_decay_strength_pct: float,
+    ion_transmission_floor_pct: float,
+    ion_transmission_curve_power: float,
+    ion_transmission_aperture_shadow_pct: float,
+    ion_transmission_lateral_shadow_pct: float,
+    ion_transmission_edge_shadow_pct: float,
+    lf_overhang_dose: float,
+    lf_overhang_sputter_gain: float,
+    lf_overhang_redepo_fraction_pct: float,
+    lf_overhang_survival_penalty: float,
+    lf_overhang_width_a: float,
+    include_model4_redepo: bool = False,
+    redepo_source_model: str = "model2",
+    redepo_efficiency_pct: float = 0.0,
+    redepo_emit_power: float = 1.0,
+    redepo_distance_power: float = 1.0,
+    redepo_neighbor_exclusion: int = 2,
+    redepo_max_distance_a: float = 1800.0,
+    redepo_soft_los_radius_points: int = 0,
+    redepo_transport_model: str = "gapsim_binned_lobe_los",
+    redepo_ray_count: int = 7,
+    redepo_footprint_sigma_a: float = 55.0,
+    redepo_footprint_radius_sigma: float = 3.0,
+) -> Tuple[List[float], List[float], float]:
+    source_state = _clone_simulation_state(state)
+    angles, responses, etch_clamp_a = _apply_direct_sputter_step(
+        source_state,
+        deposition_a=deposition_a,
+        sputter_strength_a=sputter_strength_a,
+        sputter_peak_pct=sputter_peak_pct,
+        sputter_peak_angle_deg=sputter_peak_angle_deg,
+        sputter_width_deg=sputter_width_deg,
+        sputter_smoothing_a=sputter_smoothing_a,
+        reparam_ds_a=reparam_ds_a,
+        ion_transmission_enabled=ion_transmission_enabled,
+        ion_transmission_override=ion_transmission_override,
+        ion_transmission_start_depth_pct=ion_transmission_start_depth_pct,
+        ion_transmission_end_depth_pct=ion_transmission_end_depth_pct,
+        ion_transmission_decay_strength_pct=ion_transmission_decay_strength_pct,
+        ion_transmission_floor_pct=ion_transmission_floor_pct,
+        ion_transmission_curve_power=ion_transmission_curve_power,
+        ion_transmission_aperture_shadow_pct=ion_transmission_aperture_shadow_pct,
+        ion_transmission_lateral_shadow_pct=ion_transmission_lateral_shadow_pct,
+        ion_transmission_edge_shadow_pct=ion_transmission_edge_shadow_pct,
+        reflected_ion_enabled=False,
+        reflected_ion_strength_pct=0.0,
+    )
+    source_fields = dict(source_state.meta.get("direct_sputter_debug_fields_last", {}))
+
+    grown_solid = OffsetBoolean.grow_solid_external_air_limited(state, dr_ref=deposition_a)
+    grown_surface = _extract_surface_from_solid(state, grown_solid, state.surface.points)
+    grown_surface = equal_arc_resample(grown_surface, reparam_ds_a)
+    if not grown_surface:
+        state.surface.points = [(float(x), float(y)) for x, y in source_state.surface.points]
+        state.solid_paths_i = [list(path) for path in source_state.solid_paths_i]
+        state.meta.update(source_state.meta)
+        return angles, responses, etch_clamp_a
+
+    dose_scale = max(0.0, float(lf_overhang_dose)) * max(0.0, float(lf_overhang_sputter_gain))
+    if dose_scale <= 1e-12:
+        ion_factors = [_clamp01(float(v)) for v in source_fields.get("ion_factor_field", [])]
+        if len(ion_factors) != len(grown_surface):
+            ion_factors = [1.0 for _ in grown_surface]
+        zeros = [0.0 for _ in grown_surface]
+        fields = _debug_field_payload(
+            grown_surface,
+            deposition_a=deposition_a,
+            sputter_raw=zeros,
+            ion_factors=ion_factors,
+            sputter_effective=zeros,
+        )
+        fields["redepo_field"] = [0.0 for _ in grown_surface]
+        fields["redepo_source_etch_field"] = [0.0 for _ in grown_surface]
+        state.surface.points = grown_surface
+        if grown_solid:
+            state.solid_paths_i = grown_solid
+        summary = {
+            "ion_factor": _field_summary_by_depth(grown_surface, ion_factors),
+            "sputter_raw": _field_summary_by_depth(grown_surface, zeros),
+            "sputter_effective": _field_summary_by_depth(grown_surface, zeros),
+            "lf_overhang": {
+                "lf_total_source_mass": 0.0,
+                "lf_total_redepo_mass": 0.0,
+                "lf_redepo_fraction": _clamp01(float(lf_overhang_redepo_fraction_pct) / 100.0),
+                "lf_active_source_count": 0.0,
+                "lf_active_target_count": 0.0,
+                "lf_width_a": float(lf_overhang_width_a),
+            },
+            "total_etch": _field_summary_by_depth(grown_surface, zeros),
+            "net_growth": _field_summary_by_depth(grown_surface, [float(deposition_a) for _ in grown_surface]),
+        }
+        state.meta["direct_sputter_debug_fields_last"] = fields
+        state.meta["direct_sputter_debug_summary_last"] = summary
+        state.meta["model7_lf_overhang_debug_fields_last"] = fields
+        state.meta["model7_lf_overhang_debug_summary_last"] = summary
+        state.meta["model7_lf_overhang_total_removed_mass_last"] = 0.0
+        state.meta["model7_lf_overhang_total_redepo_mass_last"] = 0.0
+        state.meta["model7_lf_overhang_active_source_count_last"] = 0
+        state.meta["model7_lf_overhang_active_target_count_last"] = 0
+        state.meta["direct_sputter_total_last"] = 0.0
+        return angles, responses, etch_clamp_a
+
+    smooth_radius = max(0, int(round(float(sputter_smoothing_a) / max(float(reparam_ds_a), 1e-9))))
+    normals = _smooth_unit_vectors(vertex_air_normals(grown_surface), smooth_radius)
+    source_etch = [max(0.0, float(v)) for v in source_fields.get("sputter_effective_field", [])]
+    if len(source_etch) != len(grown_surface):
+        source_etch = [0.0 for _ in grown_surface]
+    ion_factors = [_clamp01(float(v)) for v in source_fields.get("ion_factor_field", [])]
+    if len(ion_factors) != len(grown_surface):
+        ion_factors = compute_ion_transmission_factors(
+            grown_surface,
+            enabled=ion_transmission_enabled,
+            override=ion_transmission_override,
+            start_depth_pct=ion_transmission_start_depth_pct,
+            end_depth_pct=ion_transmission_end_depth_pct,
+            decay_strength_pct=ion_transmission_decay_strength_pct,
+            floor_pct=ion_transmission_floor_pct,
+            curve_power=ion_transmission_curve_power,
+            aperture_shadow_pct=ion_transmission_aperture_shadow_pct,
+            lateral_shadow_pct=ion_transmission_lateral_shadow_pct,
+            edge_shadow_pct=ion_transmission_edge_shadow_pct,
+            reparam_ds_a=reparam_ds_a,
+        )
+
+    max_etch_a = max(float(deposition_a) * 2.0, float(reparam_ds_a) * 4.0)
+    dh_etch = [
+        min(max_etch_a, max(0.0, float(value) * dose_scale))
+        for value in source_etch
+    ]
+    dh_lf_redepo, lf_fields, lf_summary = _compute_lf_overhang_proxy_fields(
+        grown_surface,
+        normals,
+        ion_factors,
+        dh_etch,
+        redepo_fraction_pct=lf_overhang_redepo_fraction_pct,
+        survival_penalty=lf_overhang_survival_penalty,
+        width_a=lf_overhang_width_a,
+    )
+    dh_model4_redepo = [0.0 for _ in grown_surface]
+    model4_summary: Dict[str, Any] = {}
+    model4_fields: Dict[str, Any] = {}
+    if include_model4_redepo and redepo_efficiency_pct > 0.0 and max(dh_etch, default=0.0) > 0.0:
+        redepo = compute_redeposition(
+            grown_surface,
+            normals,
+            dh_etch,
+            Model4RedepositionParams(
+                redepo_efficiency=max(0.0, min(100.0, float(redepo_efficiency_pct))) / 100.0,
+                emit_power=max(0.0, float(redepo_emit_power)),
+                distance_power=max(0.0, float(redepo_distance_power)),
+                neighbor_exclusion=max(0, int(redepo_neighbor_exclusion)),
+                max_redepo_distance=max(0.0, float(redepo_max_distance_a)),
+                lateral_spread_a=max(0.0, float(redepo_footprint_sigma_a)),
+                transport_model=str(redepo_transport_model or "gapsim_binned_lobe_los"),
+                ray_count=max(3, int(redepo_ray_count)),
+                footprint_radius_sigma=max(1.0, float(redepo_footprint_radius_sigma)),
+                soft_los_radius_points=max(0, int(redepo_soft_los_radius_points)),
+            ),
+        )
+        if len(redepo.dh_redepo) == len(grown_surface):
+            dh_model4_redepo = [max(0.0, float(v)) for v in redepo.dh_redepo]
+        model4_summary = dict(redepo.debug_summary)
+        model4_fields = dict(redepo.debug_fields)
+
+    dh_total_redepo = [
+        max(0.0, float(model4_v)) + max(0.0, float(lf_v))
+        for model4_v, lf_v in zip(dh_model4_redepo, dh_lf_redepo)
+    ]
+    profile_delta = [
+        max(0.0, float(redepo_a)) - max(0.0, float(etch_a))
+        for redepo_a, etch_a in zip(dh_total_redepo, dh_etch)
+    ]
+
+    proposed: List[Point] = []
+    has_negative_net = False
+    for idx, (x, y) in enumerate(grown_surface):
+        nx, ny = normals[idx] if idx < len(normals) else (0.0, 1.0)
+        move_delta = float(profile_delta[idx]) if idx < len(profile_delta) else 0.0
+        if float(deposition_a) + move_delta < 0.0:
+            has_negative_net = True
+        x2 = float(x + move_delta * nx)
+        y2 = float(y + move_delta * ny)
+        if idx == 0 or idx == (len(grown_surface) - 1):
+            x2 = float(x)
+        proposed.append((x2, y2))
+
+    clean_surface, clean_solid = TopologyCleanup().cleanup(
+        proposed,
+        state,
+        solid_ref_paths_i=grown_solid,
+        solid_merge_mode=("candidate" if has_negative_net else "union"),
+    )
+    state.surface.points = equal_arc_resample(clean_surface, reparam_ds_a)
+    if clean_solid:
+        state.solid_paths_i = clean_solid
+
+    total_removed_mass = sum(
+        max(0.0, float(etch_a)) * max(0.0, float(area))
+        for etch_a, area in zip(dh_etch, compute_arc_weights(grown_surface))
+    )
+    total_redepo_mass = sum(
+        max(0.0, float(redepo_a)) * max(0.0, float(area))
+        for redepo_a, area in zip(dh_total_redepo, compute_arc_weights(grown_surface))
+    )
+    fields = dict(source_fields)
+    fields["x"] = [round(float(x), 6) for x, _y in grown_surface]
+    fields["y"] = [round(float(y), 6) for _x, y in grown_surface]
+    fields["depo_field"] = [round(float(deposition_a), 6) for _ in grown_surface]
+    fields["sputter_effective_field"] = [round(float(v), 6) for v in dh_etch]
+    fields["direct_sputter_field"] = [round(float(v), 6) for v in dh_etch]
+    fields["redepo_field"] = [round(float(v), 6) for v in dh_total_redepo]
+    fields["model4_redepo_field"] = [round(float(v), 6) for v in dh_model4_redepo]
+    fields["lf_overhang_redepo_field"] = [round(float(v), 6) for v in dh_lf_redepo]
+    fields["redepo_source_etch_field"] = [round(float(v), 6) for v in dh_etch]
+    fields["profile_delta_field"] = [round(float(v), 6) for v in profile_delta]
+    fields["total_etch_field"] = [round(max(0.0, float(e) - float(r)), 6) for e, r in zip(dh_etch, dh_total_redepo)]
+    fields["net_growth_field"] = [round(float(deposition_a) + float(delta), 6) for delta in profile_delta]
+    fields.update(lf_fields)
+    if model4_fields:
+        fields["model4_redepo_mass_field"] = list(model4_fields.get("redepo_mass_field", []))
+        fields["model4_removed_mass_field"] = list(model4_fields.get("removed_mass_field", []))
+
+    summary = dict(source_state.meta.get("direct_sputter_debug_summary_last", {}))
+    summary["lf_overhang"] = dict(lf_summary)
+    if model4_summary:
+        summary["redepo"] = model4_summary
+    summary["total_etch"] = _field_summary_by_depth(grown_surface, [max(0.0, e - r) for e, r in zip(dh_etch, dh_total_redepo)])
+    summary["net_growth"] = _field_summary_by_depth(
+        grown_surface,
+        [float(deposition_a) + float(delta) for delta in profile_delta],
+    )
+    state.meta["direct_sputter_debug_fields_last"] = fields
+    state.meta["direct_sputter_debug_summary_last"] = summary
+    state.meta["model7_lf_overhang_debug_fields_last"] = fields
+    state.meta["model7_lf_overhang_debug_summary_last"] = summary
+    if include_model4_redepo:
+        state.meta["model4_redepo_debug_fields_last"] = fields
+        state.meta["model4_redepo_debug_summary_last"] = summary
+        state.meta["model4_redepo_total_removed_mass_last"] = float(total_removed_mass)
+        state.meta["model4_redepo_total_mass_last"] = float(sum(
+            max(0.0, float(v)) * max(0.0, float(a))
+            for v, a in zip(dh_model4_redepo, compute_arc_weights(grown_surface))
+        ))
+        state.meta["model4_redepo_active_source_count_last"] = int(model4_summary.get("active_source_count", 0) or 0)
+        state.meta["model4_redepo_transport_model_last"] = str(model4_summary.get("transport_model", redepo_transport_model))
+    state.meta["model7_lf_overhang_total_removed_mass_last"] = float(total_removed_mass)
+    state.meta["model7_lf_overhang_total_redepo_mass_last"] = float(total_redepo_mass)
+    state.meta["model7_lf_overhang_active_source_count_last"] = int(lf_summary.get("lf_active_source_count", 0.0))
+    state.meta["model7_lf_overhang_active_target_count_last"] = int(lf_summary.get("lf_active_target_count", 0.0))
     state.meta["direct_sputter_total_last"] = float(sum(dh_etch))
     return angles, responses, etch_clamp_a
 
@@ -1967,6 +3627,182 @@ def _snapshot_profile(points: Sequence[Point]) -> List[Point]:
 
 def _snapshot_voids(state) -> List[List[Point]]:
     return [[(float(x), float(y)) for x, y in poly] for poly in OffsetBoolean.void_polygons_float(state)]
+
+
+def _snapshot_field_overlay_samples(
+    meta: Dict[str, Any],
+    field_names: Sequence[str],
+    *,
+    max_points: int = 1800,
+    threshold_fraction: float = 0.10,
+) -> List[FieldOverlaySample]:
+    fields: Optional[Dict[str, Any]] = None
+    for meta_key in (
+        "model6_reflection_redepo_debug_fields_last",
+        "model8_closure_redepo_debug_fields_last",
+        "model7_lf_overhang_debug_fields_last",
+        "model4_redepo_debug_fields_last",
+        "direct_sputter_debug_fields_last",
+        "redepo_debug_fields_last",
+    ):
+        candidate = meta.get(meta_key)
+        if isinstance(candidate, dict):
+            fields = candidate
+            break
+    if fields is None:
+        return []
+
+    xs = fields.get("x", [])
+    ys = fields.get("y", [])
+    values: Any = []
+    for field_name in field_names:
+        candidate = fields.get(str(field_name), [])
+        if isinstance(candidate, Sequence) and len(candidate) > 0:
+            values = candidate
+            break
+    if not isinstance(xs, Sequence) or not isinstance(ys, Sequence) or not isinstance(values, Sequence):
+        return []
+
+    n = min(len(xs), len(ys), len(values))
+    if n <= 0:
+        return []
+
+    parsed: List[RedepoOverlaySample] = []
+    max_value = 0.0
+    for idx in range(n):
+        try:
+            value = max(0.0, float(values[idx]))
+            x = float(xs[idx])
+            y = float(ys[idx])
+        except (TypeError, ValueError):
+            continue
+        if value <= 0.0:
+            continue
+        max_value = max(max_value, value)
+        parsed.append((x, y, value))
+
+    if max_value <= 0.0 or not parsed:
+        return []
+
+    threshold = max(1e-9, max_value * max(0.0, float(threshold_fraction)))
+    filtered = [sample for sample in parsed if sample[2] > threshold]
+
+    limit = max(1, int(max_points))
+    if len(filtered) <= limit:
+        return filtered
+
+    return _thin_overlay_samples_by_order(filtered, limit)
+
+
+def _thin_overlay_samples_by_order(
+    samples: Sequence[FieldOverlaySample],
+    max_points: int,
+) -> List[FieldOverlaySample]:
+    limit = max(1, int(max_points))
+    if len(samples) <= limit:
+        return list(samples)
+    if limit == 1:
+        return [samples[len(samples) // 2]]
+    last = len(samples) - 1
+    selected: List[FieldOverlaySample] = []
+    used_indices = set()
+    for out_idx in range(limit):
+        idx = int(round((float(out_idx) * float(last)) / float(limit - 1)))
+        if idx in used_indices:
+            continue
+        used_indices.add(idx)
+        selected.append(samples[idx])
+    return selected
+
+
+def _snapshot_redepo_overlay_samples(meta: Dict[str, Any], *, max_points: int = 1800) -> List[RedepoOverlaySample]:
+    return _snapshot_field_overlay_samples(
+        meta,
+        ("redepo_field", "dh_redepo_field"),
+        max_points=min(max(1, int(max_points)), 520),
+        threshold_fraction=0.10,
+    )
+
+
+def _snapshot_etch_overlay_samples(meta: Dict[str, Any], *, max_points: int = 1800) -> List[FieldOverlaySample]:
+    return _snapshot_field_overlay_samples(
+        meta,
+        ("redepo_source_etch_field", "sputter_effective_field"),
+        max_points=min(max(1, int(max_points)), 520),
+        threshold_fraction=0.10,
+    )
+
+
+def _compact_redepo_overlay_samples(
+    samples: Sequence[FieldOverlaySample],
+    *,
+    max_points: int = 650,
+) -> List[FieldOverlaySample]:
+    parsed: List[FieldOverlaySample] = []
+    for sample in samples:
+        if len(sample) < 3:
+            continue
+        try:
+            value = max(0.0, float(sample[2]))
+            if value <= 0.0:
+                continue
+            parsed.append((float(sample[0]), float(sample[1]), value))
+        except (TypeError, ValueError):
+            continue
+    if not parsed:
+        return []
+
+    max_value = max((value for _x, _y, value in parsed), default=0.0)
+    threshold = max(1e-9, max_value * 0.10)
+    parsed = [sample for sample in parsed if sample[2] > threshold]
+    if not parsed:
+        return []
+
+    limit = max(1, int(max_points))
+    if len(parsed) <= limit:
+        return parsed
+
+    return _thin_overlay_samples_by_order(parsed, limit)
+
+
+def _snapshot_transport_line_samples(meta: Dict[str, Any], *, max_lines: int = 16) -> List[TransportLineSample]:
+    fields = meta.get("model6_reflection_redepo_debug_fields_last")
+    line_key = "reflection_transport_lines"
+    if not isinstance(fields, dict):
+        fields = meta.get("model8_closure_redepo_debug_fields_last")
+        line_key = "closure_transport_lines"
+    if not isinstance(fields, dict):
+        fields = meta.get("model7_lf_overhang_debug_fields_last")
+        line_key = "lf_transport_lines"
+    if not isinstance(fields, dict):
+        fields = meta.get("lf_overhang_debug_fields_last")
+        line_key = "lf_transport_lines"
+    if not isinstance(fields, dict):
+        return []
+    raw_lines = fields.get(line_key, [])
+    if not isinstance(raw_lines, Sequence):
+        return []
+    parsed: List[TransportLineSample] = []
+    for sample in raw_lines:
+        if not isinstance(sample, Sequence) or len(sample) < 5:
+            continue
+        try:
+            value = max(0.0, float(sample[4]))
+            if value <= 0.0:
+                continue
+            parsed.append(
+                (
+                    float(sample[0]),
+                    float(sample[1]),
+                    float(sample[2]),
+                    float(sample[3]),
+                    value,
+                )
+            )
+        except (TypeError, ValueError):
+            continue
+    parsed.sort(key=lambda item: item[4], reverse=True)
+    return parsed[: max(1, int(max_lines))]
 
 
 def _direct_sputter_internal_substeps(deposition_a: float, sputter_strength_a: float, reparam_ds_a: float) -> int:
@@ -2073,6 +3909,40 @@ def _validate_sweep_value(parameter: str, value: float) -> float:
         return _coerce_non_negative_float(value, name="redepo_max_distance_a")
     if parameter == "redepo_soft_los_radius_points":
         return float(max(0, min(2, _coerce_cycles(value))))
+    if parameter == "redepo_ray_count":
+        return float(max(3, _coerce_cycles(value)))
+    if parameter == "redepo_footprint_sigma_a":
+        return _coerce_non_negative_float(value, name="redepo_footprint_sigma_a")
+    if parameter in {"lf_overhang_dose", "lf_overhang_sputter_gain"}:
+        return _coerce_non_negative_float(value, name=parameter)
+    if parameter == "lf_overhang_redepo_fraction_pct":
+        percent = _coerce_finite_float(value, name=parameter)
+        if percent < 0.0 or percent > 100.0:
+            raise ValueError(f"{parameter} must be between 0 and 100")
+        return percent
+    if parameter == "lf_overhang_survival_penalty":
+        penalty = _coerce_finite_float(value, name=parameter)
+        if penalty < 0.0 or penalty > 4.0:
+            raise ValueError(f"{parameter} must be between 0 and 4")
+        return penalty
+    if parameter == "lf_overhang_width_a":
+        return _coerce_positive_float(value, name=parameter)
+    if parameter == "closure_redepo_efficiency_pct":
+        percent = _coerce_finite_float(value, name=parameter)
+        if percent < 0.0 or percent > 100.0:
+            raise ValueError(f"{parameter} must be between 0 and 100")
+        return percent
+    if parameter == "closure_redepo_shadow_gain":
+        return _coerce_non_negative_float(value, name=parameter)
+    if parameter == "closure_redepo_width_a":
+        return _coerce_positive_float(value, name=parameter)
+    if parameter == "closure_redepo_survival_penalty":
+        penalty = _coerce_finite_float(value, name=parameter)
+        if penalty < 0.0 or penalty > 4.0:
+            raise ValueError(f"{parameter} must be between 0 and 4")
+        return penalty
+    if parameter == "closure_redepo_smoothing_a":
+        return _coerce_non_negative_float(value, name=parameter)
     if parameter == "deposition_depth_decay_k":
         return _coerce_non_negative_float(value, name="deposition_depth_decay_k")
     if parameter == "deposition_depth_decay_power":
@@ -2131,6 +4001,12 @@ def _replace_sweep_config(base_config: TrenchDepoConfig, parameter: str, value: 
     if parameter in _REDEPO_SWEEP_PARAMETERS:
         kwargs["sputter_enabled"] = True
         kwargs["redepo_enabled"] = True
+    if parameter in _LF_OVERHANG_SWEEP_PARAMETERS:
+        kwargs["sputter_enabled"] = True
+        kwargs["lf_overhang_enabled"] = True
+    if parameter in _CLOSURE_REDEPO_SWEEP_PARAMETERS:
+        kwargs["sputter_enabled"] = True
+        kwargs["closure_redepo_enabled"] = True
     if parameter in _DEPTH_DEPOSITION_SWEEP_PARAMETERS:
         kwargs["sputter_enabled"] = False
         kwargs["redepo_enabled"] = False
@@ -2217,6 +4093,12 @@ def run_trench_depo(
     cancel_check: Optional[Callable[[], bool]] = None,
 ) -> TrenchDepoResult:
     cfg = config or TrenchDepoConfig()
+    emulator_number = int(getattr(cfg, "emulator_number", 0) or 0)
+    allowed_sputter = emulator_number in (0, 2, 3, 6)
+    allowed_ion_transmission = emulator_number in (0, 3)
+    allowed_depth_deposition = emulator_number in (0, 4, 5)
+    allowed_inhibition = emulator_number in (0, 5)
+    allowed_reflection_redepo = emulator_number == 6
     cycles = _coerce_cycles(cfg.cycles)
     angstrom_per_cycle = _coerce_non_negative_float(cfg.angstrom_per_cycle, name="angstrom_per_cycle")
     reparam_ds_a = _coerce_positive_float(cfg.reparam_ds_a, name="reparam_ds_a")
@@ -2228,7 +4110,7 @@ def run_trench_depo(
     sputter_peak_angle_deg = max(0.0, min(89.9, float(cfg.sputter_peak_angle_deg)))
     sputter_width_deg = _coerce_positive_float(cfg.sputter_width_deg, name="sputter_width_deg")
     sputter_smoothing_a = _coerce_non_negative_float(cfg.sputter_smoothing_a, name="sputter_smoothing_a")
-    ion_transmission_enabled = bool(cfg.ion_transmission_enabled)
+    ion_transmission_enabled = bool(allowed_ion_transmission and cfg.ion_transmission_enabled)
     ion_transmission_override = (
         None
         if cfg.ion_transmission_override is None
@@ -2337,6 +4219,74 @@ def run_trench_depo(
     redepo_neighbor_exclusion = _coerce_cycles(cfg.redepo_neighbor_exclusion)
     redepo_max_distance_a = _coerce_non_negative_float(cfg.redepo_max_distance_a, name="redepo_max_distance_a")
     redepo_soft_los_radius_points = max(0, min(2, _coerce_cycles(cfg.redepo_soft_los_radius_points)))
+    redepo_transport_model = str(cfg.redepo_transport_model or "gapsim_binned_lobe_los")
+    redepo_ray_count = max(3, _coerce_cycles(cfg.redepo_ray_count))
+    redepo_footprint_sigma_a = _coerce_non_negative_float(
+        cfg.redepo_footprint_sigma_a,
+        name="redepo_footprint_sigma_a",
+    )
+    redepo_footprint_radius_sigma = max(
+        1.0,
+        _coerce_positive_float(cfg.redepo_footprint_radius_sigma, name="redepo_footprint_radius_sigma"),
+    )
+    lf_overhang_dose = _coerce_non_negative_float(cfg.lf_overhang_dose, name="lf_overhang_dose")
+    lf_overhang_sputter_gain = _coerce_non_negative_float(
+        cfg.lf_overhang_sputter_gain,
+        name="lf_overhang_sputter_gain",
+    )
+    lf_overhang_redepo_fraction_pct = max(
+        0.0,
+        min(
+            100.0,
+            _coerce_finite_float(
+                cfg.lf_overhang_redepo_fraction_pct,
+                name="lf_overhang_redepo_fraction_pct",
+            ),
+        ),
+    )
+    lf_overhang_survival_penalty = max(
+        0.0,
+        min(
+            4.0,
+            _coerce_finite_float(
+                cfg.lf_overhang_survival_penalty,
+                name="lf_overhang_survival_penalty",
+            ),
+        ),
+    )
+    lf_overhang_width_a = _coerce_positive_float(cfg.lf_overhang_width_a, name="lf_overhang_width_a")
+    closure_redepo_efficiency_pct = max(
+        0.0,
+        min(
+            100.0,
+            _coerce_finite_float(
+                cfg.closure_redepo_efficiency_pct,
+                name="closure_redepo_efficiency_pct",
+            ),
+        ),
+    )
+    closure_redepo_shadow_gain = _coerce_non_negative_float(
+        cfg.closure_redepo_shadow_gain,
+        name="closure_redepo_shadow_gain",
+    )
+    closure_redepo_width_a = _coerce_positive_float(
+        cfg.closure_redepo_width_a,
+        name="closure_redepo_width_a",
+    )
+    closure_redepo_survival_penalty = max(
+        0.0,
+        min(
+            4.0,
+            _coerce_finite_float(
+                cfg.closure_redepo_survival_penalty,
+                name="closure_redepo_survival_penalty",
+            ),
+        ),
+    )
+    closure_redepo_smoothing_a = _coerce_non_negative_float(
+        cfg.closure_redepo_smoothing_a,
+        name="closure_redepo_smoothing_a",
+    )
     deposition_feature_type = _feature_type_key(cfg.deposition_feature_type)
     deposition_feature_width_a = _coerce_positive_float(
         cfg.deposition_feature_width_a,
@@ -2430,14 +4380,19 @@ def run_trench_depo(
         cfg.inhibition_smoothing_a,
         name="inhibition_smoothing_a",
     )
-    sputter_active = bool(cfg.sputter_enabled) and sputter_strength_a > 0.0
-    reflected_ion_requested = bool(cfg.reflected_ion_enabled) and reflected_ion_strength_pct > 0.0
-    redepo_active = bool(cfg.redepo_enabled) and sputter_active and redepo_efficiency_pct > 0.0
-    inhibition_active = bool(cfg.inhibition_enabled) and not sputter_active and angstrom_per_cycle > 0.0
+    sputter_active = bool(allowed_sputter and cfg.sputter_enabled) and sputter_strength_a > 0.0
+    reflected_ion_requested = False
+    model6_redepo_requested = bool(allowed_reflection_redepo and cfg.redepo_enabled)
+    model6_redepo_active = bool(model6_redepo_requested and sputter_active and redepo_efficiency_pct > 0.0)
+    redepo_active = bool(model6_redepo_active)
+    lf_overhang_requested = False
+    lf_overhang_active = bool(lf_overhang_requested and lf_overhang_dose > 0.0 and lf_overhang_sputter_gain > 0.0)
+    closure_redepo_requested = False
+    closure_redepo_active = bool(closure_redepo_requested and closure_redepo_efficiency_pct > 0.0)
+    inhibition_active = bool(allowed_inhibition and cfg.inhibition_enabled) and angstrom_per_cycle > 0.0
     depth_deposition_active = (
-        bool(cfg.deposition_depth_enabled)
+        bool(allowed_depth_deposition and cfg.deposition_depth_enabled)
         and not inhibition_active
-        and not sputter_active
         and angstrom_per_cycle > 0.0
     )
     initial_points = _coerce_points(cfg.points)
@@ -2474,6 +4429,12 @@ def run_trench_depo(
     frame_steps: List[int] = []
     frame_profiles: List[List[Point]] = []
     frame_voids: List[List[List[Point]]] = []
+    frame_redepo_overlays: List[List[RedepoOverlaySample]] = []
+    frame_etch_overlays: List[List[FieldOverlaySample]] = []
+    frame_transport_lines: List[List[TransportLineSample]] = []
+    pending_redepo_overlay: List[RedepoOverlaySample] = []
+    pending_etch_overlay: List[FieldOverlaySample] = []
+    pending_transport_lines: List[TransportLineSample] = []
 
     def canceled() -> bool:
         return bool(cancel_check()) if cancel_check is not None else False
@@ -2486,6 +4447,16 @@ def run_trench_depo(
         frame_steps.append(int(step))
         frame_profiles.append(pts_now)
         frame_voids.append(_snapshot_voids(state))
+        frame_redepo_overlays.append(
+            _compact_redepo_overlay_samples(pending_redepo_overlay)
+        )
+        frame_etch_overlays.append(
+            _compact_redepo_overlay_samples(pending_etch_overlay)
+        )
+        frame_transport_lines.append(list(pending_transport_lines))
+        pending_redepo_overlay = []
+        pending_etch_overlay = []
+        pending_transport_lines = []
 
         if progress_cb is not None:
             progress_cb(int(step), int(cycles))
@@ -2507,16 +4478,206 @@ def run_trench_depo(
                     sputter_strength_a,
                     reparam_ds_a,
                 )
+            if closure_redepo_requested:
+                substeps = max(
+                    substeps,
+                    _model4_redepo_internal_substeps(
+                        angstrom_per_cycle,
+                        sputter_strength_a,
+                        reparam_ds_a,
+                    ),
+                )
+            if lf_overhang_requested:
+                substeps = max(
+                    substeps,
+                    _model4_redepo_internal_substeps(
+                        angstrom_per_cycle,
+                        sputter_strength_a * max(1.0, lf_overhang_dose * lf_overhang_sputter_gain),
+                        reparam_ds_a,
+                    ),
+                )
             state.meta["direct_sputter_internal_substeps"] = int(substeps)
             deposition_sub_a = angstrom_per_cycle / float(substeps)
             sputter_sub_a = sputter_strength_a / float(substeps)
+            cycle_redepo_overlay: List[RedepoOverlaySample] = []
+            cycle_etch_overlay: List[FieldOverlaySample] = []
+            cycle_transport_lines: List[TransportLineSample] = []
+            if inhibition_active:
+                state.meta["inhibition_internal_substeps"] = int(substeps)
+            elif depth_deposition_active:
+                state.meta["depth_deposition_internal_substeps"] = int(substeps)
             for substep_idx in range(substeps):
                 if canceled():
                     raise SimulationCanceled()
-                if redepo_active:
+                sputter_deposition_sub_a = deposition_sub_a
+                if inhibition_active:
+                    _apply_inhibition_deposition_step(
+                        state,
+                        depth_cfg,
+                        deposition_a=deposition_sub_a,
+                        reparam_ds_a=reparam_ds_a,
+                        cycle_index=int(step + 1),
+                    )
+                    sputter_deposition_sub_a = 0.0
+                elif depth_deposition_active:
+                    _apply_depth_deposition_step(
+                        state,
+                        depth_cfg,
+                        deposition_a=deposition_sub_a,
+                        reparam_ds_a=reparam_ds_a,
+                        cycle_index=int(step + 1),
+                    )
+                    sputter_deposition_sub_a = 0.0
+                detail_kind = (
+                    "integrated_inhibition_model8_closure_redepo_substep"
+                    if inhibition_active and closure_redepo_requested
+                    else "integrated_depth_model8_closure_redepo_substep"
+                    if depth_deposition_active and closure_redepo_requested
+                    else "model8_closure_redepo_substep"
+                    if closure_redepo_requested
+                    else
+                    "integrated_inhibition_model7_lf_overhang_substep"
+                    if inhibition_active and lf_overhang_requested
+                    else "integrated_depth_model7_lf_overhang_substep"
+                    if depth_deposition_active and lf_overhang_requested
+                    else "model7_lf_overhang_substep"
+                    if lf_overhang_requested
+                    else "integrated_inhibition_model4_redepo_substep"
+                    if inhibition_active and redepo_active and not model6_redepo_active
+                    else "integrated_depth_model4_redepo_substep"
+                    if depth_deposition_active and redepo_active and not model6_redepo_active
+                    else "model6_reflection_redepo_substep"
+                    if model6_redepo_active
+                    else "integrated_inhibition_direct_sputter_substep"
+                    if inhibition_active
+                    else "integrated_depth_direct_sputter_substep"
+                    if depth_deposition_active
+                    else "model4_redepo_substep"
+                    if redepo_active
+                    else "direct_sputter_substep"
+                )
+                if detail_cb is not None:
+                    detail_cb(
+                        {
+                            "kind": f"{detail_kind}_start",
+                            "phase": "start",
+                            "step": int(step),
+                            "substep": int(substep_idx + 1),
+                            "substeps": int(substeps),
+                            "points": int(len(state.surface.points)),
+                        }
+                    )
+                if closure_redepo_requested:
+                    angles, responses, etch_clamp_a = _apply_model8_closure_redepo_step(
+                        state,
+                        deposition_a=sputter_deposition_sub_a,
+                        sputter_strength_a=sputter_sub_a,
+                        sputter_peak_pct=sputter_peak_pct,
+                        sputter_peak_angle_deg=sputter_peak_angle_deg,
+                        sputter_width_deg=sputter_width_deg,
+                        sputter_smoothing_a=sputter_smoothing_a,
+                        reparam_ds_a=reparam_ds_a,
+                        ion_transmission_enabled=ion_transmission_enabled,
+                        ion_transmission_override=ion_transmission_override,
+                        ion_transmission_start_depth_pct=ion_transmission_start_depth_pct,
+                        ion_transmission_end_depth_pct=ion_transmission_end_depth_pct,
+                        ion_transmission_decay_strength_pct=ion_transmission_decay_strength_pct,
+                        ion_transmission_floor_pct=ion_transmission_floor_pct,
+                        ion_transmission_curve_power=ion_transmission_curve_power,
+                        ion_transmission_aperture_shadow_pct=ion_transmission_aperture_shadow_pct,
+                        ion_transmission_lateral_shadow_pct=ion_transmission_lateral_shadow_pct,
+                        ion_transmission_edge_shadow_pct=ion_transmission_edge_shadow_pct,
+                        closure_redepo_efficiency_pct=closure_redepo_efficiency_pct,
+                        closure_redepo_shadow_gain=closure_redepo_shadow_gain,
+                        closure_redepo_width_a=closure_redepo_width_a,
+                        closure_redepo_survival_penalty=closure_redepo_survival_penalty,
+                        closure_redepo_smoothing_a=closure_redepo_smoothing_a,
+                        closure_threshold_a=deposition_closure_threshold_a,
+                        include_model4_redepo=redepo_active,
+                        redepo_efficiency_pct=redepo_efficiency_pct,
+                        redepo_emit_power=redepo_emit_power,
+                        redepo_distance_power=redepo_distance_power,
+                        redepo_neighbor_exclusion=redepo_neighbor_exclusion,
+                        redepo_max_distance_a=redepo_max_distance_a,
+                        redepo_soft_los_radius_points=redepo_soft_los_radius_points,
+                        redepo_transport_model=redepo_transport_model,
+                        redepo_ray_count=redepo_ray_count,
+                        redepo_footprint_sigma_a=redepo_footprint_sigma_a,
+                        redepo_footprint_radius_sigma=redepo_footprint_radius_sigma,
+                        include_lf_overhang=lf_overhang_requested,
+                        lf_overhang_dose=lf_overhang_dose,
+                        lf_overhang_sputter_gain=lf_overhang_sputter_gain,
+                        lf_overhang_redepo_fraction_pct=lf_overhang_redepo_fraction_pct,
+                        lf_overhang_survival_penalty=lf_overhang_survival_penalty,
+                        lf_overhang_width_a=lf_overhang_width_a,
+                    )
+                    cycle_redepo_overlay.extend(_snapshot_redepo_overlay_samples(state.meta))
+                    cycle_etch_overlay.extend(_snapshot_etch_overlay_samples(state.meta))
+                    cycle_transport_lines.extend(_snapshot_transport_line_samples(state.meta))
+                elif lf_overhang_requested:
+                    angles, responses, etch_clamp_a = _apply_model7_lf_overhang_step(
+                        state,
+                        deposition_a=sputter_deposition_sub_a,
+                        sputter_strength_a=sputter_sub_a,
+                        sputter_peak_pct=sputter_peak_pct,
+                        sputter_peak_angle_deg=sputter_peak_angle_deg,
+                        sputter_width_deg=sputter_width_deg,
+                        sputter_smoothing_a=sputter_smoothing_a,
+                        reparam_ds_a=reparam_ds_a,
+                        ion_transmission_enabled=ion_transmission_enabled,
+                        ion_transmission_override=ion_transmission_override,
+                        ion_transmission_start_depth_pct=ion_transmission_start_depth_pct,
+                        ion_transmission_end_depth_pct=ion_transmission_end_depth_pct,
+                        ion_transmission_decay_strength_pct=ion_transmission_decay_strength_pct,
+                        ion_transmission_floor_pct=ion_transmission_floor_pct,
+                        ion_transmission_curve_power=ion_transmission_curve_power,
+                        ion_transmission_aperture_shadow_pct=ion_transmission_aperture_shadow_pct,
+                        ion_transmission_lateral_shadow_pct=ion_transmission_lateral_shadow_pct,
+                        ion_transmission_edge_shadow_pct=ion_transmission_edge_shadow_pct,
+                        lf_overhang_dose=lf_overhang_dose,
+                        lf_overhang_sputter_gain=lf_overhang_sputter_gain,
+                        lf_overhang_redepo_fraction_pct=lf_overhang_redepo_fraction_pct,
+                        lf_overhang_survival_penalty=lf_overhang_survival_penalty,
+                        lf_overhang_width_a=lf_overhang_width_a,
+                        include_model4_redepo=redepo_active,
+                        redepo_source_model=redepo_source_model,
+                        redepo_efficiency_pct=redepo_efficiency_pct,
+                        redepo_emit_power=redepo_emit_power,
+                        redepo_distance_power=redepo_distance_power,
+                        redepo_neighbor_exclusion=redepo_neighbor_exclusion,
+                        redepo_max_distance_a=redepo_max_distance_a,
+                        redepo_soft_los_radius_points=redepo_soft_los_radius_points,
+                        redepo_transport_model=redepo_transport_model,
+                        redepo_ray_count=redepo_ray_count,
+                        redepo_footprint_sigma_a=redepo_footprint_sigma_a,
+                        redepo_footprint_radius_sigma=redepo_footprint_radius_sigma,
+                    )
+                    cycle_redepo_overlay.extend(_snapshot_redepo_overlay_samples(state.meta))
+                    cycle_etch_overlay.extend(_snapshot_etch_overlay_samples(state.meta))
+                    cycle_transport_lines.extend(_snapshot_transport_line_samples(state.meta))
+                elif model6_redepo_active:
+                    angles, responses, etch_clamp_a = _apply_model6_reflection_gaussian_redepo_step(
+                        state,
+                        deposition_a=sputter_deposition_sub_a,
+                        sputter_strength_a=sputter_sub_a,
+                        sputter_peak_pct=sputter_peak_pct,
+                        sputter_peak_angle_deg=sputter_peak_angle_deg,
+                        sputter_width_deg=sputter_width_deg,
+                        sputter_smoothing_a=sputter_smoothing_a,
+                        reparam_ds_a=reparam_ds_a,
+                        redepo_efficiency_pct=redepo_efficiency_pct,
+                        gaussian_width_a=redepo_emit_power,
+                        ballistic_mix_pct=redepo_distance_power,
+                        redepo_neighbor_exclusion=redepo_neighbor_exclusion,
+                        redepo_max_distance_a=redepo_max_distance_a,
+                    )
+                    cycle_redepo_overlay.extend(_snapshot_redepo_overlay_samples(state.meta))
+                    cycle_etch_overlay.extend(_snapshot_etch_overlay_samples(state.meta))
+                    cycle_transport_lines.extend(_snapshot_transport_line_samples(state.meta))
+                elif redepo_active:
                     angles, responses, etch_clamp_a = _apply_model4_redeposition_step(
                         state,
-                        deposition_a=deposition_sub_a,
+                        deposition_a=sputter_deposition_sub_a,
                         sputter_strength_a=sputter_sub_a,
                         sputter_peak_pct=sputter_peak_pct,
                         sputter_peak_angle_deg=sputter_peak_angle_deg,
@@ -2530,6 +4691,10 @@ def run_trench_depo(
                         redepo_neighbor_exclusion=redepo_neighbor_exclusion,
                         redepo_max_distance_a=redepo_max_distance_a,
                         redepo_soft_los_radius_points=redepo_soft_los_radius_points,
+                        redepo_transport_model=redepo_transport_model,
+                        redepo_ray_count=redepo_ray_count,
+                        redepo_footprint_sigma_a=redepo_footprint_sigma_a,
+                        redepo_footprint_radius_sigma=redepo_footprint_radius_sigma,
                         ion_transmission_start_depth_pct=ion_transmission_start_depth_pct,
                         ion_transmission_end_depth_pct=ion_transmission_end_depth_pct,
                         ion_transmission_decay_strength_pct=ion_transmission_decay_strength_pct,
@@ -2539,10 +4704,12 @@ def run_trench_depo(
                         ion_transmission_lateral_shadow_pct=ion_transmission_lateral_shadow_pct,
                         ion_transmission_edge_shadow_pct=ion_transmission_edge_shadow_pct,
                     )
+                    cycle_redepo_overlay.extend(_snapshot_redepo_overlay_samples(state.meta))
+                    cycle_etch_overlay.extend(_snapshot_etch_overlay_samples(state.meta))
                 else:
                     angles, responses, etch_clamp_a = _apply_direct_sputter_step(
                         state,
-                        deposition_a=deposition_sub_a,
+                        deposition_a=sputter_deposition_sub_a,
                         sputter_strength_a=sputter_sub_a,
                         sputter_peak_pct=sputter_peak_pct,
                         sputter_peak_angle_deg=sputter_peak_angle_deg,
@@ -2565,10 +4732,12 @@ def run_trench_depo(
                         reflected_ion_microtrench_weight=reflected_ion_microtrench_weight,
                         reflected_ion_range_a=reflected_ion_range_a,
                     )
+                    cycle_etch_overlay.extend(_snapshot_etch_overlay_samples(state.meta))
                 if detail_cb is not None:
                     detail_cb(
                         {
-                            "kind": "model4_redepo_substep" if redepo_active else "direct_sputter_substep",
+                            "kind": detail_kind,
+                            "phase": "done",
                             "step": int(step),
                             "substep": int(substep_idx + 1),
                             "substeps": int(substeps),
@@ -2581,6 +4750,9 @@ def run_trench_depo(
                 if responses:
                     state.meta["sputter_last_response_max"] = max(responses)
                 state.meta["sputter_etch_clamp_a_per_cycle"] = float(etch_clamp_a * substeps)
+            pending_redepo_overlay = cycle_redepo_overlay
+            pending_etch_overlay = cycle_etch_overlay
+            pending_transport_lines = cycle_transport_lines
         else:
             if inhibition_active:
                 substeps = _depth_depo_internal_substeps(angstrom_per_cycle, reparam_ds_a)
@@ -2649,8 +4821,14 @@ def run_trench_depo(
     ]
     if not redepo_active:
         sputter_excluded_effects.insert(4, "redeposition")
+    if not lf_overhang_requested:
+        sputter_excluded_effects.insert(4, "LF-bias overhang proxy")
+    if not closure_redepo_requested:
+        sputter_excluded_effects.insert(4, "etch+redepo closure proxy")
     model4_source_uses_ion_transmission = bool(redepo_active and redepo_source_model == "model2")
-    reported_ion_transmission_enabled = bool(ion_transmission_enabled or model4_source_uses_ion_transmission)
+    reported_ion_transmission_enabled = bool(
+        ion_transmission_enabled or model4_source_uses_ion_transmission or closure_redepo_requested
+    )
     if not reported_ion_transmission_enabled:
         sputter_excluded_effects.extend(["depth attenuation", "visibility", "geometric shadowing"])
     reflected_ion_active = bool(
@@ -2663,10 +4841,123 @@ def run_trench_depo(
         sputter_excluded_effects.insert(1, "microtrenching")
     reflected_total = float(state.meta.get("reflected_ion_total_last", 0.0) or 0.0)
     direct_total = float(state.meta.get("direct_sputter_total_last", 0.0) or 0.0)
-    redepo_summary = dict(state.meta.get("model4_redepo_debug_summary_last", {}))
-    redepo_total_removed_mass = float(state.meta.get("model4_redepo_total_removed_mass_last", 0.0) or 0.0)
-    redepo_total_mass = float(state.meta.get("model4_redepo_total_mass_last", 0.0) or 0.0)
+    redepo_summary = dict(
+        state.meta.get(
+            "model6_reflection_redepo_debug_summary_last",
+            state.meta.get("model4_redepo_debug_summary_last", {}),
+        )
+    )
+    redepo_total_removed_mass = float(
+        state.meta.get(
+            "model6_reflection_redepo_total_removed_mass_last",
+            state.meta.get("model4_redepo_total_removed_mass_last", 0.0),
+        )
+        or 0.0
+    )
+    redepo_total_mass = float(
+        state.meta.get(
+            "model6_reflection_redepo_total_mass_last",
+            state.meta.get("model4_redepo_total_mass_last", 0.0),
+        )
+        or 0.0
+    )
+    lf_overhang_summary = dict(state.meta.get("model7_lf_overhang_debug_summary_last", {}))
+    lf_overhang_total_removed_mass = float(
+        state.meta.get("model7_lf_overhang_total_removed_mass_last", 0.0) or 0.0
+    )
+    lf_overhang_total_redepo_mass = float(
+        state.meta.get("model7_lf_overhang_total_redepo_mass_last", 0.0) or 0.0
+    )
+    closure_redepo_summary = dict(state.meta.get("model8_closure_redepo_debug_summary_last", {}))
+    closure_redepo_total_removed_mass = float(
+        state.meta.get("model8_closure_redepo_total_removed_mass_last", 0.0) or 0.0
+    )
+    closure_redepo_total_mass = float(
+        state.meta.get("model8_closure_redepo_total_mass_last", 0.0) or 0.0
+    )
     depth_closure_probe = dict(state.meta.get("depth_closure_probe_last", {}))
+    growth_model = (
+        "integrated_inhibition_depo_sputter_closure_redepo"
+        if sputter_active and closure_redepo_requested and inhibition_active
+        else "integrated_depth_depo_sputter_closure_redepo"
+        if sputter_active and closure_redepo_requested and depth_deposition_active
+        else "etch_redepo_closure"
+        if sputter_active and closure_redepo_requested
+        else
+        "integrated_inhibition_depo_sputter_redepo_lf_overhang"
+        if sputter_active and lf_overhang_requested and redepo_active and inhibition_active
+        else "integrated_depth_depo_sputter_redepo_lf_overhang"
+        if sputter_active and lf_overhang_requested and redepo_active and depth_deposition_active
+        else "integrated_depo_sputter_redepo_lf_overhang"
+        if sputter_active and lf_overhang_requested and redepo_active
+        else "integrated_inhibition_depo_sputter_lf_overhang"
+        if sputter_active and lf_overhang_requested and inhibition_active
+        else "integrated_depth_depo_sputter_lf_overhang"
+        if sputter_active and lf_overhang_requested and depth_deposition_active
+        else "lf_bias_overhang_proxy"
+        if sputter_active and lf_overhang_requested
+        else "integrated_inhibition_depo_sputter_redepo"
+        if sputter_active and redepo_active and inhibition_active
+        else "integrated_depth_depo_sputter_redepo"
+        if sputter_active and redepo_active and depth_deposition_active
+        else "integrated_depo_sputter_redepo"
+        if sputter_active and redepo_active and not model6_redepo_active
+        else "reflection_gaussian_ballistic_redepo"
+        if sputter_active and model6_redepo_active
+        else "integrated_inhibition_depo_sputter"
+        if sputter_active and inhibition_active
+        else "integrated_depth_depo_sputter"
+        if sputter_active and depth_deposition_active
+        else "ion_transmission_direct_sputter"
+        if sputter_active and ion_transmission_enabled
+        else "direct_angle_sputter"
+        if sputter_active
+        else "inhibition_weighted_deposition"
+        if inhibition_active
+        else "depth_dependent_deposition"
+        if depth_deposition_active
+        else "conformal_offset"
+    )
+    propagation = (
+        "offset_boolean_plus_inhibition_depo_direct_angle_sputter_closure_redepo"
+        if sputter_active and closure_redepo_requested and inhibition_active
+        else "offset_boolean_plus_depth_depo_direct_angle_sputter_closure_redepo"
+        if sputter_active and closure_redepo_requested and depth_deposition_active
+        else "offset_boolean_plus_direct_angle_sputter_closure_redepo"
+        if sputter_active and closure_redepo_requested
+        else
+        "offset_boolean_plus_inhibition_depo_direct_angle_sputter_redepo_lf_overhang"
+        if sputter_active and lf_overhang_requested and redepo_active and inhibition_active
+        else "offset_boolean_plus_depth_depo_direct_angle_sputter_redepo_lf_overhang"
+        if sputter_active and lf_overhang_requested and redepo_active and depth_deposition_active
+        else "offset_boolean_plus_direct_angle_sputter_redepo_lf_overhang"
+        if sputter_active and lf_overhang_requested and redepo_active
+        else "offset_boolean_plus_inhibition_depo_direct_angle_sputter_lf_overhang"
+        if sputter_active and lf_overhang_requested and inhibition_active
+        else "offset_boolean_plus_depth_depo_direct_angle_sputter_lf_overhang"
+        if sputter_active and lf_overhang_requested and depth_deposition_active
+        else "offset_boolean_plus_direct_angle_sputter_lf_overhang"
+        if sputter_active and lf_overhang_requested
+        else "offset_boolean_plus_inhibition_depo_direct_angle_sputter_redepo"
+        if sputter_active and redepo_active and inhibition_active
+        else "offset_boolean_plus_depth_depo_direct_angle_sputter_redepo"
+        if sputter_active and redepo_active and depth_deposition_active and not model6_redepo_active
+        else "offset_boolean_plus_direct_angle_sputter_reflection_gaussian_redepo"
+        if sputter_active and model6_redepo_active
+        else "offset_boolean_plus_inhibition_depo_direct_angle_sputter"
+        if sputter_active and inhibition_active
+        else "offset_boolean_plus_depth_depo_direct_angle_sputter"
+        if sputter_active and depth_deposition_active
+        else "offset_boolean_plus_direct_angle_sputter_redepo"
+        if redepo_active
+        else "offset_boolean_plus_direct_angle_sputter"
+        if sputter_active
+        else "vertex_normal_inhibition_depo_post_closure_fill"
+        if inhibition_active
+        else "vertex_normal_depth_depo_post_closure_fill"
+        if depth_deposition_active
+        else "offset_boolean_external_air_limited"
+    )
     return TrenchDepoResult(
         frame_steps=frame_steps,
         frame_profiles=frame_profiles,
@@ -2675,28 +4966,13 @@ def run_trench_depo(
         meta={
             "version": 1,
             "units": {"length": "A", "y_down_is_negative": True},
-            "growth_model": (
-                "inhibition_weighted_deposition"
-                if inhibition_active
-                else "depth_dependent_deposition"
-                if depth_deposition_active
-                else "conformal_offset"
-            ),
-            "propagation": (
-                "offset_boolean_plus_direct_angle_sputter_redepo"
-                if redepo_active
-                else "offset_boolean_plus_direct_angle_sputter"
-                if sputter_active
-                else "vertex_normal_inhibition_depo_post_closure_fill"
-                if inhibition_active
-                else "vertex_normal_depth_depo_post_closure_fill"
-                if depth_deposition_active
-                else "offset_boolean_external_air_limited"
-            ),
+            "growth_model": growth_model,
+            "propagation": propagation,
             "cycles": int(cycles),
+            "emulator_number": int(emulator_number),
             "angstrom_per_cycle": float(angstrom_per_cycle),
             "reparam_ds_a": float(reparam_ds_a),
-            "sputter_enabled": bool(cfg.sputter_enabled),
+            "sputter_enabled": bool(allowed_sputter and cfg.sputter_enabled),
             "sputter_active": bool(sputter_active),
             "sputter_model": "direct_angle_gaussian" if sputter_active else "off",
             "sputter_strength_a_per_cycle": float(sputter_strength_a),
@@ -2723,7 +4999,7 @@ def run_trench_depo(
             ),
             "ion_debug_fields_last": dict(state.meta.get("direct_sputter_debug_fields_last", {})),
             "ion_debug_summary_last": dict(state.meta.get("direct_sputter_debug_summary_last", {})),
-            "reflected_ion_enabled": bool(cfg.reflected_ion_enabled),
+            "reflected_ion_enabled": False,
             "reflected_ion_active": bool(reflected_ion_active),
             "reflected_ion_model": "zone_weighted_one_bounce" if reflected_ion_active else "off",
             "reflected_ion_strength_pct": float(reflected_ion_strength_pct),
@@ -2735,9 +5011,15 @@ def run_trench_depo(
             "reflected_ion_total_last": float(reflected_total),
             "direct_sputter_total_last": float(direct_total),
             "reflected_direct_ratio_last": float(reflected_total / direct_total) if direct_total > 1e-12 else 0.0,
-            "redepo_enabled": bool(cfg.redepo_enabled),
+            "redepo_enabled": bool(model6_redepo_requested),
             "redepo_active": bool(redepo_active and redepo_total_mass > 0.0),
-            "redepo_model": "gapsim_binned_lobe_los" if redepo_active else "off",
+            "redepo_model": (
+                "specular_reflection_hit_gaussian_ballistic"
+                if model6_redepo_active
+                else str(state.meta.get("model4_redepo_transport_model_last", redepo_transport_model))
+                if redepo_active
+                else "off"
+            ),
             "redepo_source_model": str(redepo_source_model),
             "redepo_efficiency_pct": float(redepo_efficiency_pct),
             "redepo_emit_power": float(redepo_emit_power),
@@ -2745,8 +5027,38 @@ def run_trench_depo(
             "redepo_neighbor_exclusion": int(redepo_neighbor_exclusion),
             "redepo_max_distance_a": float(redepo_max_distance_a),
             "redepo_soft_los_radius_points": int(redepo_soft_los_radius_points),
-            "redepo_debug_fields_last": dict(state.meta.get("model4_redepo_debug_fields_last", {})),
+            "redepo_transport_model": str(redepo_transport_model),
+            "redepo_ray_count": int(redepo_ray_count),
+            "redepo_footprint_sigma_a": float(redepo_footprint_sigma_a),
+            "redepo_footprint_radius_sigma": float(redepo_footprint_radius_sigma),
+            "redepo_debug_fields_last": dict(
+                state.meta.get(
+                    "model6_reflection_redepo_debug_fields_last",
+                    state.meta.get("model4_redepo_debug_fields_last", {}),
+                )
+            ),
             "redepo_debug_summary_last": redepo_summary,
+            "frame_redepo_overlays": [
+                [[float(x), float(y), float(value)] for x, y, value in overlay]
+                for overlay in frame_redepo_overlays
+            ],
+            "frame_etch_overlays": [
+                [[float(x), float(y), float(value)] for x, y, value in overlay]
+                for overlay in frame_etch_overlays
+            ],
+            "frame_transport_lines": [
+                [
+                    [float(x1), float(y1), float(x2), float(y2), float(value)]
+                    for x1, y1, x2, y2, value in lines
+                ]
+                for lines in frame_transport_lines
+            ],
+            "redepo_overlay_description": (
+                "Positive redeposition target samples collected during the cycle that produced each frame."
+            ),
+            "etch_overlay_description": (
+                "Effective etch source samples collected during the cycle that produced each frame."
+            ),
             "redepo_total_removed_mass_last": float(redepo_total_removed_mass),
             "redepo_total_mass_last": float(redepo_total_mass),
             "redepo_capture_ratio_last": (
@@ -2754,8 +5066,73 @@ def run_trench_depo(
                 if redepo_total_removed_mass > 1e-12
                 else 0.0
             ),
-            "redepo_active_source_count_last": int(state.meta.get("model4_redepo_active_source_count_last", 0)),
-            "deposition_depth_enabled": bool(cfg.deposition_depth_enabled),
+            "redepo_active_source_count_last": int(
+                state.meta.get(
+                    "model6_reflection_redepo_active_source_count_last",
+                    state.meta.get("model4_redepo_active_source_count_last", 0),
+                )
+            ),
+            "redepo_active_target_count_last": int(
+                state.meta.get("model6_reflection_redepo_active_target_count_last", 0)
+            ),
+            "lf_overhang_enabled": False,
+            "lf_overhang_requested": bool(lf_overhang_requested),
+            "lf_overhang_active": bool(lf_overhang_active),
+            "lf_overhang_model": "upper_source_normal_lobe_los_survival" if lf_overhang_requested else "off",
+            "lf_overhang_dose": float(lf_overhang_dose),
+            "lf_overhang_sputter_gain": float(lf_overhang_sputter_gain),
+            "lf_overhang_redepo_fraction_pct": float(lf_overhang_redepo_fraction_pct),
+            "lf_overhang_survival_penalty": float(lf_overhang_survival_penalty),
+            "lf_overhang_width_a": float(lf_overhang_width_a),
+            "lf_overhang_debug_fields_last": dict(state.meta.get("model7_lf_overhang_debug_fields_last", {})),
+            "lf_overhang_debug_summary_last": lf_overhang_summary,
+            "lf_overhang_total_removed_mass_last": float(lf_overhang_total_removed_mass),
+            "lf_overhang_total_redepo_mass_last": float(lf_overhang_total_redepo_mass),
+            "lf_overhang_capture_ratio_last": (
+                float(lf_overhang_total_redepo_mass / lf_overhang_total_removed_mass)
+                if lf_overhang_total_removed_mass > 1e-12
+                else 0.0
+            ),
+            "lf_overhang_active_source_count_last": int(
+                state.meta.get("model7_lf_overhang_active_source_count_last", 0)
+            ),
+            "lf_overhang_active_target_count_last": int(
+                state.meta.get("model7_lf_overhang_active_target_count_last", 0)
+            ),
+            "closure_redepo_enabled": False,
+            "closure_redepo_requested": bool(closure_redepo_requested),
+            "closure_redepo_active": bool(closure_redepo_active and closure_redepo_total_mass > 0.0),
+            "closure_redepo_model": (
+                "all_positive_etch_sources_first_hit_normal_lobe_survival"
+                if closure_redepo_requested
+                else "off"
+            ),
+            "closure_redepo_efficiency_pct": float(closure_redepo_efficiency_pct),
+            "closure_redepo_shadow_gain": float(closure_redepo_shadow_gain),
+            "closure_redepo_width_a": float(closure_redepo_width_a),
+            "closure_redepo_survival_penalty": float(closure_redepo_survival_penalty),
+            "closure_redepo_smoothing_a": float(closure_redepo_smoothing_a),
+            "closure_redepo_debug_fields_last": dict(
+                state.meta.get("model8_closure_redepo_debug_fields_last", {})
+            ),
+            "closure_redepo_debug_summary_last": closure_redepo_summary,
+            "closure_redepo_total_removed_mass_last": float(closure_redepo_total_removed_mass),
+            "closure_redepo_total_mass_last": float(closure_redepo_total_mass),
+            "closure_redepo_capture_ratio_last": (
+                float(closure_redepo_total_mass / closure_redepo_total_removed_mass)
+                if closure_redepo_total_removed_mass > 1e-12
+                else 0.0
+            ),
+            "closure_redepo_active_source_count_last": int(
+                state.meta.get("model8_closure_redepo_active_source_count_last", 0)
+            ),
+            "closure_redepo_active_target_count_last": int(
+                state.meta.get("model8_closure_redepo_active_target_count_last", 0)
+            ),
+            "closure_redepo_closure_probe_last": dict(
+                state.meta.get("model8_closure_redepo_closure_probe_last", {})
+            ),
+            "deposition_depth_enabled": bool(allowed_depth_deposition and cfg.deposition_depth_enabled),
             "deposition_depth_active": bool(depth_deposition_active),
             "deposition_feature_type": str(deposition_feature_type),
             "deposition_feature_width_a": float(deposition_feature_width_a),
@@ -2799,7 +5176,7 @@ def run_trench_depo(
             "deposition_depth_debug_fields_last": dict(state.meta.get("depth_deposition_debug_fields_last", {})),
             "deposition_depth_debug_summary_last": dict(state.meta.get("depth_deposition_debug_summary_last", {})),
             "deposition_depth_internal_substeps": int(state.meta.get("depth_deposition_internal_substeps", 1)),
-            "inhibition_enabled": bool(cfg.inhibition_enabled),
+            "inhibition_enabled": bool(allowed_inhibition and cfg.inhibition_enabled),
             "inhibition_active": bool(inhibition_active),
             "inhibition_process_model": str(inhibition_process_model),
             "inhibition_strength_pct": float(inhibition_strength_pct),
@@ -2923,6 +5300,7 @@ def run_trench_depo_legacy_sputter(
             "growth_model": "gapsim_angle_only_sputter_compare",
             "propagation": "gapsim_deposit_step_vertex_normal_substeps",
             "cycles": int(cycles),
+            "emulator_number": int(getattr(cfg, "emulator_number", 0) or 0),
             "angstrom_per_cycle": float(angstrom_per_cycle),
             "legacy_step_scale_a": float(step_scale_a),
             "legacy_deposition_flux_scale": float(deposition_flux_scale),
@@ -2941,5 +5319,159 @@ def run_trench_depo_legacy_sputter(
             "initial_points": int(len(initial_points)),
             "final_points": int(len(final_profile)),
             "legacy_ion_substeps_last": int(state.meta.get("ion_substeps", 1)),
+        },
+    )
+
+
+def run_trench_depo_legacy_redeposition(
+    config: Optional[TrenchDepoConfig] = None,
+    *,
+    progress_cb: Optional[Callable[[int, int], None]] = None,
+    detail_cb: Optional[Callable[[Dict[str, Any]], None]] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
+) -> TrenchDepoResult:
+    cfg = config or TrenchDepoConfig()
+    cycles = _coerce_cycles(cfg.cycles)
+    angstrom_per_cycle = _coerce_non_negative_float(cfg.angstrom_per_cycle, name="angstrom_per_cycle")
+    requested_reparam_ds_a = _coerce_positive_float(cfg.reparam_ds_a, name="reparam_ds_a")
+    reparam_ds_a = max(float(requested_reparam_ds_a), 20.0)
+    sputter_strength_a = _coerce_non_negative_float(
+        cfg.sputter_strength_a_per_cycle,
+        name="sputter_strength_a_per_cycle",
+    )
+    sputter_peak_pct = max(0.0, min(100.0, float(cfg.sputter_peak_pct)))
+    sputter_peak_angle_deg = max(0.0, min(89.9, float(cfg.sputter_peak_angle_deg)))
+    sputter_width_deg = _coerce_positive_float(cfg.sputter_width_deg, name="sputter_width_deg")
+    redepo_efficiency_pct = max(0.0, min(100.0, float(cfg.redepo_efficiency_pct)))
+    redepo_emit_power = max(0.0, float(cfg.redepo_emit_power))
+    redepo_lobe_sigma_deg = max(
+        1.0,
+        min(60.0, 24.0 / max(0.25, redepo_emit_power) if redepo_emit_power > 0.0 else 60.0),
+    )
+    sputter_active = bool(cfg.sputter_enabled) and sputter_strength_a > 0.0
+    redepo_active = bool(cfg.redepo_enabled) and sputter_active and redepo_efficiency_pct > 0.0
+    initial_points = _coerce_points(cfg.points)
+
+    OffsetBoolean.require_backend()
+
+    state = init_simulation_state(initial_points, units="A", reparam_ds_a=reparam_ds_a)
+    # Original GapSim redeposition comparison: use the engine flux model's
+    # unbinned per-vertex LOS redepo path, while keeping the same geometry and
+    # user-facing mini-emulator etch/redepo settings.
+    step_scale_a = max(float(angstrom_per_cycle), float(sputter_strength_a) if sputter_active else 0.0)
+    deposition_flux_scale = float(angstrom_per_cycle) / step_scale_a if step_scale_a > 0.0 else 0.0
+    legacy_strength_pct = 0.0
+    if sputter_active and step_scale_a > 0.0:
+        legacy_strength_pct = (
+            100.0
+            * float(sputter_strength_a)
+            * (float(sputter_peak_pct) / 100.0)
+            / max(step_scale_a * 3.0, 1e-9)
+        )
+    model = SputterRedepositionFluxModel(
+        _ConstantFluxModel(deposition_flux_scale),
+        etch_reference_model=_ConstantFluxModel(1.0),
+        sputter_enabled=sputter_active,
+        sputter_strength_pct=legacy_strength_pct,
+        sputter_peak_angle_deg=sputter_peak_angle_deg,
+        sputter_angle_sigma_deg=sputter_width_deg,
+        sputter_depth_decay_length_a=0.0,
+        sputter_vis_exponent=0.0,
+        redepo_enabled=redepo_active,
+        redepo_efficiency_pct=redepo_efficiency_pct,
+        redepo_lobe_sigma_deg=redepo_lobe_sigma_deg,
+    )
+    propagator = VertexNormalPropagator()
+    cleanup = TopologyCleanup()
+
+    frame_steps: List[int] = []
+    frame_profiles: List[List[Point]] = []
+    frame_voids: List[List[List[Point]]] = []
+
+    def canceled() -> bool:
+        return bool(cancel_check()) if cancel_check is not None else False
+
+    for step in range(cycles + 1):
+        if canceled():
+            raise SimulationCanceled()
+
+        pts_now = _snapshot_profile(state.surface.points)
+        frame_steps.append(int(step))
+        frame_profiles.append(pts_now)
+        frame_voids.append(_snapshot_voids(state))
+
+        if progress_cb is not None:
+            progress_cb(int(step), int(cycles))
+        if detail_cb is not None:
+            detail_cb(
+                {
+                    "kind": "legacy_redepo_cycle",
+                    "step": int(step),
+                    "total": int(cycles),
+                    "points": int(len(pts_now)),
+                }
+            )
+
+        if step == cycles:
+            break
+
+        state = deposit_step(
+            step_scale_a,
+            state,
+            model=model,
+            propagator=propagator,
+            cleanup=cleanup,
+            detail_cb=detail_cb,
+            cancel_check=cancel_check,
+        )
+
+    final_profile = _snapshot_profile(frame_profiles[-1] if frame_profiles else state.surface.points)
+    total_etch_mass = float(state.meta.get("redepo_total_etch_mass", 0.0) or 0.0)
+    total_redepo_mass = float(state.meta.get("redepo_total_mass", 0.0) or 0.0)
+    return TrenchDepoResult(
+        frame_steps=frame_steps,
+        frame_profiles=frame_profiles,
+        frame_voids=frame_voids,
+        final_profile=final_profile,
+        meta={
+            "version": 1,
+            "units": {"length": "A", "y_down_is_negative": True},
+            "growth_model": "gapsim_legacy_sputter_redeposition_compare",
+            "propagation": "gapsim_deposit_step_vertex_normal_substeps",
+            "cycles": int(cycles),
+            "emulator_number": int(getattr(cfg, "emulator_number", 0) or 0),
+            "angstrom_per_cycle": float(angstrom_per_cycle),
+            "legacy_step_scale_a": float(step_scale_a),
+            "legacy_deposition_flux_scale": float(deposition_flux_scale),
+            "reparam_ds_a": float(reparam_ds_a),
+            "sputter_enabled": bool(cfg.sputter_enabled),
+            "sputter_active": bool(sputter_active),
+            "sputter_model": "gapsim_angle_sputter" if sputter_active else "off",
+            "sputter_strength_a_per_cycle": float(sputter_strength_a),
+            "sputter_peak_pct": float(sputter_peak_pct),
+            "legacy_sputter_strength_pct": float(legacy_strength_pct),
+            "sputter_peak_angle_deg": float(sputter_peak_angle_deg),
+            "sputter_width_deg": float(sputter_width_deg),
+            "sputter_depth_decay_length_a": 0.0,
+            "sputter_vis_exponent": 0.0,
+            "redepo_enabled": bool(cfg.redepo_enabled),
+            "redepo_active": bool(redepo_active and total_redepo_mass > 0.0),
+            "redepo_model": "gapsim_original_per_vertex_los" if redepo_active else "off",
+            "redepo_efficiency_pct": float(redepo_efficiency_pct),
+            "redepo_emit_power": float(redepo_emit_power),
+            "legacy_redepo_lobe_sigma_deg": float(redepo_lobe_sigma_deg),
+            "redepo_total_removed_mass_last": float(total_etch_mass),
+            "redepo_total_mass_last": float(total_redepo_mass),
+            "redepo_capture_ratio_last": (
+                float(total_redepo_mass / total_etch_mass)
+                if total_etch_mass > 1e-12
+                else 0.0
+            ),
+            "redepo_active_source_count_last": int(state.meta.get("redepo_active_source_count", 0) or 0),
+            "redepo_mean_flux_last": float(state.meta.get("redepo_mean_flux", 0.0) or 0.0),
+            "initial_points": int(len(initial_points)),
+            "final_points": int(len(final_profile)),
+            "legacy_ion_substeps_last": int(state.meta.get("ion_substeps", 1)),
+            "legacy_ion_substep_policy_last": str(state.meta.get("ion_substep_policy", "")),
         },
     )

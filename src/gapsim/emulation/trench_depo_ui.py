@@ -8,10 +8,10 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor, QDesktopServices, QMouseEvent, QPainter, QPainterPath, QPen
+from PySide6.QtCore import QObject, QEvent, QPointF, QRectF, Qt, QThread, QTimer, QUrl, Signal, Slot
+from PySide6.QtGui import QColor, QBrush, QDesktopServices, QFont, QMouseEvent, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -20,6 +20,11 @@ from PySide6.QtWidgets import (
     QDialog,
     QDoubleSpinBox,
     QFileDialog,
+    QGraphicsItem,
+    QGraphicsPathItem,
+    QGraphicsRectItem,
+    QGraphicsScene,
+    QGraphicsView,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -47,10 +52,19 @@ from gapsim.emulation.research_registry import (
     next_emulator_number,
     save_created_emulator_numbers,
 )
+from gapsim.emulation.parameter_library import (
+    DEFAULT_PARAMETER_LIBRARY_PATH,
+    delete_parameter_preset,
+    list_parameter_presets,
+    read_parameter_preset,
+    sanitize_parameter_preset_name,
+    save_parameter_preset,
+)
 from gapsim.emulation.structure_library import (
     DEFAULT_EMULATOR_STRUCTURE_SHEETS,
     DEFAULT_STRUCTURE_LIBRARY_PATH,
     StructureLibraryError,
+    delete_structure_sheet,
     ensure_default_structures,
     list_structure_names,
     read_structure_points,
@@ -66,6 +80,7 @@ from gapsim.emulation.trench_depo import (
     compute_depth_deposition_ratio,
     compute_effective_aspect_ratio,
     run_trench_depo,
+    run_trench_depo_legacy_redeposition,
     run_trench_depo_legacy_sputter,
     run_trench_depo_sweep,
 )
@@ -82,6 +97,38 @@ from gapsim.ui_qt.models.points_table import PointsTableModel
 from gapsim.ui_qt.models.points_table_view import PointsTableView
 from gapsim.ui_qt.views.result_vector_view import ResultVectorView
 from gapsim.ui_qt.views.structure_view import StructureView
+
+
+OVERLAY_AUTO_DECIMATION_TARGET_POINTS = 2200
+DEFAULT_UI_REPARAM_DS_A = 10.0
+QUALITY_MODE_PRESETS: Tuple[Tuple[str, Optional[float]], ...] = (
+    ("빠름 (20 A)", 20.0),
+    ("보통 (10 A)", DEFAULT_UI_REPARAM_DS_A),
+    ("정밀 (5 A)", 5.0),
+    ("최정밀 (2.5 A)", 2.5),
+    ("사용자", None),
+)
+
+
+def _display_decimation_stride(profiles: Sequence[Sequence[Tuple[float, float]]]) -> int:
+    max_points = max((len(profile) for profile in profiles), default=0)
+    if max_points <= OVERLAY_AUTO_DECIMATION_TARGET_POINTS:
+        return 1
+    return max(1, int(math.ceil(max_points / float(OVERLAY_AUTO_DECIMATION_TARGET_POINTS))))
+
+
+def _decimate_profile_for_display(
+    profile: Sequence[Tuple[float, float]],
+    stride: int,
+) -> List[Tuple[float, float]]:
+    if stride <= 1 or len(profile) <= 2:
+        return [(float(x), float(y)) for x, y in profile]
+    out: List[Tuple[float, float]] = [(float(profile[0][0]), float(profile[0][1]))]
+    for idx in range(1, len(profile) - 1):
+        if idx % stride == 0:
+            out.append((float(profile[idx][0]), float(profile[idx][1])))
+    out.append((float(profile[-1][0]), float(profile[-1][1])))
+    return out
 
 
 def _use_solid_playback(result: TrenchDepoResult) -> bool:
@@ -106,14 +153,58 @@ def _elide_middle(text: str, max_chars: int) -> str:
     return f"{raw[:left]}...{raw[-right:]}"
 
 
+_DEFAULT_STRUCTURE_PRESET_NAMES = {
+    "em00_integrated_depo_etch_depth": "통합 트렌치",
+    "em01_conformal": "기본 트렌치",
+    "em02_direct_sputter": "기본 트렌치",
+    "em03_ion_transmission_etch": "계단형 트렌치",
+    "em04_depth_depletion": "Bowed Jar 트렌치",
+    "em05_inhibition": "Bowed Jar 트렌치",
+    "em06_reflection_redepo": "반사 리데포 트렌치",
+}
+
+_DEFAULT_STRUCTURE_PRESET_CANONICAL = {
+    "em00_integrated_depo_etch_depth": "em05_inhibition",
+    "em01_conformal": "em01_conformal",
+    "em02_direct_sputter": "em01_conformal",
+    "em03_ion_transmission_etch": "em03_ion_transmission_etch",
+    "em04_depth_depletion": "em04_depth_depletion",
+    "em05_inhibition": "em05_inhibition",
+    "em06_reflection_redepo": "em01_conformal",
+}
+
+
+def _structure_preset_display_name(sheet_name: str) -> str:
+    raw = str(sheet_name or "").strip()
+    if raw in _DEFAULT_STRUCTURE_PRESET_NAMES:
+        return _DEFAULT_STRUCTURE_PRESET_NAMES[raw]
+    cleaned = raw.replace("_", " ").strip()
+    return cleaned or "사용자 구조"
+
+
+def _structure_preset_items(sheet_names: Sequence[str]) -> List[Tuple[str, str]]:
+    items: List[Tuple[str, str]] = []
+    seen: set[str] = set()
+    for sheet_name in sheet_names:
+        sheet = str(sheet_name or "").strip()
+        if not sheet:
+            continue
+        canonical = _DEFAULT_STRUCTURE_PRESET_CANONICAL.get(sheet, sheet)
+        if canonical in seen:
+            continue
+        seen.add(canonical)
+        items.append((_structure_preset_display_name(sheet), sheet))
+    return items
+
+
 EMULATOR_MODE_TITLES = {
-    0: "Conformal depo baseline",
-    1: "Direct angle sputter etch",
-    2: "Ion transmission shadowing",
-    3: "Discarded reflected ion etch",
-    4: "Sputter redeposition",
-    5: "Depth-dependent depo fill",
-    6: "Inhibition deposition fill",
+    0: "Integrated depo/etch/depth/inhibition",
+    1: "Conformal depo baseline",
+    2: "Direct angle sputter etch",
+    3: "Ion transmission etch",
+    4: "Depth-dependent depo fill",
+    5: "Inhibition deposition fill",
+    6: "Reflection Gaussian ballistic redepo",
 }
 
 
@@ -130,37 +221,38 @@ def _emulator_mode_label(number: int) -> str:
 
 EMULATOR_PROCESS_PRESETS: dict[int, list[tuple[str, dict[str, object]]]] = {
     0: [
+        ("Integrated default", {"cycles": 20, "depo": 10.0, "sputter": True, "ion": True, "depth": True, "etch": 4.0, "peak": 55.0, "width": 14.0, "depth_k": 0.55, "depth_power": 1.2, "depth_min": 8.0}),
+        ("Soft integrated", {"cycles": 20, "depo": 10.0, "sputter": True, "ion": True, "depth": True, "etch": 2.5, "peak": 55.0, "width": 18.0, "depth_k": 0.35, "depth_power": 1.0, "depth_min": 12.0}),
+        ("Strong etch/depletion", {"cycles": 20, "depo": 10.0, "sputter": True, "ion": True, "depth": True, "etch": 6.0, "peak": 58.0, "width": 12.0, "depth_k": 0.9, "depth_power": 1.4, "depth_min": 5.0}),
+    ],
+    1: [
         ("Baseline conformal", {"cycles": 20, "depo": 10.0}),
         ("Quick conformal", {"cycles": 8, "depo": 10.0}),
     ],
-    1: [
+    2: [
         ("Direct sputter default", {"cycles": 20, "depo": 10.0, "sputter": True, "etch": 4.0, "peak": 55.0, "width": 14.0}),
         ("Soft direct etch", {"cycles": 20, "depo": 10.0, "sputter": True, "etch": 2.0, "peak": 55.0, "width": 18.0}),
         ("Strong direct etch", {"cycles": 20, "depo": 10.0, "sputter": True, "etch": 7.0, "peak": 58.0, "width": 12.0}),
     ],
-    2: [
+    3: [
         ("Ion depth default", {"cycles": 20, "depo": 10.0, "sputter": True, "ion": True, "ion_start": 0.0, "ion_end": 100.0, "ion_drop": 100.0, "ion_floor": 0.0, "ion_curve": 1.0}),
         ("Top-open ion", {"cycles": 20, "depo": 10.0, "sputter": True, "ion": True, "ion_start": 20.0, "ion_end": 100.0, "ion_drop": 80.0, "ion_floor": 10.0, "ion_curve": 1.2}),
         ("Deep-select ion", {"cycles": 20, "depo": 10.0, "sputter": True, "ion": True, "ion_start": 45.0, "ion_end": 100.0, "ion_drop": 100.0, "ion_floor": 0.0, "ion_curve": 1.8}),
     ],
-    3: [
-        ("Reflected ion default", {"cycles": 20, "depo": 10.0, "sputter": True, "reflected": True, "reflect": 35.0, "bowing": 0.75, "micro": 1.0, "range": 1600.0}),
-        ("Bowing focus", {"cycles": 20, "depo": 10.0, "sputter": True, "reflected": True, "reflect": 50.0, "bowing": 1.15, "micro": 0.8, "range": 1900.0}),
-    ],
     4: [
-        ("Redepo default", {"cycles": 20, "depo": 10.0, "sputter": True, "redepo": True, "redepo_eff": 25.0, "redepo_emit": 1.0, "redepo_dist": 1.0}),
-        ("Soft redepo", {"cycles": 20, "depo": 10.0, "sputter": True, "redepo": True, "redepo_eff": 15.0, "redepo_emit": 0.7, "redepo_dist": 1.3}),
-        ("Strong redepo", {"cycles": 20, "depo": 10.0, "sputter": True, "redepo": True, "redepo_eff": 40.0, "redepo_emit": 1.4, "redepo_dist": 0.8}),
-    ],
-    5: [
         ("Depth fill default", {"cycles": 20, "depo": 10.0, "depth": True, "depth_k": 0.8, "depth_power": 1.2, "depth_min": 3.0}),
         ("Gentle depth fill", {"cycles": 20, "depo": 10.0, "depth": True, "depth_k": 0.45, "depth_power": 1.0, "depth_min": 8.0}),
         ("Strong top loss", {"cycles": 20, "depo": 10.0, "depth": True, "depth_k": 1.35, "depth_power": 1.4, "depth_min": 2.0}),
     ],
-    6: [
+    5: [
         ("Inhibition default", {"cycles": 20, "depo": 10.0, "depth": True, "depth_k": 0.8, "depth_power": 1.2, "depth_min": 8.0}),
         ("Soft inhibition", {"cycles": 20, "depo": 10.0, "depth": True, "depth_k": 0.45, "depth_power": 1.0, "depth_min": 12.0}),
         ("Strong inhibition", {"cycles": 20, "depo": 10.0, "depth": True, "depth_k": 1.25, "depth_power": 1.5, "depth_min": 5.0}),
+    ],
+    6: [
+        ("Reflection redepo default", {"cycles": 20, "depo": 10.0, "sputter": True, "redepo": True, "etch": 4.0, "peak": 55.0, "width": 14.0, "redepo_eff": 30.0, "redepo_emit": 180.0, "redepo_dist": 35.0}),
+        ("Narrow reflection band", {"cycles": 20, "depo": 10.0, "sputter": True, "redepo": True, "etch": 5.0, "peak": 58.0, "width": 12.0, "redepo_eff": 35.0, "redepo_emit": 90.0, "redepo_dist": 55.0}),
+        ("Wide Gaussian correction", {"cycles": 20, "depo": 10.0, "sputter": True, "redepo": True, "etch": 3.5, "peak": 55.0, "width": 18.0, "redepo_eff": 25.0, "redepo_emit": 260.0, "redepo_dist": 20.0}),
     ],
 }
 
@@ -1434,6 +1526,204 @@ class RedepositionLobeEditor(QWidget):
         )
 
 
+class CompareOverlayView(QGraphicsView):
+    def __init__(self) -> None:
+        super().__init__()
+        self._scene = QGraphicsScene(self)
+        self.setScene(self._scene)
+        self._cases: List[TrenchSweepResult] = []
+        self._opacity = 0.55
+        self._content_rect: Optional[QRectF] = None
+        self._current_index = 0
+        self._display_decimation_stride = 1
+        self.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
+
+    def set_cases(self, cases: Sequence[TrenchSweepResult]) -> None:
+        self._cases = list(cases[:2])
+        self._display_decimation_stride = _display_decimation_stride(
+            [profile for case in self._cases for profile in case.result.frame_profiles]
+        )
+        self._update_content_rect()
+        self.show_frame(0, fit=True)
+
+    def set_opacity_pct(self, opacity_pct: int) -> None:
+        self._opacity = max(0.05, min(1.0, float(opacity_pct) / 100.0))
+        self.show_frame(self._current_index, fit=False)
+
+    def _scene_points(self, profile: Sequence[Tuple[float, float]]) -> List[QPointF]:
+        decimated = _decimate_profile_for_display(profile, self._display_decimation_stride)
+        return [QPointF(float(x), -float(y)) for x, y in decimated]
+
+    @staticmethod
+    def _line_path(points: Sequence[QPointF]) -> QPainterPath:
+        path = QPainterPath()
+        if not points:
+            return path
+        path.moveTo(points[0])
+        for point in points[1:]:
+            path.lineTo(point)
+        return path
+
+    @staticmethod
+    def _fill_path(points: Sequence[QPointF], floor_y: float) -> QPainterPath:
+        path = CompareOverlayView._line_path(points)
+        if len(points) < 2:
+            return path
+        path.lineTo(QPointF(points[-1].x(), floor_y))
+        path.lineTo(QPointF(points[0].x(), floor_y))
+        path.closeSubpath()
+        return path
+
+    @staticmethod
+    def _profile_key(profile: Sequence[Tuple[float, float]]) -> Tuple[Tuple[float, float], ...]:
+        return tuple((round(float(x), 6), round(float(y), 6)) for x, y in profile)
+
+    def _add_legend(
+        self,
+        anchor: QPointF,
+        entries: Sequence[Tuple[str, QColor, Qt.PenStyle]],
+    ) -> None:
+        if not entries:
+            return
+        row_h = 28.0
+        width = 430.0
+        height = 18.0 + row_h * float(len(entries))
+        bg = QGraphicsRectItem(0.0, 0.0, width, height)
+        bg.setPos(anchor)
+        bg.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, True)
+        bg.setBrush(QBrush(QColor(255, 255, 255, 238)))
+        bg.setPen(QPen(QColor(148, 163, 184, 190), 1.1))
+        bg.setZValue(500.0)
+        self._scene.addItem(bg)
+
+        font = QFont()
+        font.setPointSize(13)
+        font.setBold(True)
+        for idx, (label, color, style) in enumerate(entries):
+            y = 16.0 + row_h * float(idx)
+            line_path = QPainterPath()
+            line_path.moveTo(14.0, y + 7.0)
+            line_path.lineTo(56.0, y + 7.0)
+            sample = QGraphicsPathItem(line_path)
+            sample.setPos(anchor)
+            sample.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, True)
+            pen_color = QColor(color)
+            pen_color.setAlpha(240)
+            pen = QPen(pen_color, 4.0)
+            pen.setCosmetic(True)
+            pen.setStyle(style)
+            sample.setPen(pen)
+            sample.setZValue(501.0)
+            self._scene.addItem(sample)
+
+            text = self._scene.addText(_elide_middle(str(label), 44), font)
+            text.setDefaultTextColor(QColor(15, 23, 42, 245))
+            text.setPos(QPointF(anchor.x() + 66.0, anchor.y() + y - 8.0))
+            text.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, True)
+            text.setZValue(502.0)
+
+    def _update_content_rect(self) -> None:
+        points: List[QPointF] = []
+        for case in self._cases:
+            for profile in case.result.frame_profiles:
+                points.extend(self._scene_points(profile))
+        if not points:
+            self._content_rect = QRectF(-1000.0, -1000.0, 2000.0, 2000.0)
+            self._scene.setSceneRect(self._content_rect)
+            return
+        xs = [float(p.x()) for p in points]
+        ys = [float(p.y()) for p in points]
+        x0, x1 = min(xs), max(xs)
+        y0, y1 = min(min(ys), 0.0), max(max(ys), 0.0)
+        if abs(x1 - x0) < 1e-9:
+            x1 = x0 + 1.0
+        if abs(y1 - y0) < 1e-9:
+            y1 = y0 + 1.0
+        pad = max(x1 - x0, y1 - y0, 100.0) * 0.08
+        self._content_rect = QRectF(x0 - pad, y0 - pad, (x1 - x0) + 2.0 * pad, (y1 - y0) + 2.0 * pad)
+        self._scene.setSceneRect(self._content_rect)
+
+    def show_frame(self, index: int, *, fit: bool = False) -> None:
+        self._current_index = max(0, int(index))
+        self._scene.clear()
+        if not self._cases:
+            return
+        colors = [QColor(37, 99, 235), QColor(249, 115, 22)]
+        labels = ["A", "B"]
+        rect = self._content_rect or QRectF(-1000.0, -1000.0, 2000.0, 2000.0)
+        floor_y = rect.bottom()
+        line_alpha = max(25, min(255, int(round(255.0 * self._opacity))))
+        fill_alpha = max(8, min(150, int(round(95.0 * self._opacity))))
+        legend_entries: List[Tuple[str, QColor, Qt.PenStyle]] = []
+        base_profiles: List[Sequence[Tuple[float, float]]] = []
+        seen_base_profiles: set[Tuple[Tuple[float, float], ...]] = set()
+        for case in self._cases:
+            frames = case.result.frame_profiles
+            if not frames:
+                continue
+            key = self._profile_key(frames[0])
+            if key in seen_base_profiles:
+                continue
+            seen_base_profiles.add(key)
+            base_profiles.append(frames[0])
+        for base_idx, profile in enumerate(base_profiles):
+            pts = self._scene_points(profile)
+            if len(pts) < 2:
+                continue
+            base_line = QGraphicsPathItem(self._line_path(pts))
+            base_pen = QPen(QColor(51, 65, 85, 165 if base_idx == 0 else 105), 2.0)
+            base_pen.setCosmetic(True)
+            base_pen.setStyle(Qt.PenStyle.DashLine if base_idx == 0 else Qt.PenStyle.DotLine)
+            base_line.setPen(base_pen)
+            base_line.setZValue(25.0 + float(base_idx))
+            self._scene.addItem(base_line)
+            legend_entries.append(
+                (
+                    "기본 구조" if base_idx == 0 else f"기본 구조 {base_idx + 1}",
+                    QColor(51, 65, 85),
+                    Qt.PenStyle.DashLine if base_idx == 0 else Qt.PenStyle.DotLine,
+                )
+            )
+
+        for case_idx, case in enumerate(self._cases):
+            frames = case.result.frame_profiles
+            if not frames:
+                continue
+            local_idx = max(0, min(self._current_index, len(frames) - 1))
+            pts = self._scene_points(frames[local_idx])
+            if len(pts) < 2:
+                continue
+            color = QColor(colors[case_idx % len(colors)])
+            fill_color = QColor(color)
+            fill_color.setAlpha(fill_alpha)
+            line_color = QColor(color)
+            line_color.setAlpha(line_alpha)
+            fill_item = QGraphicsPathItem(self._fill_path(pts, floor_y))
+            fill_item.setPen(QPen(Qt.PenStyle.NoPen))
+            fill_item.setBrush(QBrush(fill_color))
+            fill_item.setZValue(float(case_idx))
+            self._scene.addItem(fill_item)
+            line_item = QGraphicsPathItem(self._line_path(pts))
+            pen = QPen(line_color, 2.4)
+            pen.setCosmetic(True)
+            line_item.setPen(pen)
+            line_item.setZValue(10.0 + float(case_idx))
+            self._scene.addItem(line_item)
+            legend_entries.append((f"{labels[case_idx]}: {case.label}", color, Qt.PenStyle.SolidLine))
+        self._add_legend(QPointF(rect.left() + 16.0, rect.top() + 16.0), legend_entries)
+        if fit:
+            self.fit_content()
+
+    def fit_content(self) -> None:
+        if self._content_rect is None:
+            return
+        self.resetTransform()
+        self.fitInView(self._content_rect, Qt.AspectRatioMode.KeepAspectRatio)
+
+
 class SplitTestWindow(QMainWindow):
     def __init__(self, cases: Sequence[TrenchSweepResult]) -> None:
         super().__init__()
@@ -1441,11 +1731,12 @@ class SplitTestWindow(QMainWindow):
         self._views: List[ResultVectorView] = []
         self._case_status_labels: List[QLabel] = []
         self._syncing_viewports = False
+        self._compare_overlay_enabled = bool(len(self._cases) >= 2 and self._is_compare_parameter(self._cases[0].parameter))
 
         title = "Split Test"
         if self._cases:
-            if self._cases[0].parameter == "model_compare":
-                title = "Model Compare - GapSim Angle Only"
+            if self._is_compare_parameter(self._cases[0].parameter):
+                title = "모델 비교"
             else:
                 title = f"Split Test - {self._cases[0].label}"
         self.setWindowTitle(title)
@@ -1462,16 +1753,31 @@ class SplitTestWindow(QMainWindow):
         self.slider_frame.setEnabled(max_idx > 0)
         self.slider_frame.valueChanged.connect(self.show_frame)
 
-        self.btn_play = QPushButton("Pause" if max_idx > 0 else "Play")
+        self.btn_play = QPushButton("일시정지" if max_idx > 0 else "재생")
         self.btn_play.setEnabled(max_idx > 0)
         self.btn_play.clicked.connect(self.toggle_playback)
         self.lbl_frame = QLabel("Frame 0/0")
+        self.btn_overlay_compare = QPushButton("한 그래프 보기")
+        self.btn_overlay_compare.setCheckable(True)
+        self.btn_overlay_compare.setVisible(self._compare_overlay_enabled)
+        self.btn_overlay_compare.toggled.connect(self._on_overlay_compare_toggled)
+        self.lbl_overlay_opacity = QLabel("투명도 55%")
+        self.lbl_overlay_opacity.setVisible(self._compare_overlay_enabled)
+        self.slider_overlay_opacity = QSlider(Qt.Orientation.Horizontal)
+        self.slider_overlay_opacity.setRange(10, 100)
+        self.slider_overlay_opacity.setValue(55)
+        self.slider_overlay_opacity.setFixedWidth(150)
+        self.slider_overlay_opacity.setVisible(self._compare_overlay_enabled)
+        self.slider_overlay_opacity.valueChanged.connect(self._on_overlay_opacity_changed)
 
         controls = QHBoxLayout()
         controls.addWidget(QLabel("Frame"))
         controls.addWidget(self.slider_frame, 1)
         controls.addWidget(self.lbl_frame)
         controls.addWidget(self.btn_play)
+        controls.addWidget(self.btn_overlay_compare)
+        controls.addWidget(self.lbl_overlay_opacity)
+        controls.addWidget(self.slider_overlay_opacity)
 
         grid_host = QWidget()
         grid = QGridLayout()
@@ -1486,13 +1792,16 @@ class SplitTestWindow(QMainWindow):
             cell_layout = QVBoxLayout()
             cell_layout.setContentsMargins(6, 6, 6, 6)
             header = QLabel(self._case_label(case))
-            status = QLabel("Cycle 0/0 | Points 0")
+            status = QLabel("Cycle 0/0 | 점 0")
             view = ResultVectorView()
             view.setMinimumSize(360, 260)
             solid_playback = _use_solid_playback(case.result)
             view.set_frames(
                 case.result.frame_profiles,
                 voids=case.result.frame_voids,
+                redepo_overlays=case.result.meta.get("frame_redepo_overlays"),
+                etch_overlays=case.result.meta.get("frame_etch_overlays"),
+                transport_lines=case.result.meta.get("frame_transport_lines"),
                 void_mode="current",
                 dynamic_substrate_fill=solid_playback,
                 history_mode="mixed_etch" if solid_playback else "film",
@@ -1513,21 +1822,46 @@ class SplitTestWindow(QMainWindow):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setWidget(grid_host)
+        self._grid_scroll = scroll
+        self._overlay_view = CompareOverlayView()
+        self._overlay_view.setMinimumSize(760, 520)
+        self._overlay_view.setVisible(False)
+        if self._compare_overlay_enabled:
+            self._overlay_view.set_cases(self._cases[:2])
+            self._overlay_view.set_opacity_pct(self.slider_overlay_opacity.value())
 
         root = QVBoxLayout()
         root.addLayout(controls)
         root.addWidget(scroll, 1)
+        root.addWidget(self._overlay_view, 1)
         central = QWidget()
         central.setLayout(root)
         self.setCentralWidget(central)
+        self._install_slider_wheel_guards()
 
         self.show_frame(0)
         QTimer.singleShot(0, self.fit_all_views)
         if max_idx > 0:
             self._timer.start()
 
+    def _install_slider_wheel_guards(self) -> None:
+        for slider in self.findChildren(QSlider):
+            slider.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+            slider.installEventFilter(self)
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802, ANN001
+        if isinstance(watched, QSlider) and event.type() == QEvent.Type.Wheel:
+            focus_widget = QApplication.focusWidget()
+            slider_has_focus = focus_widget is watched or (
+                focus_widget is not None and watched.isAncestorOf(focus_widget)
+            )
+            if not slider_has_focus:
+                event.ignore()
+                return True
+        return super().eventFilter(watched, event)
+
     def _case_label(self, case: TrenchSweepResult) -> str:
-        if case.parameter == "model_compare":
+        if self._is_compare_parameter(case.parameter):
             return case.label
         if case.parameter == "cycles":
             value_text = str(int(case.value))
@@ -1535,21 +1869,25 @@ class SplitTestWindow(QMainWindow):
             value_text = f"{case.value:g}"
         return f"{case.label}: {value_text}"
 
+    @staticmethod
+    def _is_compare_parameter(parameter: str) -> bool:
+        return "compare" in str(parameter or "").lower()
+
     def toggle_playback(self) -> None:
         if self._timer.isActive():
             self._timer.stop()
-            self.btn_play.setText("Play")
+            self.btn_play.setText("재생")
             return
         if self.slider_frame.value() >= self.slider_frame.maximum():
             self.slider_frame.setValue(0)
         self._timer.start()
-        self.btn_play.setText("Pause")
+        self.btn_play.setText("일시정지")
 
     def _advance_frame(self) -> None:
         current = self.slider_frame.value()
         if current >= self.slider_frame.maximum():
             self._timer.stop()
-            self.btn_play.setText("Replay")
+            self.btn_play.setText("다시 재생")
             return
         self.slider_frame.setValue(current + 1)
 
@@ -1566,7 +1904,9 @@ class SplitTestWindow(QMainWindow):
             cycle = case.result.frame_steps[local_idx] if local_idx < len(case.result.frame_steps) else local_idx
             total = case.result.meta.get("cycles", len(frames) - 1)
             points = len(frames[local_idx])
-            self._case_status_labels[case_idx].setText(f"Cycle {cycle}/{total} | Points {points}")
+            self._case_status_labels[case_idx].setText(f"Cycle {cycle}/{total} | 점 {points}")
+        if self._compare_overlay_enabled:
+            self._overlay_view.show_frame(idx, fit=False)
 
     def fit_all_views(self) -> None:
         if not self._views:
@@ -1577,6 +1917,21 @@ class SplitTestWindow(QMainWindow):
                 view.fit_content()
         finally:
             self._syncing_viewports = False
+        if self._compare_overlay_enabled:
+            self._overlay_view.fit_content()
+
+    def _on_overlay_compare_toggled(self, checked: bool) -> None:
+        enabled = bool(checked)
+        self._grid_scroll.setVisible(not enabled)
+        self._overlay_view.setVisible(enabled)
+        self.btn_overlay_compare.setText("나란히 보기" if enabled else "한 그래프 보기")
+        if enabled:
+            self._overlay_view.show_frame(self.slider_frame.value(), fit=True)
+
+    def _on_overlay_opacity_changed(self, value: int) -> None:
+        pct = max(10, min(100, int(value)))
+        self.lbl_overlay_opacity.setText(f"투명도 {pct}%")
+        self._overlay_view.set_opacity_pct(pct)
 
     def _sync_viewports(self, source: ResultVectorView, state: object) -> None:
         if self._syncing_viewports:
@@ -1594,6 +1949,68 @@ class SplitTestWindow(QMainWindow):
     def closeEvent(self, event) -> None:  # noqa: N802, ANN001
         self._timer.stop()
         super().closeEvent(event)
+
+
+class _EmulationRunWorker(QObject):
+    progress = Signal(int, int, str)
+    finished = Signal(object, object, bool, object, bool, str)
+    failed = Signal(str)
+
+    def __init__(
+        self,
+        *,
+        config: TrenchDepoConfig,
+        cache_key: tuple[object, ...],
+        request_note: str,
+        save_artifacts: bool,
+        use_preview_cache: bool,
+    ) -> None:
+        super().__init__()
+        self._config = config
+        self._cache_key = cache_key
+        self._request_note = str(request_note)
+        self._save_artifacts = bool(save_artifacts)
+        self._use_preview_cache = bool(use_preview_cache)
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            result = run_trench_depo(
+                self._config,
+                progress_cb=lambda step, total: self.progress.emit(
+                    int(step),
+                    int(total),
+                    "실행",
+                ),
+                detail_cb=self._emit_detail_progress,
+            )
+            self.finished.emit(
+                self._config,
+                result,
+                self._use_preview_cache,
+                self._cache_key,
+                self._save_artifacts,
+                self._request_note,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(str(exc))
+
+    def _emit_detail_progress(self, detail: Dict[str, Any]) -> None:
+        if not isinstance(detail, dict):
+            return
+        if "substep" not in detail or "substeps" not in detail:
+            return
+        cycles = max(1, int(self._config.cycles))
+        substeps = max(1, int(detail.get("substeps", 1)))
+        step = max(0, int(detail.get("step", 0)))
+        substep = max(0, min(substeps, int(detail.get("substep", 0))))
+        total = max(1, cycles * substeps)
+        done = max(0, min(total, (step * substeps) + substep))
+        phase = str(detail.get("phase", ""))
+        cycle_label = f"{step + 1}CYC"
+        sub_label = f"{substep}/{substeps}"
+        suffix = "계산 중" if phase == "start" else "완료"
+        self.progress.emit(done, total, f"실행 {cycle_label} sub {sub_label} {suffix}")
 
 
 class TrenchDepoWindow(QMainWindow):
@@ -1638,7 +2055,7 @@ class TrenchDepoWindow(QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Trench Depo Emulation")
+        self.setWindowTitle("트렌치 Depo 에뮬레이션")
         self.resize(1280, 820)
 
         self._result: Optional[TrenchDepoResult] = None
@@ -1652,10 +2069,16 @@ class TrenchDepoWindow(QMainWindow):
         self._emulator_numbers = load_created_emulator_numbers()
         self._emulator_buttons: dict[int, QPushButton] = {}
         self._preview_result_cache: dict[tuple[object, ...], TrenchDepoResult] = {}
+        self._emulation_thread: Optional[QThread] = None
+        self._emulation_worker: Optional[_EmulationRunWorker] = None
         self._emulator_run_timer = QTimer(self)
         self._emulator_run_timer.setSingleShot(True)
         self._emulator_run_timer.setInterval(150)
         self._emulator_run_timer.timeout.connect(self._run_deferred_emulator_preview)
+        self._result_config: Optional[TrenchDepoConfig] = None
+        self._result_playback_timer = QTimer(self)
+        self._result_playback_timer.setInterval(220)
+        self._result_playback_timer.timeout.connect(self._advance_result_playback)
 
         self.view = ResultVectorView()
         self.view.setMinimumSize(560, 620)
@@ -1669,19 +2092,33 @@ class TrenchDepoWindow(QMainWindow):
             current=QColor("#2563eb"),
             reference=QColor(100, 116, 139, 180),
         )
+        self.progress_geometry_view = StructureView()
+        self.progress_geometry_view.setMinimumSize(560, 420)
+        self.progress_geometry_view.set_point_radius_px(2.5)
+        self.progress_geometry_view.set_profile_colors(
+            current=QColor("#2563eb"),
+            reference=QColor(100, 116, 139, 180),
+        )
+        self.progress_geometry_view.set_editing_enabled(False)
         self.smoothing = SmoothingController()
         self._structure_points: List[Tuple[float, float]] = []
         self._smoothed_points: List[Tuple[float, float]] = []
         self._use_smoothed_geometry = False
+        self._preserve_geometry_on_emulator_switch = False
         self._syncing_structure_view = False
         self._syncing_structure_table = False
         self._syncing_smoothed_table = False
         self._syncing_workflow_tabs = False
         self._syncing_emulator_preset = False
+        self._syncing_quality_mode = False
         self._structure_library_path = Path(
             os.environ.get("GAPSIM_STRUCTURE_LIBRARY", str(DEFAULT_STRUCTURE_LIBRARY_PATH))
         )
+        self._parameter_library_path = Path(
+            os.environ.get("GAPSIM_PARAMETER_LIBRARY", str(DEFAULT_PARAMETER_LIBRARY_PATH))
+        )
         self._active_structure_sheet_name = ""
+        self._active_parameter_preset_name = ""
         self._overlay_opacity = 0.35
         self._overlay_path: Optional[str] = None
         self._overlay_scale_a_per_px = 1.0
@@ -1703,15 +2140,28 @@ class TrenchDepoWindow(QMainWindow):
         self.spin_angstrom_per_cycle.setDecimals(3)
         self.spin_angstrom_per_cycle.setSingleStep(1.0)
         self.spin_angstrom_per_cycle.setValue(10.0)
+        self.cmb_quality_mode = QComboBox()
+        for label, ds_a in QUALITY_MODE_PRESETS:
+            self.cmb_quality_mode.addItem(label, ds_a)
+        self.cmb_quality_mode.setToolTip(
+            "프로파일 조각 크기를 선택합니다. 값이 클수록 빠르고, 작을수록 형상이 더 정밀하지만 느립니다."
+        )
+        self.spin_reparam_ds = QDoubleSpinBox()
+        self.spin_reparam_ds.setRange(0.5, 200.0)
+        self.spin_reparam_ds.setDecimals(2)
+        self.spin_reparam_ds.setSingleStep(2.5)
+        self.spin_reparam_ds.setSuffix(" A")
+        self.spin_reparam_ds.setToolTip("에뮬레이션 내부 표면 재분할 간격입니다. 큰 값은 포인트 수를 줄여 속도를 높입니다.")
+        self._set_quality_mode_for_ds(DEFAULT_UI_REPARAM_DS_A)
 
         self.chk_sputter = QCheckBox("Etch enabled")
         self.chk_sputter.setToolTip("Master switch for the direct sputter etch stack.")
-        self.chk_sputter.setChecked(False)
+        self.chk_sputter.setChecked(True)
         self.chk_ion_transmission = QCheckBox("2 Ion transmission modifier")
         self.chk_ion_transmission.setToolTip(
             "Multiplier on the existing direct sputter output. Deposition is not attenuated."
         )
-        self.chk_ion_transmission.setChecked(False)
+        self.chk_ion_transmission.setChecked(True)
         self.spin_ion_start_depth = QDoubleSpinBox()
         self.spin_ion_start_depth.setRange(0.0, 100.0)
         self.spin_ion_start_depth.setDecimals(1)
@@ -1794,9 +2244,65 @@ class TrenchDepoWindow(QMainWindow):
         self.spin_redepo_soft_los.setSingleStep(1)
         self.spin_redepo_soft_los.setValue(0)
         self.spin_redepo_soft_los.setToolTip("0=fast hard LOS, 1=soft shadow edge, 2=stronger/slow quality.")
+        self.chk_lf_overhang = QCheckBox("LF overhang proxy")
+        self.chk_lf_overhang.setChecked(False)
+        self.chk_lf_overhang.setToolTip("7번: upper/facet sputter source를 shadow-boundary toe에 빠른 Gaussian proxy로 재분배합니다.")
+        self.spin_lf_overhang_dose = QDoubleSpinBox()
+        self.spin_lf_overhang_dose.setRange(0.0, 10.0)
+        self.spin_lf_overhang_dose.setDecimals(2)
+        self.spin_lf_overhang_dose.setSingleStep(0.1)
+        self.spin_lf_overhang_dose.setValue(1.0)
+        self.spin_lf_overhang_sputter_gain = QDoubleSpinBox()
+        self.spin_lf_overhang_sputter_gain.setRange(0.0, 10.0)
+        self.spin_lf_overhang_sputter_gain.setDecimals(2)
+        self.spin_lf_overhang_sputter_gain.setSingleStep(0.1)
+        self.spin_lf_overhang_sputter_gain.setValue(1.0)
+        self.spin_lf_overhang_redepo_fraction = QDoubleSpinBox()
+        self.spin_lf_overhang_redepo_fraction.setRange(0.0, 100.0)
+        self.spin_lf_overhang_redepo_fraction.setDecimals(1)
+        self.spin_lf_overhang_redepo_fraction.setSingleStep(5.0)
+        self.spin_lf_overhang_redepo_fraction.setValue(30.0)
+        self.spin_lf_overhang_survival = QDoubleSpinBox()
+        self.spin_lf_overhang_survival.setRange(0.0, 4.0)
+        self.spin_lf_overhang_survival.setDecimals(2)
+        self.spin_lf_overhang_survival.setSingleStep(0.05)
+        self.spin_lf_overhang_survival.setValue(0.75)
+        self.spin_lf_overhang_width = QDoubleSpinBox()
+        self.spin_lf_overhang_width.setRange(1.0, 5000.0)
+        self.spin_lf_overhang_width.setDecimals(1)
+        self.spin_lf_overhang_width.setSingleStep(20.0)
+        self.spin_lf_overhang_width.setValue(180.0)
+        self.chk_closure_redepo = QCheckBox("Etch+Redepo closure")
+        self.chk_closure_redepo.setChecked(False)
+        self.chk_closure_redepo.setToolTip("8번: 모든 positive etch source를 LOS redeposition source로 쓰고, shadow/neck capture로 upper closure를 검증합니다.")
+        self.spin_closure_redepo_efficiency = QDoubleSpinBox()
+        self.spin_closure_redepo_efficiency.setRange(0.0, 100.0)
+        self.spin_closure_redepo_efficiency.setDecimals(1)
+        self.spin_closure_redepo_efficiency.setSingleStep(5.0)
+        self.spin_closure_redepo_efficiency.setValue(35.0)
+        self.spin_closure_redepo_shadow_gain = QDoubleSpinBox()
+        self.spin_closure_redepo_shadow_gain.setRange(0.0, 20.0)
+        self.spin_closure_redepo_shadow_gain.setDecimals(2)
+        self.spin_closure_redepo_shadow_gain.setSingleStep(0.1)
+        self.spin_closure_redepo_shadow_gain.setValue(2.0)
+        self.spin_closure_redepo_width = QDoubleSpinBox()
+        self.spin_closure_redepo_width.setRange(1.0, 5000.0)
+        self.spin_closure_redepo_width.setDecimals(1)
+        self.spin_closure_redepo_width.setSingleStep(20.0)
+        self.spin_closure_redepo_width.setValue(160.0)
+        self.spin_closure_redepo_survival = QDoubleSpinBox()
+        self.spin_closure_redepo_survival.setRange(0.0, 4.0)
+        self.spin_closure_redepo_survival.setDecimals(2)
+        self.spin_closure_redepo_survival.setSingleStep(0.05)
+        self.spin_closure_redepo_survival.setValue(0.85)
+        self.spin_closure_redepo_smoothing = QDoubleSpinBox()
+        self.spin_closure_redepo_smoothing.setRange(0.0, 5000.0)
+        self.spin_closure_redepo_smoothing.setDecimals(1)
+        self.spin_closure_redepo_smoothing.setSingleStep(20.0)
+        self.spin_closure_redepo_smoothing.setValue(160.0)
         self.chk_depth_deposition = QCheckBox("Depth-dependent deposition")
-        self.chk_depth_deposition.setToolTip("5번은 etch/redeposition 없이 기본 deposition에만 깊이 감쇠를 적용합니다.")
-        self.chk_depth_deposition.setChecked(False)
+        self.chk_depth_deposition.setToolTip("4/5번은 etch/redeposition 없이 기본 deposition에 깊이 감쇠 또는 inhibition을 적용합니다.")
+        self.chk_depth_deposition.setChecked(True)
         self.cmb_depth_feature_type = QComboBox()
         self.cmb_depth_feature_type.addItem("Hole", "hole")
         self.cmb_depth_feature_type.addItem("Line", "line")
@@ -1917,20 +2423,33 @@ class TrenchDepoWindow(QMainWindow):
             float(self.spin_redepo_distance_power.value()),
         )
 
-        self.btn_run = QPushButton("Run")
-        self.btn_reset = QPushButton("Reset")
-        self.btn_open_json = QPushButton("Open JSON")
+        self.btn_run = QPushButton("실행")
+        self.btn_run.setMinimumHeight(38)
+        self.btn_run.setToolTip("현재 구조와 공정 파라미터로 에뮬레이션을 실행합니다.")
+        self.btn_run.setStyleSheet("font-weight: 700;")
+        self.btn_reset = QPushButton("초기화")
+        self.btn_open_json = QPushButton("Run 불러오기")
+        self.btn_open_json.setToolTip("저장된 run JSON을 열어 파라미터와 결과 프레임을 다시 불러옵니다.")
         self.progress_run = QProgressBar()
         self.progress_run.setRange(0, 100)
         self.progress_run.setValue(0)
         self.progress_run.setTextVisible(True)
-        self.progress_run.setFormat("Ready")
+        self.progress_run.setFormat("대기")
         self.progress_run.setVisible(False)
         self.progress_run.setFixedHeight(18)
         self.slider_frame = QSlider(Qt.Orientation.Horizontal)
         self.slider_frame.setRange(0, 0)
         self.slider_frame.setEnabled(False)
-        self.lbl_status = QLabel("Cycle 0/0 | Points 0")
+        self.btn_result_play = QPushButton("반복재생")
+        self.btn_result_play.setEnabled(False)
+        self.chk_show_etch_overlay = QCheckBox("에치 파랑")
+        self.chk_show_etch_overlay.setChecked(True)
+        self.chk_show_etch_overlay.setToolTip("실제 에치가 강한 위치를 파란색으로 표시합니다.")
+        self.chk_show_redepo_overlay = QCheckBox("리뎁 빨강")
+        self.chk_show_redepo_overlay.setChecked(False)
+        self.chk_show_redepo_overlay.setVisible(False)
+        self.chk_show_redepo_overlay.setToolTip("활성 리데포 모델의 target field를 반투명 빨강으로 표시합니다.")
+        self.lbl_status = QLabel("Cycle 0/0 | 점 0")
         self.edit_request_note = QPlainTextEdit()
         self.edit_request_note.setPlaceholderText("요청사항 / 물리 메모를 적으면 run 파일명과 요약에 같이 들어갑니다.")
         self.edit_request_note.setMaximumHeight(88)
@@ -1939,11 +2458,23 @@ class TrenchDepoWindow(QMainWindow):
         self.lbl_run_dir.setMinimumWidth(0)
         self.lbl_run_dir.setWordWrap(False)
         self.lbl_run_dir.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.btn_open_run_dir = QPushButton("Open Folder")
+        self.btn_open_run_dir = QPushButton("폴더 열기")
         self.btn_open_run_dir.setEnabled(False)
 
         self.cmb_emulator_default_preset = QComboBox()
-        self.cmb_emulator_default_preset.setToolTip("Load the default process values for the selected emulator.")
+        self.cmb_emulator_default_preset.setToolTip("선택한 에뮬레이터의 기본 공정값을 불러옵니다.")
+        self.cmb_parameter_preset = QComboBox()
+        self.cmb_parameter_preset.setToolTip("저장된 공정 파라미터 프리셋입니다. 구조 좌표는 포함하지 않습니다.")
+        self.edit_parameter_preset_name = QLineEdit()
+        self.edit_parameter_preset_name.setPlaceholderText("공정 프리셋 이름")
+        self.btn_reload_parameter_presets = QPushButton("새로고침")
+        self.btn_apply_parameter_preset = QPushButton("적용")
+        self.btn_save_parameter_preset = QPushButton("저장")
+        self.btn_delete_parameter_preset = QPushButton("삭제")
+        self.lbl_parameter_preset_active = QLabel("활성: 없음")
+        self.lbl_parameter_preset_active.setWordWrap(True)
+        self.lbl_parameter_preset_path = QLabel("")
+        self.lbl_parameter_preset_path.setWordWrap(True)
 
         self.cmb_split_parameter = QComboBox()
         self.spin_split_start = QDoubleSpinBox()
@@ -1957,12 +2488,12 @@ class TrenchDepoWindow(QMainWindow):
         self.spin_split_step.setRange(0.001, 10000.0)
         self.spin_split_step.setSingleStep(1.0)
         self.cmb_compare_target = QComboBox()
-        self.btn_split_options = QPushButton("Split Options")
+        self.btn_split_options = QPushButton("Split Test")
         self.btn_split_options.setCheckable(True)
-        self.btn_compare_options = QPushButton("Compare Options")
+        self.btn_compare_options = QPushButton("Compare Test")
         self.btn_compare_options.setCheckable(True)
-        self.btn_run_split = QPushButton("Run Split")
-        self.btn_run_compare = QPushButton("Run Compare")
+        self.btn_run_split = QPushButton("Split Test 실행")
+        self.btn_run_compare = QPushButton("Compare Test 실행")
 
         status = QStatusBar(self)
         self.setStatusBar(status)
@@ -1972,6 +2503,9 @@ class TrenchDepoWindow(QMainWindow):
         controls.addWidget(QLabel("Frame"))
         controls.addWidget(self.slider_frame, 1)
         controls.addWidget(self.lbl_status)
+        controls.addWidget(self.chk_show_etch_overlay)
+        controls.addWidget(self.chk_show_redepo_overlay)
+        controls.addWidget(self.btn_result_play)
 
         run_row = QHBoxLayout()
         run_row.setContentsMargins(0, 0, 0, 0)
@@ -1979,41 +2513,59 @@ class TrenchDepoWindow(QMainWindow):
         run_row.addWidget(self.btn_open_run_dir)
 
         self.view_tabs = QTabWidget()
+        self.lbl_progress_view_status = QLabel("진행 대기")
+        self.lbl_progress_view_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.progress_view_bar = QProgressBar()
+        self.progress_view_bar.setRange(0, 1)
+        self.progress_view_bar.setValue(0)
+        self.progress_view_bar.setTextVisible(True)
+        self.progress_view_bar.setFormat("대기")
+        self.progress_view_bar.setFixedWidth(360)
+        self.lbl_progress_geometry_source = QLabel("실행 입력: raw")
+        self.lbl_progress_geometry_source.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        progress_tab = QWidget()
+        progress_layout = QVBoxLayout()
+        progress_layout.setContentsMargins(0, 0, 0, 0)
+        progress_layout.setSpacing(6)
+        progress_status_row = QHBoxLayout()
+        progress_status_row.setContentsMargins(0, 0, 0, 0)
+        progress_status_row.addWidget(self.lbl_progress_view_status)
+        progress_status_row.addStretch(1)
+        progress_status_row.addWidget(self.progress_view_bar)
+        progress_layout.addWidget(self.progress_geometry_view, 1)
+        progress_layout.addWidget(self.lbl_progress_geometry_source)
+        progress_layout.addLayout(progress_status_row)
+        progress_tab.setLayout(progress_layout)
+
         result_tab = QWidget()
         result_layout = QVBoxLayout()
         result_layout.setContentsMargins(0, 0, 0, 0)
         result_layout.addWidget(self.view, 1)
         result_tab.setLayout(result_layout)
 
-        self.btn_fit_structure = QPushButton("Fit")
-        self.btn_reset_structure = QPushButton("Default")
-        self.btn_load_structure_view = QPushButton("Load Structure")
-        self.btn_save_structure_view = QPushButton("Save to Excel")
-        self.btn_structure_next = QPushButton("Next: Smoothing")
-        self.lbl_geometry_points = QLabel("Geometry: 0 pts")
-        self.lbl_geometry_source = QLabel("Input: raw")
+        self.btn_fit_structure = QPushButton("화면 맞춤")
+        self.btn_reset_structure = QPushButton("기본 구조")
+        self.lbl_geometry_points = QLabel("구조: 0점")
+        self.lbl_geometry_source = QLabel("입력: raw")
         self.lbl_geometry_source.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.cmb_structure_library = QComboBox()
         self.edit_structure_name = QLineEdit()
-        self.edit_structure_name.setPlaceholderText("Structure name / Excel sheet")
-        self.btn_reload_structure_library = QPushButton("Reload")
-        self.btn_load_structure = QPushButton("Load Structure")
-        self.btn_save_structure = QPushButton("Save to Excel")
-        self.btn_export_default_structures = QPushButton("Export Defaults")
-        self.btn_open_structure_workbook = QPushButton("Open Excel")
+        self.edit_structure_name.setPlaceholderText("구조 이름 / 프리셋")
+        self.btn_reload_structure_library = QPushButton("새로고침")
+        self.btn_save_structure = QPushButton("Excel 저장")
+        self.btn_delete_structure = QPushButton("삭제")
+        self.btn_export_default_structures = QPushButton("기본 구조 내보내기")
+        self.btn_open_structure_workbook = QPushButton("Excel 열기")
         self.lbl_structure_library_path = QLabel("")
         self.lbl_structure_library_path.setWordWrap(True)
-        self.lbl_structure_library_active = QLabel("Active: emulator default")
+        self.lbl_structure_library_active = QLabel("활성: 에뮬레이터 기본값")
         self.lbl_structure_library_active.setWordWrap(True)
         structure_buttons = QHBoxLayout()
         structure_buttons.setContentsMargins(0, 0, 0, 0)
         structure_buttons.addWidget(self.btn_fit_structure)
         structure_buttons.addWidget(self.btn_reset_structure)
-        structure_buttons.addWidget(self.btn_load_structure_view)
-        structure_buttons.addWidget(self.btn_save_structure_view)
         structure_buttons.addWidget(self.lbl_geometry_points, 1)
         structure_buttons.addWidget(self.lbl_geometry_source)
-        structure_buttons.addWidget(self.btn_structure_next)
 
         structure_tab = QWidget()
         structure_layout = QVBoxLayout()
@@ -2031,30 +2583,22 @@ class TrenchDepoWindow(QMainWindow):
         self.spin_smooth_iterations.setRange(0, 200)
         self.spin_smooth_iterations.setSingleStep(1)
         self.spin_smooth_iterations.setValue(4)
-        self.btn_apply_smoothing = QPushButton("Smooth")
-        self.btn_use_smoothed_geometry = QPushButton("Use Smooth")
-        self.btn_use_raw_geometry = QPushButton("Use Raw")
-        self.btn_smoothing_back = QPushButton("Back: Structure")
-        self.btn_smoothing_next = QPushButton("Next: Results")
-        self.lbl_smoothing_status = QLabel("Smooth: not applied")
+        self.btn_apply_smoothing = QPushButton("스무딩 적용")
+        self.btn_use_smoothed_geometry = QPushButton("스무딩 사용")
+        self.btn_use_raw_geometry = QPushButton("Raw 사용")
+        self.lbl_smoothing_status = QLabel("스무딩: 미적용")
         smooth_grid = QGridLayout()
         smooth_grid.setContentsMargins(0, 0, 0, 0)
         smooth_grid.setHorizontalSpacing(8)
         smooth_grid.setVerticalSpacing(6)
-        smooth_grid.addWidget(QLabel("Segments"), 0, 0)
+        smooth_grid.addWidget(QLabel("분할"), 0, 0)
         smooth_grid.addWidget(self.spin_smooth_segments, 0, 1)
-        smooth_grid.addWidget(QLabel("Iters"), 0, 2)
+        smooth_grid.addWidget(QLabel("반복"), 0, 2)
         smooth_grid.addWidget(self.spin_smooth_iterations, 0, 3)
         smooth_grid.addWidget(self.btn_apply_smoothing, 0, 4)
         smooth_grid.addWidget(self.btn_use_smoothed_geometry, 1, 0, 1, 2)
         smooth_grid.addWidget(self.btn_use_raw_geometry, 1, 2, 1, 2)
         smooth_grid.addWidget(self.lbl_smoothing_status, 1, 4)
-
-        smooth_nav = QHBoxLayout()
-        smooth_nav.setContentsMargins(0, 0, 0, 0)
-        smooth_nav.addWidget(self.btn_smoothing_back)
-        smooth_nav.addStretch(1)
-        smooth_nav.addWidget(self.btn_smoothing_next)
 
         smoothing_tab = QWidget()
         smoothing_layout = QVBoxLayout()
@@ -2063,9 +2607,10 @@ class TrenchDepoWindow(QMainWindow):
         smoothing_layout.addWidget(self.smoothing_view, 1)
         smoothing_tab.setLayout(smoothing_layout)
 
-        self.view_tabs.addTab(structure_tab, "1 Structure")
-        self.view_tabs.addTab(smoothing_tab, "2 Smoothing")
-        self.view_tabs.addTab(result_tab, "3 Result")
+        self.view_tabs.addTab(structure_tab, "1 구조")
+        self.view_tabs.addTab(smoothing_tab, "2 스무딩")
+        self.view_tabs.addTab(progress_tab, "3 진행")
+        self.view_tabs.addTab(result_tab, "4 결과")
 
         left_panel = QWidget()
         left_layout = QVBoxLayout()
@@ -2077,56 +2622,73 @@ class TrenchDepoWindow(QMainWindow):
         left_layout.addWidget(self.result_controls_widget)
         left_panel.setLayout(left_layout)
 
-        emulator_group = QGroupBox("3 Result / Emulator Version")
+        emulator_group = QGroupBox("3 진행 / 에뮬레이터 버전")
         emulator_layout = QVBoxLayout()
         emulator_layout.setContentsMargins(10, 10, 10, 10)
         emulator_layout.addLayout(self.emulator_toggle_row)
         preset_row = QHBoxLayout()
         preset_row.setContentsMargins(0, 0, 0, 0)
-        preset_row.addWidget(QLabel("Default option"))
+        preset_row.addWidget(QLabel("기본 옵션"))
         preset_row.addWidget(self.cmb_emulator_default_preset, 1)
         emulator_layout.addLayout(preset_row)
         emulator_group.setLayout(emulator_layout)
+
+        parameter_preset_group = QGroupBox("공정 파라미터 프리셋")
+        parameter_preset_layout = QGridLayout()
+        parameter_preset_layout.setContentsMargins(10, 10, 10, 10)
+        parameter_preset_layout.setHorizontalSpacing(8)
+        parameter_preset_layout.setVerticalSpacing(8)
+        parameter_preset_layout.addWidget(QLabel("프리셋"), 0, 0)
+        parameter_preset_layout.addWidget(self.cmb_parameter_preset, 0, 1, 1, 3)
+        parameter_preset_layout.addWidget(QLabel("이름"), 1, 0)
+        parameter_preset_layout.addWidget(self.edit_parameter_preset_name, 1, 1, 1, 3)
+        parameter_preset_layout.addWidget(self.btn_reload_parameter_presets, 2, 0)
+        parameter_preset_layout.addWidget(self.btn_apply_parameter_preset, 2, 1)
+        parameter_preset_layout.addWidget(self.btn_save_parameter_preset, 2, 2)
+        parameter_preset_layout.addWidget(self.btn_delete_parameter_preset, 2, 3)
+        parameter_preset_layout.addWidget(self.lbl_parameter_preset_active, 3, 0, 1, 4)
+        parameter_preset_layout.addWidget(self.lbl_parameter_preset_path, 4, 0, 1, 4)
+        parameter_preset_group.setLayout(parameter_preset_layout)
 
         self.structure_points_model = PointsTableModel()
         self.structure_points_table = PointsTableView()
         self.structure_points_table.setModel(self.structure_points_model)
         self.structure_points_table.setMinimumHeight(160)
-        self.structure_points_group = QGroupBox("Structure Points")
+        self.structure_points_group = QGroupBox("구조 좌표")
         structure_points_layout = QVBoxLayout()
         structure_points_layout.setContentsMargins(10, 10, 10, 10)
         structure_points_layout.addWidget(self.structure_points_table, 1)
         self.structure_points_group.setLayout(structure_points_layout)
 
-        self.structure_library_group = QGroupBox("Structure Library")
+        self.structure_library_group = QGroupBox("구조 라이브러리")
         structure_library_layout = QGridLayout()
         structure_library_layout.setContentsMargins(10, 10, 10, 10)
         structure_library_layout.setHorizontalSpacing(8)
         structure_library_layout.setVerticalSpacing(8)
-        structure_library_layout.addWidget(QLabel("Sheet"), 0, 0)
+        structure_library_layout.addWidget(QLabel("프리셋"), 0, 0)
         structure_library_layout.addWidget(self.cmb_structure_library, 0, 1, 1, 3)
-        structure_library_layout.addWidget(QLabel("Name"), 1, 0)
+        structure_library_layout.addWidget(QLabel("이름"), 1, 0)
         structure_library_layout.addWidget(self.edit_structure_name, 1, 1, 1, 3)
         structure_library_layout.addWidget(self.btn_reload_structure_library, 2, 0)
-        structure_library_layout.addWidget(self.btn_load_structure, 2, 1)
-        structure_library_layout.addWidget(self.btn_save_structure, 2, 2)
-        structure_library_layout.addWidget(self.btn_open_structure_workbook, 2, 3)
+        structure_library_layout.addWidget(self.btn_save_structure, 2, 1)
+        structure_library_layout.addWidget(self.btn_open_structure_workbook, 2, 2)
+        structure_library_layout.addWidget(self.btn_delete_structure, 2, 3)
         structure_library_layout.addWidget(self.btn_export_default_structures, 3, 0, 1, 2)
         structure_library_layout.addWidget(self.lbl_structure_library_active, 3, 2, 1, 2)
         structure_library_layout.addWidget(self.lbl_structure_library_path, 4, 0, 1, 4)
         self.structure_library_group.setLayout(structure_library_layout)
 
-        self.btn_load_overlay = QPushButton("Load Image")
-        self.btn_clear_overlay = QPushButton("Clear Image")
-        self.btn_move_overlay = QPushButton("Move Image")
+        self.btn_load_overlay = QPushButton("이미지 불러오기")
+        self.btn_clear_overlay = QPushButton("이미지 지우기")
+        self.btn_move_overlay = QPushButton("이미지 이동")
         self.btn_move_overlay.setCheckable(True)
         self.btn_move_overlay.setEnabled(False)
-        self.lbl_overlay_opacity = QLabel("Opacity")
+        self.lbl_overlay_opacity = QLabel("불투명도")
         self.slider_overlay_opacity = QSlider(Qt.Orientation.Horizontal)
         self.slider_overlay_opacity.setRange(0, 100)
         self.slider_overlay_opacity.setValue(int(round(self._overlay_opacity * 100.0)))
         self.slider_overlay_opacity.setFixedWidth(160)
-        self.overlay_group = QGroupBox("Image Overlay")
+        self.overlay_group = QGroupBox("이미지 오버레이")
         overlay_layout = QVBoxLayout()
         overlay_layout.setContentsMargins(10, 10, 10, 10)
         overlay_buttons = QHBoxLayout()
@@ -2141,25 +2703,24 @@ class TrenchDepoWindow(QMainWindow):
         overlay_layout.addLayout(overlay_opacity_row)
         self.overlay_group.setLayout(overlay_layout)
 
-        self.smoothing_controls_group = QGroupBox("Smoothing")
+        self.smoothing_controls_group = QGroupBox("스무딩")
         smoothing_controls_layout = QVBoxLayout()
         smoothing_controls_layout.setContentsMargins(10, 10, 10, 10)
         smoothing_controls_layout.setSpacing(8)
         smoothing_controls_layout.addLayout(smooth_grid)
-        smoothing_controls_layout.addLayout(smooth_nav)
         self.smoothing_controls_group.setLayout(smoothing_controls_layout)
         self.smoothed_points_model = PointsTableModel()
         self.smoothed_points_table = PointsTableView()
         self.smoothed_points_table.setModel(self.smoothed_points_model)
         self.smoothed_points_table.setEditTriggers(PointsTableView.NoEditTriggers)
         self.smoothed_points_table.setMinimumHeight(160)
-        self.smoothed_points_group = QGroupBox("Smoothing Result Points")
+        self.smoothed_points_group = QGroupBox("스무딩 결과 좌표")
         smoothed_points_layout = QVBoxLayout()
         smoothed_points_layout.setContentsMargins(10, 10, 10, 10)
         smoothed_points_layout.addWidget(self.smoothed_points_table, 1)
         self.smoothed_points_group.setLayout(smoothed_points_layout)
 
-        params_group = QGroupBox("3 Result / Process Parameters")
+        params_group = QGroupBox("3 진행 / 공정 파라미터")
         params_grid = QGridLayout()
         params_grid.setContentsMargins(10, 10, 10, 10)
         params_grid.setHorizontalSpacing(8)
@@ -2184,7 +2745,7 @@ class TrenchDepoWindow(QMainWindow):
             border="#a5f3fc",
         )
         self.lbl_ion_geometry_section = self._make_parameter_section(
-            "2번 Geometry shadowing modifiers",
+            "2번 Geometry shadowing 보정",
             color="#155e75",
             background="#f0f9ff",
             border="#bae6fd",
@@ -2192,8 +2753,22 @@ class TrenchDepoWindow(QMainWindow):
         params_grid.addWidget(self.lbl_deposition_section, 0, 0, 1, 2)
         params_grid.addWidget(QLabel("Cycles"), 1, 0)
         params_grid.addWidget(self.spin_cycles, 1, 1)
-        params_grid.addWidget(QLabel("Depo A/CYC"), 2, 0)
-        params_grid.addWidget(self.spin_angstrom_per_cycle, 2, 1)
+        deposition_controls = QWidget()
+        deposition_controls_layout = QGridLayout()
+        deposition_controls_layout.setContentsMargins(0, 0, 0, 0)
+        deposition_controls_layout.setHorizontalSpacing(6)
+        deposition_controls_layout.setVerticalSpacing(4)
+        self.lbl_depo_rate = QLabel("Depo A/CYC")
+        self.lbl_quality_mode = QLabel("품질")
+        self.lbl_reparam_ds = QLabel("조각 크기")
+        deposition_controls_layout.addWidget(self.lbl_depo_rate, 0, 0)
+        deposition_controls_layout.addWidget(self.spin_angstrom_per_cycle, 0, 1)
+        deposition_controls_layout.addWidget(self.lbl_quality_mode, 1, 0)
+        deposition_controls_layout.addWidget(self.cmb_quality_mode, 1, 1)
+        deposition_controls_layout.addWidget(self.lbl_reparam_ds, 2, 0)
+        deposition_controls_layout.addWidget(self.spin_reparam_ds, 2, 1)
+        deposition_controls.setLayout(deposition_controls_layout)
+        params_grid.addWidget(deposition_controls, 2, 0, 1, 2)
         params_grid.addWidget(self.lbl_etch_section, 3, 0, 1, 2)
         params_grid.addWidget(self.chk_sputter, 4, 0, 1, 2)
         params_grid.addWidget(self.lbl_sputter_section, 5, 0, 1, 2)
@@ -2201,7 +2776,7 @@ class TrenchDepoWindow(QMainWindow):
         self.lbl_sputter_peak_pct = QLabel("Peak %")
         self.lbl_sputter_peak = QLabel("Peak")
         self.lbl_sputter_width = QLabel("Width")
-        self.lbl_sputter_smoothing = QLabel("Smooth A")
+        self.lbl_sputter_smoothing = QLabel("스무딩 A")
         params_grid.addWidget(self.lbl_sputter_strength, 6, 0)
         params_grid.addWidget(self.spin_sputter_strength, 6, 1)
         params_grid.addWidget(self.lbl_sputter_peak_pct, 7, 0)
@@ -2308,7 +2883,7 @@ class TrenchDepoWindow(QMainWindow):
         self.lbl_depth_post_fill_line = QLabel("Line fill %")
         self.lbl_depth_line_open_path = QLabel("Line open")
         self.lbl_depth_residual_decay = QLabel("Decay len A")
-        self.btn_depth_advanced = QPushButton("Advanced fill options")
+        self.btn_depth_advanced = QPushButton("고급 fill 옵션")
         self.btn_depth_advanced.setCheckable(True)
         self.lbl_depth_parameter_help = QLabel(
             "Depth map: deeper areas receive less deposition. Drag the dots or use the fields."
@@ -2371,6 +2946,52 @@ class TrenchDepoWindow(QMainWindow):
         params_grid.addWidget(self.spin_depth_line_open_path, 49, 1)
         params_grid.addWidget(self.lbl_depth_residual_decay, 50, 0)
         params_grid.addWidget(self.spin_depth_residual_decay, 50, 1)
+        self.lbl_lf_overhang_section = self._make_parameter_section(
+            "7번 LF overhang proxy",
+            color="#7c3aed",
+            background="#f5f3ff",
+            border="#ddd6fe",
+        )
+        params_grid.addWidget(self.lbl_lf_overhang_section, 51, 0, 1, 2)
+        params_grid.addWidget(self.chk_lf_overhang, 52, 0, 1, 2)
+        self.lbl_lf_overhang_dose = QLabel("LF dose")
+        self.lbl_lf_overhang_sputter_gain = QLabel("Sputter gain")
+        self.lbl_lf_overhang_redepo_fraction = QLabel("Redepo %")
+        self.lbl_lf_overhang_survival = QLabel("Survival loss")
+        self.lbl_lf_overhang_width = QLabel("Width A")
+        params_grid.addWidget(self.lbl_lf_overhang_dose, 53, 0)
+        params_grid.addWidget(self.spin_lf_overhang_dose, 53, 1)
+        params_grid.addWidget(self.lbl_lf_overhang_sputter_gain, 54, 0)
+        params_grid.addWidget(self.spin_lf_overhang_sputter_gain, 54, 1)
+        params_grid.addWidget(self.lbl_lf_overhang_redepo_fraction, 55, 0)
+        params_grid.addWidget(self.spin_lf_overhang_redepo_fraction, 55, 1)
+        params_grid.addWidget(self.lbl_lf_overhang_survival, 56, 0)
+        params_grid.addWidget(self.spin_lf_overhang_survival, 56, 1)
+        params_grid.addWidget(self.lbl_lf_overhang_width, 57, 0)
+        params_grid.addWidget(self.spin_lf_overhang_width, 57, 1)
+        self.lbl_closure_redepo_section = self._make_parameter_section(
+            "8번 Etch+Redepo closure",
+            color="#b91c1c",
+            background="#fff1f2",
+            border="#fecdd3",
+        )
+        params_grid.addWidget(self.lbl_closure_redepo_section, 58, 0, 1, 2)
+        params_grid.addWidget(self.chk_closure_redepo, 59, 0, 1, 2)
+        self.lbl_closure_redepo_efficiency = QLabel("Closure redepo %")
+        self.lbl_closure_redepo_shadow_gain = QLabel("Shadow capture")
+        self.lbl_closure_redepo_width = QLabel("Width A")
+        self.lbl_closure_redepo_survival = QLabel("Survival loss")
+        self.lbl_closure_redepo_smoothing = QLabel("Smooth A")
+        params_grid.addWidget(self.lbl_closure_redepo_efficiency, 60, 0)
+        params_grid.addWidget(self.spin_closure_redepo_efficiency, 60, 1)
+        params_grid.addWidget(self.lbl_closure_redepo_shadow_gain, 61, 0)
+        params_grid.addWidget(self.spin_closure_redepo_shadow_gain, 61, 1)
+        params_grid.addWidget(self.lbl_closure_redepo_width, 62, 0)
+        params_grid.addWidget(self.spin_closure_redepo_width, 62, 1)
+        params_grid.addWidget(self.lbl_closure_redepo_survival, 63, 0)
+        params_grid.addWidget(self.spin_closure_redepo_survival, 63, 1)
+        params_grid.addWidget(self.lbl_closure_redepo_smoothing, 64, 0)
+        params_grid.addWidget(self.spin_closure_redepo_smoothing, 64, 1)
         params_group.setLayout(params_grid)
 
         self.redepo_lobe_group = QGroupBox("4 Redeposition Lobe")
@@ -2379,34 +3000,18 @@ class TrenchDepoWindow(QMainWindow):
         redepo_lobe_layout.addWidget(self.redepo_lobe_editor)
         self.redepo_lobe_group.setLayout(redepo_lobe_layout)
 
-        action_group = QGroupBox("3 Results / Run")
-        action_layout = QVBoxLayout()
-        action_layout.setContentsMargins(10, 10, 10, 10)
-        action_buttons = QHBoxLayout()
-        action_buttons.addWidget(self.btn_open_json)
-        action_buttons.addWidget(self.btn_run)
-        action_buttons.addWidget(self.btn_reset)
-        action_layout.addLayout(action_buttons)
-        action_layout.addWidget(self.progress_run)
-        result_option_buttons = QHBoxLayout()
-        result_option_buttons.addWidget(self.btn_split_options)
-        result_option_buttons.addWidget(self.btn_compare_options)
-        action_layout.addLayout(result_option_buttons)
-        action_layout.addLayout(run_row)
-        action_group.setLayout(action_layout)
-
-        split_group = QGroupBox("Split Options")
+        split_group = QGroupBox("Split Test 파라미터")
         split_grid = QGridLayout()
         split_grid.setContentsMargins(10, 10, 10, 10)
         split_grid.setHorizontalSpacing(8)
         split_grid.setVerticalSpacing(8)
-        split_grid.addWidget(QLabel("Target"), 0, 0)
+        split_grid.addWidget(QLabel("대상"), 0, 0)
         split_grid.addWidget(self.cmb_split_parameter, 0, 1)
-        split_grid.addWidget(QLabel("Start"), 1, 0)
+        split_grid.addWidget(QLabel("시작"), 1, 0)
         split_grid.addWidget(self.spin_split_start, 1, 1)
-        split_grid.addWidget(QLabel("End"), 2, 0)
+        split_grid.addWidget(QLabel("끝"), 2, 0)
         split_grid.addWidget(self.spin_split_end, 2, 1)
-        split_grid.addWidget(QLabel("Step"), 3, 0)
+        split_grid.addWidget(QLabel("간격"), 3, 0)
         split_grid.addWidget(self.spin_split_step, 3, 1)
         split_buttons = QHBoxLayout()
         split_buttons.addWidget(self.btn_run_split)
@@ -2414,16 +3019,34 @@ class TrenchDepoWindow(QMainWindow):
         split_group.setLayout(split_grid)
         split_group.setVisible(False)
 
-        compare_group = QGroupBox("Compare Options")
+        compare_group = QGroupBox("Compare Test 파라미터")
         compare_grid = QGridLayout()
         compare_grid.setContentsMargins(10, 10, 10, 10)
         compare_grid.setHorizontalSpacing(8)
         compare_grid.setVerticalSpacing(8)
-        compare_grid.addWidget(QLabel("Compare to"), 0, 0)
+        compare_grid.addWidget(QLabel("비교 대상"), 0, 0)
         compare_grid.addWidget(self.cmb_compare_target, 0, 1)
         compare_grid.addWidget(self.btn_run_compare, 1, 0, 1, 2)
         compare_group.setLayout(compare_grid)
         compare_group.setVisible(False)
+
+        action_group = QGroupBox("3 진행 / 실행")
+        action_layout = QVBoxLayout()
+        action_layout.setContentsMargins(10, 10, 10, 10)
+        action_layout.addWidget(self.btn_run)
+        action_buttons = QHBoxLayout()
+        action_buttons.addWidget(self.btn_open_json)
+        action_buttons.addWidget(self.btn_reset)
+        action_layout.addLayout(action_buttons)
+        action_layout.addWidget(self.progress_run)
+        result_option_buttons = QHBoxLayout()
+        result_option_buttons.addWidget(self.btn_split_options)
+        result_option_buttons.addWidget(self.btn_compare_options)
+        action_layout.addLayout(result_option_buttons)
+        action_layout.addWidget(split_group)
+        action_layout.addWidget(compare_group)
+        action_layout.addLayout(run_row)
+        action_group.setLayout(action_layout)
 
         note_group = QGroupBox("요청사항 / 물리 메모")
         note_layout = QVBoxLayout()
@@ -2452,6 +3075,7 @@ class TrenchDepoWindow(QMainWindow):
         depth_profile_group.setLayout(depth_profile_layout)
 
         self.emulator_group = emulator_group
+        self.parameter_preset_group = parameter_preset_group
         self.params_group = params_group
         self.action_group = action_group
         self.split_group = split_group
@@ -2557,11 +3181,41 @@ class TrenchDepoWindow(QMainWindow):
             self.lbl_depth_parameter_help,
             self.depth_deposition_editor,
         ]
+        self._lf_overhang_widgets = [
+            self.lbl_lf_overhang_section,
+            self.chk_lf_overhang,
+            self.lbl_lf_overhang_dose,
+            self.spin_lf_overhang_dose,
+            self.lbl_lf_overhang_sputter_gain,
+            self.spin_lf_overhang_sputter_gain,
+            self.lbl_lf_overhang_redepo_fraction,
+            self.spin_lf_overhang_redepo_fraction,
+            self.lbl_lf_overhang_survival,
+            self.spin_lf_overhang_survival,
+            self.lbl_lf_overhang_width,
+            self.spin_lf_overhang_width,
+        ]
+        self._closure_redepo_widgets = [
+            self.lbl_closure_redepo_section,
+            self.chk_closure_redepo,
+            self.lbl_closure_redepo_efficiency,
+            self.spin_closure_redepo_efficiency,
+            self.lbl_closure_redepo_shadow_gain,
+            self.spin_closure_redepo_shadow_gain,
+            self.lbl_closure_redepo_width,
+            self.spin_closure_redepo_width,
+            self.lbl_closure_redepo_survival,
+            self.spin_closure_redepo_survival,
+            self.lbl_closure_redepo_smoothing,
+            self.spin_closure_redepo_smoothing,
+        ]
 
-        self.btn_structure_panel_next = QPushButton("Next: Smoothing")
-        self.btn_smoothing_panel_back = QPushButton("Back: Structure")
-        self.btn_smoothing_panel_next = QPushButton("Next: Results")
-        self.btn_results_panel_back = QPushButton("Back: Smoothing")
+        self.btn_structure_panel_next = QPushButton("다음: 스무딩")
+        self.btn_smoothing_panel_back = QPushButton("이전: 구조")
+        self.btn_smoothing_panel_next = QPushButton("다음: 진행")
+        self.btn_progress_panel_back = QPushButton("이전: 스무딩")
+        self.btn_progress_panel_next = QPushButton("다음: 결과")
+        self.btn_results_panel_back = QPushButton("이전: 진행")
 
         self.structure_panel_content = QWidget()
         structure_panel_layout = QVBoxLayout()
@@ -2593,27 +3247,55 @@ class TrenchDepoWindow(QMainWindow):
         smoothing_panel_layout.addStretch(1)
         self.smoothing_panel_content.setLayout(smoothing_panel_layout)
 
-        self.results_panel_content = QWidget()
-        results_panel_layout = QVBoxLayout()
-        results_panel_layout.setContentsMargins(0, 0, 0, 0)
-        results_panel_layout.setSpacing(8)
-        results_panel_layout.addWidget(emulator_group)
-        results_panel_layout.addWidget(action_group)
-        results_panel_layout.addWidget(params_group)
-        results_panel_layout.addWidget(gaussian_group)
-        results_panel_layout.addWidget(ion_map_group)
-        results_panel_layout.addWidget(self.redepo_lobe_group)
-        results_panel_layout.addWidget(depth_profile_group)
-        results_panel_layout.addWidget(split_group)
-        results_panel_layout.addWidget(compare_group)
-        results_panel_layout.addWidget(note_group)
-        results_panel_nav = QHBoxLayout()
-        results_panel_nav.setContentsMargins(0, 0, 0, 0)
-        results_panel_nav.addWidget(self.btn_results_panel_back)
-        results_panel_nav.addStretch(1)
-        results_panel_layout.addLayout(results_panel_nav)
-        results_panel_layout.addStretch(1)
-        self.results_panel_content.setLayout(results_panel_layout)
+        self.progress_panel_content = QWidget()
+        progress_panel_layout = QVBoxLayout()
+        progress_panel_layout.setContentsMargins(0, 0, 0, 0)
+        progress_panel_layout.setSpacing(8)
+        progress_panel_layout.addWidget(emulator_group)
+        progress_panel_layout.addWidget(parameter_preset_group)
+        progress_panel_layout.addWidget(action_group)
+        progress_panel_layout.addWidget(params_group)
+        progress_panel_layout.addWidget(gaussian_group)
+        progress_panel_layout.addWidget(ion_map_group)
+        progress_panel_layout.addWidget(self.redepo_lobe_group)
+        progress_panel_layout.addWidget(depth_profile_group)
+        progress_panel_layout.addWidget(note_group)
+        progress_panel_nav = QHBoxLayout()
+        progress_panel_nav.setContentsMargins(0, 0, 0, 0)
+        progress_panel_nav.addWidget(self.btn_progress_panel_back)
+        progress_panel_nav.addStretch(1)
+        progress_panel_nav.addWidget(self.btn_progress_panel_next)
+        progress_panel_layout.addLayout(progress_panel_nav)
+        progress_panel_layout.addStretch(1)
+        self.progress_panel_content.setLayout(progress_panel_layout)
+
+        self.result_panel_content = QWidget()
+        result_panel_layout = QVBoxLayout()
+        result_panel_layout.setContentsMargins(0, 0, 0, 0)
+        result_panel_layout.setSpacing(8)
+        self.result_summary_group = QGroupBox("4 결과 / 보기")
+        result_summary_layout = QVBoxLayout()
+        result_summary_layout.setContentsMargins(10, 10, 10, 10)
+        self.lbl_result_summary = QLabel("결과: 아직 실행 전")
+        self.lbl_result_summary.setWordWrap(True)
+        self.lbl_result_hint = QLabel("왼쪽 결과 화면에서 프레임 슬라이더로 cycle별 profile을 확인합니다.")
+        self.lbl_result_hint.setWordWrap(True)
+        self.edit_result_parameters = QPlainTextEdit()
+        self.edit_result_parameters.setReadOnly(True)
+        self.edit_result_parameters.setMinimumHeight(300)
+        self.edit_result_parameters.setPlainText("아직 실행된 결과가 없습니다.")
+        result_summary_layout.addWidget(self.lbl_result_summary)
+        result_summary_layout.addWidget(self.lbl_result_hint)
+        result_summary_layout.addWidget(self.edit_result_parameters, 1)
+        self.result_summary_group.setLayout(result_summary_layout)
+        result_panel_layout.addWidget(self.result_summary_group)
+        result_panel_nav = QHBoxLayout()
+        result_panel_nav.setContentsMargins(0, 0, 0, 0)
+        result_panel_nav.addWidget(self.btn_results_panel_back)
+        result_panel_nav.addStretch(1)
+        result_panel_layout.addLayout(result_panel_nav)
+        result_panel_layout.addStretch(1)
+        self.result_panel_content.setLayout(result_panel_layout)
 
         def make_workflow_scroll(content: QWidget) -> QScrollArea:
             scroll = QScrollArea()
@@ -2624,11 +3306,15 @@ class TrenchDepoWindow(QMainWindow):
 
         self.structure_scroll_area = make_workflow_scroll(self.structure_panel_content)
         self.smoothing_scroll_area = make_workflow_scroll(self.smoothing_panel_content)
-        self.results_scroll_area = make_workflow_scroll(self.results_panel_content)
+        self.progress_scroll_area = make_workflow_scroll(self.progress_panel_content)
+        self.result_scroll_area = make_workflow_scroll(self.result_panel_content)
+        self.results_panel_content = self.result_panel_content
+        self.results_scroll_area = self.result_scroll_area
         self.workflow_tabs = QTabWidget()
-        self.workflow_tabs.addTab(self.structure_scroll_area, "1 Structure")
-        self.workflow_tabs.addTab(self.smoothing_scroll_area, "2 Smoothing")
-        self.workflow_tabs.addTab(self.results_scroll_area, "3 Result")
+        self.workflow_tabs.addTab(self.structure_scroll_area, "1 구조")
+        self.workflow_tabs.addTab(self.smoothing_scroll_area, "2 스무딩")
+        self.workflow_tabs.addTab(self.progress_scroll_area, "3 진행")
+        self.workflow_tabs.addTab(self.result_scroll_area, "4 결과")
 
         right_panel = QWidget()
         right_panel.setMinimumWidth(440)
@@ -2656,6 +3342,7 @@ class TrenchDepoWindow(QMainWindow):
         central = QWidget()
         central.setLayout(root)
         self.setCentralWidget(central)
+        self._install_value_control_wheel_guards()
 
         self.btn_run.clicked.connect(self.run_emulation)
         self.btn_reset.clicked.connect(self.reset_defaults)
@@ -2667,13 +3354,15 @@ class TrenchDepoWindow(QMainWindow):
         self.btn_compare_options.toggled.connect(self._on_compare_options_toggled)
         self.view_tabs.currentChanged.connect(self._on_view_workflow_tab_changed)
         self.workflow_tabs.currentChanged.connect(self._on_control_workflow_tab_changed)
-        self.btn_structure_next.clicked.connect(lambda: self._set_workflow_step("smoothing"))
-        self.btn_smoothing_back.clicked.connect(lambda: self._set_workflow_step("structure"))
-        self.btn_smoothing_next.clicked.connect(lambda: self._set_workflow_step("results"))
         self.btn_structure_panel_next.clicked.connect(lambda: self._set_workflow_step("smoothing"))
         self.btn_smoothing_panel_back.clicked.connect(lambda: self._set_workflow_step("structure"))
-        self.btn_smoothing_panel_next.clicked.connect(lambda: self._set_workflow_step("results"))
-        self.btn_results_panel_back.clicked.connect(lambda: self._set_workflow_step("smoothing"))
+        self.btn_smoothing_panel_next.clicked.connect(lambda: self._set_workflow_step("progress"))
+        self.btn_progress_panel_back.clicked.connect(lambda: self._set_workflow_step("smoothing"))
+        self.btn_progress_panel_next.clicked.connect(lambda: self._set_workflow_step("results"))
+        self.btn_results_panel_back.clicked.connect(lambda: self._set_workflow_step("progress"))
+        self.btn_result_play.clicked.connect(self.toggle_result_playback)
+        self.cmb_quality_mode.currentIndexChanged.connect(self._on_quality_mode_changed)
+        self.spin_reparam_ds.valueChanged.connect(self._on_reparam_ds_changed)
         self.btn_load_overlay.clicked.connect(self._load_overlay_image)
         self.btn_clear_overlay.clicked.connect(self._clear_overlay_image)
         self.btn_move_overlay.toggled.connect(self._on_overlay_move_toggled)
@@ -2683,11 +3372,15 @@ class TrenchDepoWindow(QMainWindow):
         self.structure_points_table.replacePointsRequested.connect(self._on_structure_table_replace_points_requested)
         self.cmb_split_parameter.currentIndexChanged.connect(self.apply_split_parameter_defaults)
         self.slider_frame.valueChanged.connect(self.show_frame)
+        self.chk_show_etch_overlay.toggled.connect(self.view.set_etch_overlay_visible)
+        self.chk_show_redepo_overlay.toggled.connect(self.view.set_redepo_overlay_visible)
         self.chk_sputter.toggled.connect(self.sync_etch_control_availability)
         self.chk_ion_transmission.toggled.connect(self.sync_etch_control_availability)
         self.chk_reflected_ion.toggled.connect(self.sync_etch_control_availability)
         self.chk_redepo.toggled.connect(self.sync_etch_control_availability)
         self.chk_depth_deposition.toggled.connect(self.sync_etch_control_availability)
+        self.chk_lf_overhang.toggled.connect(self.sync_etch_control_availability)
+        self.chk_closure_redepo.toggled.connect(self.sync_etch_control_availability)
         self.spin_sputter_strength.valueChanged.connect(self.sync_sputter_curve_cap_from_spin)
         self.spin_sputter_peak_pct.valueChanged.connect(self.sync_sputter_curve_from_spins)
         self.spin_sputter_peak.valueChanged.connect(self.sync_sputter_curve_from_spins)
@@ -2721,12 +3414,16 @@ class TrenchDepoWindow(QMainWindow):
         self.smoothing_view.pointInserted.connect(self._on_smoothed_point_inserted)
         self.smoothing_view.pointDeleted.connect(self._on_smoothed_point_deleted)
         self.btn_reload_structure_library.clicked.connect(self.refresh_structure_library)
-        self.btn_load_structure.clicked.connect(self.load_selected_structure_from_library)
-        self.btn_load_structure_view.clicked.connect(self.load_selected_structure_from_library)
+        self.cmb_structure_library.currentIndexChanged.connect(self.load_selected_structure_from_library)
         self.btn_save_structure.clicked.connect(self.save_current_structure_to_library)
-        self.btn_save_structure_view.clicked.connect(self.save_current_structure_to_library)
+        self.btn_delete_structure.clicked.connect(self.delete_selected_structure_from_library)
         self.btn_export_default_structures.clicked.connect(self.export_default_structures_to_library)
         self.btn_open_structure_workbook.clicked.connect(self.open_structure_library_workbook)
+        self.btn_reload_parameter_presets.clicked.connect(self.refresh_parameter_presets)
+        self.cmb_parameter_preset.currentIndexChanged.connect(self._on_parameter_preset_selected)
+        self.btn_apply_parameter_preset.clicked.connect(self.apply_selected_parameter_preset)
+        self.btn_save_parameter_preset.clicked.connect(self.save_current_parameter_preset)
+        self.btn_delete_parameter_preset.clicked.connect(self.delete_selected_parameter_preset)
         self.cmb_emulator_default_preset.currentIndexChanged.connect(self.apply_selected_emulator_preset)
         self.btn_depth_advanced.toggled.connect(self._sync_depth_advanced_visibility)
         self.btn_fit_structure.clicked.connect(self._fit_structure_views)
@@ -2738,10 +3435,74 @@ class TrenchDepoWindow(QMainWindow):
         self.spin_ion_end_depth.valueChanged.connect(self.sync_ion_transmission_editor_from_spins)
 
         self.refresh_structure_library(show_status=False)
+        self.refresh_parameter_presets(show_status=False)
         self.apply_emulator_mode(run=False)
         self._reset_geometry_to_default()
         self.sync_depth_deposition_editor_from_spins()
         self._set_workflow_step("structure")
+
+    def _install_value_control_wheel_guards(self) -> None:
+        for widget in [
+            *self.findChildren(QSpinBox),
+            *self.findChildren(QDoubleSpinBox),
+            *self.findChildren(QSlider),
+        ]:
+            widget.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+            widget.installEventFilter(self)
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802, ANN001
+        if isinstance(watched, (QSpinBox, QDoubleSpinBox, QSlider)) and event.type() == QEvent.Type.Wheel:
+            focus_widget = QApplication.focusWidget()
+            value_control_has_focus = focus_widget is watched or (
+                focus_widget is not None and watched.isAncestorOf(focus_widget)
+            )
+            if not value_control_has_focus:
+                event.ignore()
+                return True
+        return super().eventFilter(watched, event)
+
+    def _quality_mode_index_for_ds(self, ds_a: float) -> int:
+        for idx in range(self.cmb_quality_mode.count()):
+            data = self.cmb_quality_mode.itemData(idx)
+            if data is None:
+                continue
+            try:
+                if abs(float(data) - float(ds_a)) <= 1e-6:
+                    return idx
+            except (TypeError, ValueError):
+                continue
+        custom_idx = self.cmb_quality_mode.findText("사용자")
+        return custom_idx if custom_idx >= 0 else max(0, self.cmb_quality_mode.count() - 1)
+
+    def _set_quality_mode_for_ds(self, ds_a: float) -> None:
+        self._syncing_quality_mode = True
+        try:
+            self.spin_reparam_ds.setValue(float(ds_a))
+            self.cmb_quality_mode.setCurrentIndex(self._quality_mode_index_for_ds(float(ds_a)))
+        finally:
+            self._syncing_quality_mode = False
+
+    def _on_quality_mode_changed(self, _index: int = 0) -> None:
+        if self._syncing_quality_mode:
+            return
+        data = self.cmb_quality_mode.currentData()
+        if data is not None:
+            self._syncing_quality_mode = True
+            try:
+                self.spin_reparam_ds.setValue(float(data))
+            finally:
+                self._syncing_quality_mode = False
+        self._invalidate_result_for_input_change()
+
+    def _on_reparam_ds_changed(self, value: float) -> None:
+        if self._syncing_quality_mode:
+            return
+        self._syncing_quality_mode = True
+        try:
+            self.cmb_quality_mode.setCurrentIndex(self._quality_mode_index_for_ds(float(value)))
+        finally:
+            self._syncing_quality_mode = False
+        self._invalidate_result_for_input_change()
 
     def _structure_library_sheet_for_emulator(self, number: int) -> str:
         return DEFAULT_EMULATOR_STRUCTURE_SHEETS.get(int(number), "")
@@ -2749,7 +3510,7 @@ class TrenchDepoWindow(QMainWindow):
     def _fallback_points_for_emulator(self, number: int) -> List[Tuple[float, float]]:
         if int(number) == 2:
             return [(float(x), float(y)) for x, y in ION_TRANSMISSION_STEPPED_TRENCH_POINTS]
-        if int(number) in (5, 6):
+        if int(number) in (5, 6, 10):
             return [(float(x), float(y)) for x, y in BOWED_JAR_TRENCH_POINTS]
         return [(float(x), float(y)) for x, y in TrenchDepoConfig().points]
 
@@ -2769,14 +3530,15 @@ class TrenchDepoWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             names = []
             if show_status:
-                QMessageBox.warning(self, "Structure Library", f"Failed to read structure workbook:\n{exc}")
+                QMessageBox.warning(self, "구조 라이브러리", f"구조 워크북 읽기 실패:\n{exc}")
 
-        previous = self.cmb_structure_library.currentText()
+        previous = self._selected_structure_sheet_name()
         self.cmb_structure_library.blockSignals(True)
         try:
             self.cmb_structure_library.clear()
-            self.cmb_structure_library.addItems(names)
-            idx = self.cmb_structure_library.findText(previous)
+            for label, sheet_name in _structure_preset_items(names):
+                self.cmb_structure_library.addItem(label, sheet_name)
+            idx = self.cmb_structure_library.findData(previous)
             if idx >= 0:
                 self.cmb_structure_library.setCurrentIndex(idx)
         finally:
@@ -2785,75 +3547,110 @@ class TrenchDepoWindow(QMainWindow):
         has_workbook = self._structure_library_path.exists()
         has_structures = bool(names)
         self.cmb_structure_library.setEnabled(has_structures)
-        self.btn_load_structure.setEnabled(has_structures)
-        self.btn_load_structure_view.setEnabled(has_structures)
+        self.btn_delete_structure.setEnabled(has_structures)
         self.btn_open_structure_workbook.setEnabled(True)
-        self.lbl_structure_library_path.setText(f"Workbook: {self._structure_library_path}")
+        self.lbl_structure_library_path.setText(f"워크북: {self._structure_library_path}")
         self._update_structure_library_active_label()
         if show_status:
             if has_workbook:
-                self.statusBar().showMessage(f"Structure workbook loaded: {len(names)} sheets", 2200)
+                self.statusBar().showMessage(f"구조 워크북 로드됨: {len(names)}개 프리셋", 2200)
             else:
-                self.statusBar().showMessage("Structure workbook not created yet", 2200)
+                self.statusBar().showMessage("구조 워크북이 아직 없습니다", 2200)
 
     def _update_structure_library_active_label(self) -> None:
-        active = self._active_structure_sheet_name or "emulator default"
-        self.lbl_structure_library_active.setText(f"Active: {active}")
+        active = (
+            _structure_preset_display_name(self._active_structure_sheet_name)
+            if self._active_structure_sheet_name
+            else "에뮬레이터 기본값"
+        )
+        self.lbl_structure_library_active.setText(f"활성: {active}")
         if self._active_structure_sheet_name and not self.edit_structure_name.text().strip():
-            self.edit_structure_name.setText(self._active_structure_sheet_name)
+            self.edit_structure_name.setText(_structure_preset_display_name(self._active_structure_sheet_name))
+
+    def _selected_structure_sheet_name(self) -> str:
+        data = self.cmb_structure_library.currentData()
+        if data is not None:
+            return str(data).strip()
+        return self.cmb_structure_library.currentText().strip()
 
     def load_selected_structure_from_library(self, _checked: bool = False) -> None:
-        sheet_name = self.cmb_structure_library.currentText().strip()
+        sheet_name = self._selected_structure_sheet_name()
         if not sheet_name:
-            QMessageBox.information(self, "Structure Library", "No structure sheet is selected.")
+            QMessageBox.information(self, "구조 라이브러리", "선택된 구조 프리셋이 없습니다.")
             return
         try:
             points = read_structure_points(self._structure_library_path, sheet_name)
         except Exception as exc:  # noqa: BLE001
-            QMessageBox.warning(self, "Structure Library", f"Failed to load structure '{sheet_name}':\n{exc}")
+            QMessageBox.warning(self, "구조 라이브러리", f"구조 '{sheet_name}' 불러오기 실패:\n{exc}")
             return
         self._active_structure_sheet_name = sheet_name
-        self.edit_structure_name.setText(sheet_name)
-        self._set_structure_points(points, fit=True)
+        self.edit_structure_name.setText(_structure_preset_display_name(sheet_name))
+        self._set_structure_points(points, fit=True, preserve_on_emulator_switch=True)
         self._update_structure_library_active_label()
-        self.statusBar().showMessage(f"Loaded structure: {sheet_name}", 2200)
+        self.statusBar().showMessage(f"구조 프리셋 적용: {_structure_preset_display_name(sheet_name)}", 2200)
 
     def save_current_structure_to_library(self, _checked: bool = False) -> None:
         points = list(self._structure_points or self._current_geometry_points())
         if len(points) < 2:
-            QMessageBox.warning(self, "Structure Library", "At least two XY points are required.")
+            QMessageBox.warning(self, "구조 라이브러리", "XY 좌표가 최소 2개 필요합니다.")
             return
         sheet_name = sanitize_structure_name(
             self.edit_structure_name.text().strip()
-            or self.cmb_structure_library.currentText().strip()
+            or self._selected_structure_sheet_name()
             or self._active_structure_sheet_name
             or f"structure_{self.active_emulator_number():02d}"
         )
         try:
             saved_name = save_structure_points(self._structure_library_path, sheet_name, points)
         except Exception as exc:  # noqa: BLE001
-            QMessageBox.warning(self, "Structure Library", f"Failed to save structure:\n{exc}")
+            QMessageBox.warning(self, "구조 라이브러리", f"구조 저장 실패:\n{exc}")
             return
         self._active_structure_sheet_name = saved_name
         self.edit_structure_name.setText(saved_name)
         self.refresh_structure_library(show_status=False)
-        idx = self.cmb_structure_library.findText(saved_name)
+        idx = self.cmb_structure_library.findData(saved_name)
         if idx >= 0:
             self.cmb_structure_library.setCurrentIndex(idx)
         self._update_structure_library_active_label()
-        self.statusBar().showMessage(f"Saved structure: {saved_name}", 2200)
+        self.statusBar().showMessage(f"구조 저장됨: {saved_name}", 2200)
+
+    def delete_selected_structure_from_library(self, _checked: bool = False) -> None:
+        sheet_name = self._selected_structure_sheet_name()
+        if not sheet_name:
+            QMessageBox.information(self, "구조 라이브러리", "삭제할 구조 프리셋이 없습니다.")
+            return
+        display_name = _structure_preset_display_name(sheet_name)
+        answer = QMessageBox.question(
+            self,
+            "구조 프리셋 삭제",
+            f"'{display_name}' 구조 프리셋을 삭제할까요?\n현재 화면의 구조 좌표는 유지됩니다.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            deleted_name = delete_structure_sheet(self._structure_library_path, sheet_name)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "구조 라이브러리", f"구조 삭제 실패:\n{exc}")
+            return
+        if self._active_structure_sheet_name == deleted_name:
+            self._active_structure_sheet_name = ""
+        self.refresh_structure_library(show_status=False)
+        self._update_structure_library_active_label()
+        self.statusBar().showMessage(f"구조 프리셋 삭제됨: {deleted_name}", 2200)
 
     def export_default_structures_to_library(self, _checked: bool = False) -> None:
         try:
             written = ensure_default_structures(self._structure_library_path, overwrite=False)
         except Exception as exc:  # noqa: BLE001
-            QMessageBox.warning(self, "Structure Library", f"Failed to export default structures:\n{exc}")
+            QMessageBox.warning(self, "구조 라이브러리", f"기본 구조 내보내기 실패:\n{exc}")
             return
         self.refresh_structure_library(show_status=False)
         if written:
-            self.statusBar().showMessage(f"Exported {len(written)} default structure sheets", 2600)
+            self.statusBar().showMessage(f"기본 구조 {len(written)}개 프리셋 내보냄", 2600)
         else:
-            self.statusBar().showMessage("Default structure sheets already exist", 2200)
+            self.statusBar().showMessage("기본 구조 프리셋이 이미 있습니다", 2200)
 
     def open_structure_library_workbook(self, _checked: bool = False) -> None:
         if not self._structure_library_path.exists():
@@ -2861,15 +3658,270 @@ class TrenchDepoWindow(QMainWindow):
         if self._structure_library_path.exists():
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._structure_library_path.resolve())))
 
+    def refresh_parameter_presets(self, _checked: bool = False, *, show_status: bool = True) -> None:
+        try:
+            names = list_parameter_presets(self._parameter_library_path)
+        except Exception as exc:  # noqa: BLE001
+            names = []
+            if show_status:
+                QMessageBox.warning(self, "공정 파라미터 프리셋", f"파라미터 프리셋 읽기 실패:\n{exc}")
+
+        previous = self._selected_parameter_preset_name()
+        self.cmb_parameter_preset.blockSignals(True)
+        try:
+            self.cmb_parameter_preset.clear()
+            for name in names:
+                self.cmb_parameter_preset.addItem(name, name)
+            idx = self.cmb_parameter_preset.findData(previous)
+            if idx >= 0:
+                self.cmb_parameter_preset.setCurrentIndex(idx)
+        finally:
+            self.cmb_parameter_preset.blockSignals(False)
+
+        has_presets = bool(names)
+        self.cmb_parameter_preset.setEnabled(has_presets)
+        self.btn_apply_parameter_preset.setEnabled(has_presets)
+        self.btn_delete_parameter_preset.setEnabled(has_presets)
+        self.lbl_parameter_preset_path.setText(f"파일: {self._parameter_library_path}")
+        self._on_parameter_preset_selected()
+        self._update_parameter_preset_active_label()
+        if show_status:
+            self.statusBar().showMessage(f"공정 파라미터 프리셋 {len(names)}개 로드됨", 2200)
+
+    def _selected_parameter_preset_name(self) -> str:
+        data = self.cmb_parameter_preset.currentData()
+        if data is not None:
+            return str(data).strip()
+        return self.cmb_parameter_preset.currentText().strip()
+
+    def _on_parameter_preset_selected(self, _index: int = 0) -> None:
+        name = self._selected_parameter_preset_name()
+        if name:
+            self.edit_parameter_preset_name.setText(name)
+
+    def _update_parameter_preset_active_label(self) -> None:
+        active = self._active_parameter_preset_name or "없음"
+        self.lbl_parameter_preset_active.setText(f"활성: {active}")
+
+    def save_current_parameter_preset(self, _checked: bool = False) -> None:
+        name = sanitize_parameter_preset_name(
+            self.edit_parameter_preset_name.text().strip()
+            or self._selected_parameter_preset_name()
+            or f"em{self.active_emulator_number():02d}_process"
+        )
+        try:
+            saved_name = save_parameter_preset(
+                self._parameter_library_path,
+                name,
+                self.current_config(),
+                emulator_number=self.active_emulator_number(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "공정 파라미터 프리셋", f"파라미터 저장 실패:\n{exc}")
+            return
+        self._active_parameter_preset_name = saved_name
+        self.edit_parameter_preset_name.setText(saved_name)
+        self.refresh_parameter_presets(show_status=False)
+        idx = self.cmb_parameter_preset.findData(saved_name)
+        if idx >= 0:
+            self.cmb_parameter_preset.setCurrentIndex(idx)
+        self._update_parameter_preset_active_label()
+        self.statusBar().showMessage(f"공정 파라미터 저장됨: {saved_name}", 2200)
+
+    def _set_combo_data(self, combo: QComboBox, value: object) -> None:
+        idx = combo.findData(value)
+        if idx >= 0:
+            combo.setCurrentIndex(idx)
+
+    def _apply_parameter_config_values(self, values: Mapping[str, object]) -> None:
+        supports_sputter = self._active_emulator_supports_sputter()
+        supports_ion = self._active_emulator_supports_ion_transmission()
+        supports_reflected = self._active_emulator_supports_reflected_ion()
+        supports_redepo = self._active_emulator_supports_redeposition()
+        supports_depth = self._active_emulator_supports_depth_deposition()
+        supports_lf = self._active_emulator_supports_lf_overhang()
+        supports_closure = self._active_emulator_supports_closure_redepo()
+
+        def f(key: str, default: float) -> float:
+            raw = values.get(key, default)
+            return float(default if raw is None else raw)
+
+        def i(key: str, default: int) -> int:
+            raw = values.get(key, default)
+            return int(default if raw is None else raw)
+
+        def b(key: str, default: bool) -> bool:
+            raw = values.get(key, default)
+            return bool(default if raw is None else raw)
+
+        self.spin_cycles.setValue(i("cycles", int(self.spin_cycles.value())))
+        self.spin_angstrom_per_cycle.setValue(f("angstrom_per_cycle", float(self.spin_angstrom_per_cycle.value())))
+        self._set_quality_mode_for_ds(f("reparam_ds_a", float(self.spin_reparam_ds.value())))
+        self.chk_sputter.setChecked(bool(supports_sputter and b("sputter_enabled", self.chk_sputter.isChecked())))
+        self.chk_ion_transmission.setChecked(
+            bool(supports_ion and b("ion_transmission_enabled", self.chk_ion_transmission.isChecked()))
+        )
+        self.chk_reflected_ion.setChecked(
+            bool(supports_reflected and b("reflected_ion_enabled", self.chk_reflected_ion.isChecked()))
+        )
+        self.chk_redepo.setChecked(bool(supports_redepo and b("redepo_enabled", self.chk_redepo.isChecked())))
+        self.chk_depth_deposition.setChecked(
+            bool(supports_depth and b("deposition_depth_enabled", self.chk_depth_deposition.isChecked()))
+        )
+        self.chk_lf_overhang.setChecked(
+            bool(supports_lf and b("lf_overhang_enabled", self.chk_lf_overhang.isChecked()))
+        )
+        self.chk_closure_redepo.setChecked(
+            bool(supports_closure and b("closure_redepo_enabled", self.chk_closure_redepo.isChecked()))
+        )
+
+        self.spin_sputter_strength.setValue(f("sputter_strength_a_per_cycle", self.spin_sputter_strength.value()))
+        self.spin_sputter_peak_pct.setValue(f("sputter_peak_pct", self.spin_sputter_peak_pct.value()))
+        self.spin_sputter_peak.setValue(f("sputter_peak_angle_deg", self.spin_sputter_peak.value()))
+        self.spin_sputter_width.setValue(f("sputter_width_deg", self.spin_sputter_width.value()))
+        self.spin_sputter_smoothing.setValue(f("sputter_smoothing_a", self.spin_sputter_smoothing.value()))
+        self.spin_ion_start_depth.setValue(f("ion_transmission_start_depth_pct", self.spin_ion_start_depth.value()))
+        self.spin_ion_end_depth.setValue(f("ion_transmission_end_depth_pct", self.spin_ion_end_depth.value()))
+        self.spin_ion_decay_strength.setValue(
+            f("ion_transmission_decay_strength_pct", self.spin_ion_decay_strength.value())
+        )
+        self.spin_ion_floor.setValue(f("ion_transmission_floor_pct", self.spin_ion_floor.value()))
+        self.spin_ion_curve_power.setValue(f("ion_transmission_curve_power", self.spin_ion_curve_power.value()))
+        self.slider_ion_aperture_shadow.setValue(i("ion_transmission_aperture_shadow_pct", self.slider_ion_aperture_shadow.value()))
+        self.slider_ion_lateral_shadow.setValue(i("ion_transmission_lateral_shadow_pct", self.slider_ion_lateral_shadow.value()))
+        self.slider_ion_edge_shadow.setValue(i("ion_transmission_edge_shadow_pct", self.slider_ion_edge_shadow.value()))
+        self.spin_reflected_strength.setValue(f("reflected_ion_strength_pct", self.spin_reflected_strength.value()))
+        self.spin_reflected_bowing.setValue(f("reflected_ion_bowing_weight", self.spin_reflected_bowing.value()))
+        self.spin_reflected_microtrench.setValue(
+            f("reflected_ion_microtrench_weight", self.spin_reflected_microtrench.value())
+        )
+        self.spin_reflected_range.setValue(f("reflected_ion_range_a", self.spin_reflected_range.value()))
+        self._set_combo_data(self.cmb_redepo_source_model, str(values.get("redepo_source_model", "model2")))
+        self.spin_redepo_efficiency.setValue(f("redepo_efficiency_pct", self.spin_redepo_efficiency.value()))
+        self.spin_redepo_emit_power.setValue(f("redepo_emit_power", self.spin_redepo_emit_power.value()))
+        self.spin_redepo_distance_power.setValue(f("redepo_distance_power", self.spin_redepo_distance_power.value()))
+        self.spin_redepo_soft_los.setValue(i("redepo_soft_los_radius_points", self.spin_redepo_soft_los.value()))
+        self.spin_lf_overhang_dose.setValue(f("lf_overhang_dose", self.spin_lf_overhang_dose.value()))
+        self.spin_lf_overhang_sputter_gain.setValue(
+            f("lf_overhang_sputter_gain", self.spin_lf_overhang_sputter_gain.value())
+        )
+        self.spin_lf_overhang_redepo_fraction.setValue(
+            f("lf_overhang_redepo_fraction_pct", self.spin_lf_overhang_redepo_fraction.value())
+        )
+        self.spin_lf_overhang_survival.setValue(
+            f("lf_overhang_survival_penalty", self.spin_lf_overhang_survival.value())
+        )
+        self.spin_lf_overhang_width.setValue(f("lf_overhang_width_a", self.spin_lf_overhang_width.value()))
+        self.spin_closure_redepo_efficiency.setValue(
+            f("closure_redepo_efficiency_pct", self.spin_closure_redepo_efficiency.value())
+        )
+        self.spin_closure_redepo_shadow_gain.setValue(
+            f("closure_redepo_shadow_gain", self.spin_closure_redepo_shadow_gain.value())
+        )
+        self.spin_closure_redepo_width.setValue(
+            f("closure_redepo_width_a", self.spin_closure_redepo_width.value())
+        )
+        self.spin_closure_redepo_survival.setValue(
+            f("closure_redepo_survival_penalty", self.spin_closure_redepo_survival.value())
+        )
+        self.spin_closure_redepo_smoothing.setValue(
+            f("closure_redepo_smoothing_a", self.spin_closure_redepo_smoothing.value())
+        )
+        self._set_combo_data(self.cmb_depth_feature_type, str(values.get("deposition_feature_type", "hole")))
+        self.spin_depth_feature_width.setValue(f("deposition_feature_width_a", self.spin_depth_feature_width.value()))
+        self.spin_depth_feature_depth.setValue(f("deposition_feature_depth_a", self.spin_depth_feature_depth.value()))
+        feature_length = values.get("deposition_feature_length_a", None)
+        self.spin_depth_feature_length.setValue(0.0 if feature_length is None else float(feature_length))
+        self.spin_depth_decay_k.setValue(f("deposition_depth_decay_k", self.spin_depth_decay_k.value()))
+        self.spin_depth_decay_power.setValue(f("deposition_depth_decay_power", self.spin_depth_decay_power.value()))
+        self.spin_depth_min_ratio_pct.setValue(f("deposition_min_ratio", self.spin_depth_min_ratio_pct.value() / 100.0) * 100.0)
+        self.spin_depth_closure_threshold.setValue(
+            f("deposition_closure_threshold_a", self.spin_depth_closure_threshold.value())
+        )
+        self.spin_depth_post_fill_hole_pct.setValue(
+            f("deposition_post_closure_fill_pct_hole", self.spin_depth_post_fill_hole_pct.value() / 100.0)
+            * 100.0
+        )
+        self.spin_depth_post_fill_line_pct.setValue(
+            f("deposition_post_closure_fill_pct_line", self.spin_depth_post_fill_line_pct.value() / 100.0)
+            * 100.0
+        )
+        self.spin_depth_line_open_path.setValue(
+            f("deposition_line_open_path_factor", self.spin_depth_line_open_path.value())
+        )
+        self.spin_depth_residual_decay.setValue(
+            f("deposition_residual_fill_decay_length_a", self.spin_depth_residual_decay.value())
+        )
+
+        self.sync_ion_shadow_slider_labels()
+        self.sync_sputter_curve_from_spins()
+        self.sync_ion_transmission_editor_from_spins()
+        self.sync_redepo_lobe_from_spins()
+        self.sync_depth_deposition_editor_from_spins()
+        self.sync_etch_control_availability()
+        self._populate_split_parameters()
+        self._invalidate_result_for_input_change()
+
+    def apply_selected_parameter_preset(self, _checked: bool = False) -> None:
+        name = self._selected_parameter_preset_name()
+        if not name:
+            QMessageBox.information(self, "공정 파라미터 프리셋", "적용할 파라미터 프리셋이 없습니다.")
+            return
+        try:
+            record = read_parameter_preset(self._parameter_library_path, name)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "공정 파라미터 프리셋", f"파라미터 불러오기 실패:\n{exc}")
+            return
+        config_values = record.get("config", {})
+        if not isinstance(config_values, dict):
+            QMessageBox.warning(self, "공정 파라미터 프리셋", "프리셋 config 형식이 올바르지 않습니다.")
+            return
+        target_emulator = int(record.get("emulator_number", self.active_emulator_number()))
+        self._preserve_geometry_on_emulator_switch = True
+        self.set_active_emulator_number(target_emulator, run=False)
+        self._apply_parameter_config_values(config_values)
+        self._active_parameter_preset_name = sanitize_parameter_preset_name(name)
+        self.edit_parameter_preset_name.setText(self._active_parameter_preset_name)
+        self._update_parameter_preset_active_label()
+        self.statusBar().showMessage(f"공정 파라미터 적용됨: {self._active_parameter_preset_name}", 2200)
+
+    def delete_selected_parameter_preset(self, _checked: bool = False) -> None:
+        name = self._selected_parameter_preset_name()
+        if not name:
+            QMessageBox.information(self, "공정 파라미터 프리셋", "삭제할 파라미터 프리셋이 없습니다.")
+            return
+        answer = QMessageBox.question(
+            self,
+            "공정 파라미터 프리셋 삭제",
+            f"'{name}' 파라미터 프리셋을 삭제할까요?\n현재 화면의 파라미터 값은 유지됩니다.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            deleted_name = delete_parameter_preset(self._parameter_library_path, name)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "공정 파라미터 프리셋", f"파라미터 삭제 실패:\n{exc}")
+            return
+        if self._active_parameter_preset_name == deleted_name:
+            self._active_parameter_preset_name = ""
+        self.refresh_parameter_presets(show_status=False)
+        self._update_parameter_preset_active_label()
+        self.statusBar().showMessage(f"공정 파라미터 삭제됨: {deleted_name}", 2200)
+
     def _set_structure_points(
         self,
         points: Sequence[Tuple[float, float]],
         *,
         clear_smoothing: bool = True,
         fit: bool = True,
+        preserve_on_emulator_switch: bool = False,
     ) -> None:
         pts = [(float(x), float(y)) for x, y in points]
         self._structure_points = pts
+        if preserve_on_emulator_switch:
+            self._preserve_geometry_on_emulator_switch = True
         self._syncing_structure_view = True
         try:
             self.structure_view.set_points_xy(list(pts))
@@ -2884,7 +3936,7 @@ class TrenchDepoWindow(QMainWindow):
             self.smoothing_view.set_points_xy(list(pts))
             self._sync_smoothed_table_from_points()
         self._update_geometry_labels()
-        self._refresh_result_input_preview_if_idle()
+        self._invalidate_result_for_input_change()
         if fit:
             QTimer.singleShot(0, self._fit_structure_views)
 
@@ -2949,7 +4001,7 @@ class TrenchDepoWindow(QMainWindow):
     def _on_structure_table_replace_points_requested(self, points: List[Tuple[float, float]]) -> None:
         if len(points) < 2:
             return
-        self._set_structure_points(points, fit=True)
+        self._set_structure_points(points, fit=True, preserve_on_emulator_switch=True)
 
     def _reset_geometry_to_default(self, _checked: bool = False) -> None:
         default_sheet = self._structure_library_sheet_for_emulator(self.active_emulator_number())
@@ -2962,24 +4014,27 @@ class TrenchDepoWindow(QMainWindow):
         else:
             self._active_structure_sheet_name = ""
         self._set_structure_points(self._default_points_for_active_emulator())
+        self._preserve_geometry_on_emulator_switch = False
         self._update_structure_library_active_label()
-        self.statusBar().showMessage("Geometry reset to emulator default", 1800)
+        self.statusBar().showMessage("구조를 에뮬레이터 기본값으로 되돌림", 1800)
 
     def _fit_structure_views(self, _checked: bool = False) -> None:
         self.structure_view.fit_points()
         self.smoothing_view.fit_points()
+        if hasattr(self, "progress_geometry_view"):
+            self.progress_geometry_view.fit_points()
 
     def _mark_structure_edited(self) -> None:
         self._sync_structure_table_from_points()
-        if self._smoothed_points or self._use_smoothed_geometry:
-            self._smoothed_points = []
-            self._use_smoothed_geometry = False
-            self.smoothing.revert()
-            self.smoothing_view.set_reference_profiles_xy([])
-            self.smoothing_view.set_points_xy(list(self._structure_points))
-            self._sync_smoothed_table_from_points()
+        self._preserve_geometry_on_emulator_switch = True
+        self._smoothed_points = []
+        self._use_smoothed_geometry = False
+        self.smoothing.revert()
+        self.smoothing_view.set_reference_profiles_xy([])
+        self.smoothing_view.set_points_xy(list(self._structure_points))
+        self._sync_smoothed_table_from_points()
         self._update_geometry_labels()
-        self._refresh_result_input_preview_if_idle()
+        self._invalidate_result_for_input_change()
 
     def _on_structure_point_moved(self, idx: int, x: float, y: float) -> None:
         if self._syncing_structure_view:
@@ -3007,9 +4062,10 @@ class TrenchDepoWindow(QMainWindow):
         if 0 <= int(idx) < len(self._smoothed_points):
             self._smoothed_points[int(idx)] = (float(x), float(y))
             self._use_smoothed_geometry = True
+            self._preserve_geometry_on_emulator_switch = True
             self._sync_smoothed_table_from_points()
             self._update_geometry_labels()
-            self._refresh_result_input_preview_if_idle()
+            self._invalidate_result_for_input_change()
 
     def _on_smoothed_point_inserted(self, idx: int, x: float, y: float) -> None:
         if not self._smoothed_points:
@@ -3017,22 +4073,24 @@ class TrenchDepoWindow(QMainWindow):
         insert_idx = max(0, min(int(idx), len(self._smoothed_points)))
         self._smoothed_points.insert(insert_idx, (float(x), float(y)))
         self._use_smoothed_geometry = True
+        self._preserve_geometry_on_emulator_switch = True
         self._sync_smoothed_table_from_points()
         self._update_geometry_labels()
-        self._refresh_result_input_preview_if_idle()
+        self._invalidate_result_for_input_change()
 
     def _on_smoothed_point_deleted(self, idx: int) -> None:
         delete_idx = int(idx)
         if 0 <= delete_idx < len(self._smoothed_points):
             self._smoothed_points.pop(delete_idx)
             self._use_smoothed_geometry = len(self._smoothed_points) >= 2
+            self._preserve_geometry_on_emulator_switch = True
             self._sync_smoothed_table_from_points()
             self._update_geometry_labels()
-            self._refresh_result_input_preview_if_idle()
+            self._invalidate_result_for_input_change()
 
     def apply_structure_smoothing(self, _checked: bool = False) -> None:
         if len(self._structure_points) < 2:
-            QMessageBox.warning(self, "Structure Smoothing", "At least two geometry points are required.")
+            QMessageBox.warning(self, "구조 스무딩", "구조 좌표가 최소 2개 필요합니다.")
             return
         self.smoothing.set_base_points(list(self._structure_points))
         self.smoothing.set_params(
@@ -3041,28 +4099,31 @@ class TrenchDepoWindow(QMainWindow):
         )
         self._smoothed_points = [(float(x), float(y)) for x, y in self.smoothing.run()]
         self._use_smoothed_geometry = True
+        self._preserve_geometry_on_emulator_switch = True
         self.smoothing_view.set_reference_profiles_xy([list(self._structure_points)])
         self.smoothing_view.set_points_xy(list(self._smoothed_points))
         self._sync_smoothed_table_from_points()
         self._update_geometry_labels()
-        self._refresh_result_input_preview_if_idle()
+        self._invalidate_result_for_input_change()
         QTimer.singleShot(0, self.smoothing_view.fit_points)
-        self.statusBar().showMessage(f"Smoothing applied: {len(self._smoothed_points)} points", 2500)
+        self.statusBar().showMessage(f"스무딩 적용됨: {len(self._smoothed_points)}점", 2500)
 
     def use_smoothed_geometry(self, _checked: bool = False) -> None:
         if not self._smoothed_points:
             self.apply_structure_smoothing()
             return
         self._use_smoothed_geometry = True
+        self._preserve_geometry_on_emulator_switch = True
         self._update_geometry_labels()
-        self._refresh_result_input_preview_if_idle()
-        self.statusBar().showMessage("Run input switched to smoothed geometry", 1800)
+        self._invalidate_result_for_input_change()
+        self.statusBar().showMessage("실행 입력을 smoothed 구조로 변경", 1800)
 
     def use_raw_geometry(self, _checked: bool = False) -> None:
         self._use_smoothed_geometry = False
+        self._preserve_geometry_on_emulator_switch = True
         self._update_geometry_labels()
-        self._refresh_result_input_preview_if_idle()
-        self.statusBar().showMessage("Run input switched to raw geometry", 1800)
+        self._invalidate_result_for_input_change()
+        self.statusBar().showMessage("실행 입력을 raw 구조로 변경", 1800)
 
     def _current_geometry_points(self) -> Tuple[Tuple[float, float], ...]:
         if self._use_smoothed_geometry and len(self._smoothed_points) >= 2:
@@ -3079,13 +4140,35 @@ class TrenchDepoWindow(QMainWindow):
     def _has_active_smoothed_geometry(self) -> bool:
         return bool(self._use_smoothed_geometry and len(self._smoothed_points) >= 2)
 
+    def _should_preserve_geometry_on_emulator_switch(self) -> bool:
+        return bool(self._preserve_geometry_on_emulator_switch or self._has_active_smoothed_geometry())
+
     def _result_has_run_frames(self) -> bool:
         return self._result is not None and bool(self._result.frame_profiles)
+
+    def _invalidate_result_for_input_change(self, *, fit: bool = False) -> None:
+        self._stop_result_playback()
+        self._result = None
+        self._result_config = None
+        if not hasattr(self, "slider_frame"):
+            return
+        self.slider_frame.blockSignals(True)
+        try:
+            self.slider_frame.setRange(0, 0)
+            self.slider_frame.setValue(0)
+            self.slider_frame.setEnabled(False)
+        finally:
+            self.slider_frame.blockSignals(False)
+        self._set_result_playback_available(False)
+        if hasattr(self, "edit_result_parameters"):
+            self.edit_result_parameters.setPlainText("입력이 바뀌어서 기존 결과가 무효화됐습니다. 다시 실행하면 최신 파라미터가 여기에 표시됩니다.")
+        if hasattr(self, "view_tabs") and self.view_tabs.currentIndex() == 3:
+            self._show_result_input_preview(fit=fit)
 
     def _refresh_result_input_preview_if_idle(self, *, fit: bool = False) -> None:
         if self._result_has_run_frames():
             return
-        if not hasattr(self, "view_tabs") or self.view_tabs.currentIndex() != 2:
+        if not hasattr(self, "view_tabs") or self.view_tabs.currentIndex() != 3:
             return
         self._show_result_input_preview(fit=fit)
 
@@ -3096,15 +4179,44 @@ class TrenchDepoWindow(QMainWindow):
         self.ion_transmission_editor.set_structure_points(points)
         self.depth_deposition_editor.set_structure_points(points)
 
+    def _sync_progress_geometry_view(self, *, fit: bool = False) -> None:
+        if not hasattr(self, "progress_geometry_view"):
+            return
+        points = [(float(x), float(y)) for x, y in self._current_geometry_points()]
+        references: List[List[Tuple[float, float]]] = []
+        source = self._current_geometry_source_name()
+        if source == "smooth" and len(self._structure_points) >= 2:
+            references.append(list(self._structure_points))
+        stride = _display_decimation_stride([points, *references])
+        display_points = _decimate_profile_for_display(points, stride)
+        display_references = [
+            _decimate_profile_for_display(reference, stride)
+            for reference in references
+        ]
+        self.progress_geometry_view.set_reference_profiles_xy(display_references)
+        self.progress_geometry_view.set_points_xy(display_points)
+        label = f"실행 입력: {source} | {len(points)}점"
+        if stride > 1:
+            label += f" (표시 {len(display_points)}점)"
+        self.lbl_progress_geometry_source.setText(label)
+        if fit:
+            QTimer.singleShot(0, self.progress_geometry_view.fit_points)
+
     def _show_result_input_preview(self, *, fit: bool = False) -> None:
         points = [(float(x), float(y)) for x, y in self._current_geometry_points()]
         if len(points) < 2:
             self.view.clear_data()
-            self.lbl_status.setText("Input preview: empty | Points 0")
+            self.lbl_status.setText("입력 미리보기: 비어 있음 | 점 0")
+            if hasattr(self, "lbl_result_summary"):
+                self.lbl_result_summary.setText("결과: 입력 미리보기 비어 있음 | 점 0")
+            self._set_result_playback_available(False)
             return
         self.view.set_frames(
             [points],
             voids=[[]],
+            redepo_overlays=[[]],
+            etch_overlays=[[]],
+            transport_lines=[[]],
             void_mode="current",
             dynamic_substrate_fill=False,
             history_mode="film",
@@ -3118,24 +4230,32 @@ class TrenchDepoWindow(QMainWindow):
             self.slider_frame.blockSignals(False)
         self.view.show_frame(0, fit=fit)
         self.lbl_status.setText(
-            f"Input preview: {self._current_geometry_source_name()} | Points {len(points)}"
+            f"입력 미리보기: {self._current_geometry_source_name()} | 점 {len(points)}"
         )
+        if hasattr(self, "lbl_result_summary"):
+            self.lbl_result_summary.setText(
+                f"결과: 입력 미리보기 {self._current_geometry_source_name()} | 점 {len(points)}"
+            )
+        if hasattr(self, "edit_result_parameters"):
+            self._update_result_parameter_summary(self.current_config(), None)
+        self._set_result_playback_available(False)
 
     def _update_geometry_labels(self) -> None:
         raw_count = len(self._structure_points)
         smooth_count = len(self._smoothed_points)
         input_count = smooth_count if self._use_smoothed_geometry and smooth_count >= 2 else raw_count
-        self.lbl_geometry_points.setText(f"Geometry: {raw_count} pts")
+        self.lbl_geometry_points.setText(f"구조: {raw_count}점")
         if self._use_smoothed_geometry and smooth_count >= 2:
-            source_text = f"Input: smooth ({input_count} pts)"
+            source_text = f"입력: smooth ({input_count}점)"
         else:
-            source_text = f"Input: raw ({input_count} pts)"
+            source_text = f"입력: raw ({input_count}점)"
         self.lbl_geometry_source.setText(source_text)
         self.lbl_smoothing_status.setText(
-            f"Smooth: {smooth_count} pts" if smooth_count else "Smooth: not applied"
+            f"스무딩: {smooth_count}점" if smooth_count else "스무딩: 미적용"
         )
         self.btn_use_smoothed_geometry.setEnabled(smooth_count >= 2)
         self._sync_structure_map_editors()
+        self._sync_progress_geometry_view()
 
     def _set_overlay_opacity(self, opacity: float) -> None:
         clamped = max(0.0, min(1.0, float(opacity)))
@@ -3226,7 +4346,7 @@ class TrenchDepoWindow(QMainWindow):
     def _load_overlay_image(self, _checked: bool = False) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self,
-            "Load Image",
+            "이미지 불러오기",
             "",
             "Images (*.png *.jpg *.jpeg *.bmp *.tif *.tiff);;All Files (*)",
         )
@@ -3238,19 +4358,19 @@ class TrenchDepoWindow(QMainWindow):
             return
         scale = dlg.scale_a_per_px
         if scale is None or scale <= 0.0:
-            QMessageBox.warning(self, "Image Overlay", "Calibration scale must be greater than zero.")
+            QMessageBox.warning(self, "이미지 오버레이", "보정 스케일은 0보다 커야 합니다.")
             return
         if not self._set_overlay_image(str(image_path), scale_a_per_px=float(scale), align_to_axes=True):
-            QMessageBox.warning(self, "Image Overlay", "Failed to load the selected image.")
+            QMessageBox.warning(self, "이미지 오버레이", "선택한 이미지를 불러오지 못했습니다.")
             return
-        self.statusBar().showMessage("Image overlay loaded", 2000)
+        self.statusBar().showMessage("이미지 오버레이 불러옴", 2000)
 
     def _clear_overlay_image(self, _checked: bool = False) -> None:
         self.structure_view.clear_overlay_image()
         self.smoothing_view.clear_overlay_image()
         self._overlay_path = None
         self._update_overlay_move_button_state()
-        self.statusBar().showMessage("Image overlay cleared", 1500)
+        self.statusBar().showMessage("이미지 오버레이 지움", 1500)
 
     def active_emulator_number(self) -> int:
         checked_id = self.emulator_button_group.checkedId()
@@ -3264,15 +4384,17 @@ class TrenchDepoWindow(QMainWindow):
             return 0
         if normalized in {"smoothing", "smooth", "2"}:
             return 1
-        if normalized in {"result", "results", "3"}:
+        if normalized in {"progress", "process", "run", "running", "3"}:
             return 2
+        if normalized in {"result", "results", "4"}:
+            return 3
         return 0
 
     def _set_workflow_step(self, step: str) -> None:
         self._set_workflow_index(self._workflow_index_for_step(step))
 
     def _set_workflow_index(self, index: int) -> None:
-        workflow_index = max(0, min(2, int(index)))
+        workflow_index = max(0, min(3, int(index)))
         if workflow_index == 1:
             self._apply_overlay_state_to_smoothing_view()
         if self._syncing_workflow_tabs:
@@ -3288,11 +4410,13 @@ class TrenchDepoWindow(QMainWindow):
             self._syncing_workflow_tabs = False
         self._sync_result_controls_visibility(workflow_index)
         if workflow_index == 2:
+            self._sync_progress_geometry_view(fit=True)
+        if workflow_index == 3:
             self._refresh_result_input_preview_if_idle(fit=True)
 
     def _sync_result_controls_visibility(self, workflow_index: Optional[int] = None) -> None:
         index = self.view_tabs.currentIndex() if workflow_index is None else int(workflow_index)
-        self.result_controls_widget.setVisible(index == 2)
+        self.result_controls_widget.setVisible(index == 3)
 
     def _on_view_workflow_tab_changed(self, index: int) -> None:
         self._set_workflow_index(index)
@@ -3373,59 +4497,77 @@ class TrenchDepoWindow(QMainWindow):
         button = self._emulator_buttons.get(target)
         if button is None:
             return
-        preserve_smoothed_geometry = self._has_active_smoothed_geometry()
+        preserve_geometry = self._should_preserve_geometry_on_emulator_switch()
         button.setChecked(True)
-        self.apply_emulator_mode(run=run, preserve_geometry=preserve_smoothed_geometry)
-        if target != previous and not preserve_smoothed_geometry:
+        self.apply_emulator_mode(run=run, preserve_geometry=preserve_geometry)
+        if target != previous and not preserve_geometry:
             self._set_workflow_step("structure")
         elif target != previous:
-            self._refresh_result_input_preview_if_idle(fit=True)
+            self._invalidate_result_for_input_change(fit=True)
 
     def _active_emulator_supports_sputter(self) -> bool:
-        return self.active_emulator_number() in (1, 2, 3, 4)
+        return self.active_emulator_number() in (0, 2, 3, 6)
 
     def _active_emulator_supports_ion_transmission(self) -> bool:
-        return self.active_emulator_number() == 2
+        return self.active_emulator_number() in (0, 3)
 
     def _active_emulator_supports_reflected_ion(self) -> bool:
-        return self.active_emulator_number() == 3
+        return False
 
     def _active_emulator_supports_redeposition(self) -> bool:
-        return self.active_emulator_number() == 4
+        return self.active_emulator_number() == 6
 
     def _active_emulator_supports_depth_deposition(self) -> bool:
-        return self.active_emulator_number() in (5, 6)
+        return self.active_emulator_number() in (0, 4, 5)
+
+    def _active_emulator_supports_lf_overhang(self) -> bool:
+        return False
+
+    def _active_emulator_supports_closure_redepo(self) -> bool:
+        return False
 
     @staticmethod
     def _emulator_supports_sputter(number: int) -> bool:
-        return int(number) in (1, 2, 3, 4)
+        return int(number) in (0, 2, 3, 6)
 
     @staticmethod
     def _emulator_supports_ion_transmission(number: int) -> bool:
-        return int(number) == 2
+        return int(number) in (0, 3)
 
     @staticmethod
     def _emulator_supports_reflected_ion(number: int) -> bool:
-        return int(number) == 3
+        return False
 
     @staticmethod
     def _emulator_supports_redeposition(number: int) -> bool:
-        return int(number) == 4
+        return int(number) == 6
 
     @staticmethod
     def _emulator_supports_depth_deposition(number: int) -> bool:
-        return int(number) in (5, 6)
+        return int(number) in (0, 4, 5)
+
+    @staticmethod
+    def _emulator_supports_lf_overhang(number: int) -> bool:
+        return False
+
+    @staticmethod
+    def _emulator_supports_closure_redepo(number: int) -> bool:
+        return False
 
     def _populate_compare_targets(self) -> None:
         previous = self.cmb_compare_target.currentData()
         active = self.active_emulator_number()
         default_target: object
-        if active in (2, 3, 4):
+        if active == 0:
             default_target = 1
-        elif active == 5:
-            default_target = 6
+        elif active in (2, 3):
+            default_target = 1
         elif active == 6:
+            default_target = 2
+        elif active == 4:
             default_target = 5
+        elif active == 5:
+            default_target = 4
         elif self._emulator_supports_sputter(active):
             default_target = "legacy_gapsim_angle"
         else:
@@ -3441,9 +4583,10 @@ class TrenchDepoWindow(QMainWindow):
         if self._emulator_supports_sputter(active):
             self.cmb_compare_target.addItem("GapSim angle-only legacy", "legacy_gapsim_angle")
 
+        prefer_previous = not ((active == 0 and previous != 1) or (active == 4 and previous != 5))
         restored_idx = self.cmb_compare_target.findData(previous)
         default_idx = self.cmb_compare_target.findData(default_target)
-        if restored_idx >= 0:
+        if prefer_previous and restored_idx >= 0:
             self.cmb_compare_target.setCurrentIndex(restored_idx)
         elif default_idx >= 0:
             self.cmb_compare_target.setCurrentIndex(default_idx)
@@ -3494,10 +4637,27 @@ class TrenchDepoWindow(QMainWindow):
             ]
         if self._active_emulator_supports_redeposition():
             options = [
-                ("Redepo %", "redepo_efficiency_pct"),
-                ("Emit power", "redepo_emit_power"),
-                ("Dist power", "redepo_distance_power"),
-                ("Soft LOS", "redepo_soft_los_radius_points"),
+                ("Reflection redepo %", "redepo_efficiency_pct"),
+                ("Gaussian width A", "redepo_emit_power"),
+                ("Ballistic mix %", "redepo_distance_power"),
+                *options,
+            ]
+        if self._active_emulator_supports_lf_overhang():
+            options = [
+                ("LF dose", "lf_overhang_dose"),
+                ("LF sputter gain", "lf_overhang_sputter_gain"),
+                ("LF redepo %", "lf_overhang_redepo_fraction_pct"),
+                ("LF survival loss", "lf_overhang_survival_penalty"),
+                ("LF width", "lf_overhang_width_a"),
+                *options,
+            ]
+        if self._active_emulator_supports_closure_redepo():
+            options = [
+                ("Closure redepo %", "closure_redepo_efficiency_pct"),
+                ("Closure capture", "closure_redepo_shadow_gain"),
+                ("Closure width", "closure_redepo_width_a"),
+                ("Closure survival loss", "closure_redepo_survival_penalty"),
+                ("Closure smooth", "closure_redepo_smoothing_a"),
                 *options,
             ]
         if self._active_emulator_supports_depth_deposition():
@@ -3512,7 +4672,7 @@ class TrenchDepoWindow(QMainWindow):
                 ("Residual decay", "deposition_residual_fill_decay_length_a"),
                 *options,
             ]
-            if self.active_emulator_number() == 6:
+            if self.active_emulator_number() in (0, 5):
                 options = [
                     ("Inhibit %", "inhibition_strength_pct"),
                     ("Inhibit depth", "inhibition_penetration_depth_a"),
@@ -3556,7 +4716,7 @@ class TrenchDepoWindow(QMainWindow):
             return
         self._apply_emulator_preset(settings)
         self.statusBar().showMessage(
-            f"Default option loaded: {self.cmb_emulator_default_preset.currentText()}",
+            f"기본 옵션 불러옴: {self.cmb_emulator_default_preset.currentText()}",
             1800,
         )
 
@@ -3566,14 +4726,20 @@ class TrenchDepoWindow(QMainWindow):
         supports_reflected = self._active_emulator_supports_reflected_ion()
         supports_redepo = self._active_emulator_supports_redeposition()
         supports_depth = self._active_emulator_supports_depth_deposition()
+        supports_lf = self._active_emulator_supports_lf_overhang()
+        supports_closure = self._active_emulator_supports_closure_redepo()
 
         self.spin_cycles.setValue(int(settings.get("cycles", self.spin_cycles.value())))
         self.spin_angstrom_per_cycle.setValue(float(settings.get("depo", self.spin_angstrom_per_cycle.value())))
+        if "reparam" in settings:
+            self._set_quality_mode_for_ds(float(settings["reparam"]))
         self.chk_sputter.setChecked(bool(supports_sputter and settings.get("sputter", supports_sputter)))
         self.chk_ion_transmission.setChecked(bool(supports_ion and settings.get("ion", supports_ion)))
         self.chk_reflected_ion.setChecked(bool(supports_reflected and settings.get("reflected", supports_reflected)))
         self.chk_redepo.setChecked(bool(supports_redepo and settings.get("redepo", supports_redepo)))
         self.chk_depth_deposition.setChecked(bool(supports_depth and settings.get("depth", supports_depth)))
+        self.chk_lf_overhang.setChecked(bool(supports_lf and settings.get("lf", supports_lf)))
+        self.chk_closure_redepo.setChecked(bool(supports_closure and settings.get("closure", supports_closure)))
 
         self.spin_sputter_strength.setValue(float(settings.get("etch", self.spin_sputter_strength.value())))
         self.spin_sputter_peak.setValue(float(settings.get("peak", self.spin_sputter_peak.value())))
@@ -3590,6 +4756,19 @@ class TrenchDepoWindow(QMainWindow):
         self.spin_redepo_efficiency.setValue(float(settings.get("redepo_eff", self.spin_redepo_efficiency.value())))
         self.spin_redepo_emit_power.setValue(float(settings.get("redepo_emit", self.spin_redepo_emit_power.value())))
         self.spin_redepo_distance_power.setValue(float(settings.get("redepo_dist", self.spin_redepo_distance_power.value())))
+        self.spin_lf_overhang_dose.setValue(float(settings.get("lf_dose", self.spin_lf_overhang_dose.value())))
+        self.spin_lf_overhang_sputter_gain.setValue(float(settings.get("lf_gain", self.spin_lf_overhang_sputter_gain.value())))
+        self.spin_lf_overhang_redepo_fraction.setValue(float(settings.get("lf_redepo", self.spin_lf_overhang_redepo_fraction.value())))
+        self.spin_lf_overhang_survival.setValue(float(settings.get("lf_survival", self.spin_lf_overhang_survival.value())))
+        self.spin_lf_overhang_width.setValue(float(settings.get("lf_width", self.spin_lf_overhang_width.value())))
+        self.spin_closure_redepo_efficiency.setValue(float(settings.get("closure_eff", self.spin_closure_redepo_efficiency.value())))
+        self.spin_closure_redepo_shadow_gain.setValue(float(settings.get("closure_shadow", self.spin_closure_redepo_shadow_gain.value())))
+        self.spin_closure_redepo_width.setValue(float(settings.get("closure_width", self.spin_closure_redepo_width.value())))
+        self.spin_closure_redepo_survival.setValue(float(settings.get("closure_survival", self.spin_closure_redepo_survival.value())))
+        self.spin_closure_redepo_smoothing.setValue(float(settings.get("closure_smoothing", self.spin_closure_redepo_smoothing.value())))
+        self.spin_depth_feature_width.setValue(float(settings.get("depth_width", self.spin_depth_feature_width.value())))
+        self.spin_depth_feature_depth.setValue(float(settings.get("depth_depth", self.spin_depth_feature_depth.value())))
+        self.spin_depth_feature_length.setValue(float(settings.get("depth_length", self.spin_depth_feature_length.value())))
         self.spin_depth_decay_k.setValue(float(settings.get("depth_k", self.spin_depth_decay_k.value())))
         self.spin_depth_decay_power.setValue(float(settings.get("depth_power", self.spin_depth_decay_power.value())))
         self.spin_depth_min_ratio_pct.setValue(float(settings.get("depth_min", self.spin_depth_min_ratio_pct.value())))
@@ -3611,28 +4790,33 @@ class TrenchDepoWindow(QMainWindow):
         changed = number != self._active_emulator_number
         self._active_emulator_number = number
         supports_sputter = self._active_emulator_supports_sputter()
-
-        self.setWindowTitle(f"Trench Depo Emulation - Emulator {number:02d}")
-        if changed and not preserve_geometry:
-            self._reset_geometry_to_default()
-        if supports_sputter:
-            if number == 2:
-                self.lbl_etch_section.setText("Etch switch (1번 direct + 2번 modifier)")
-            elif number == 3:
-                self.lbl_etch_section.setText("Etch switch (1번 direct + 3번 reflected)")
-            elif number == 4:
-                self.lbl_etch_section.setText("Etch switch (2번 source + 4번 redepo)")
-            else:
-                self.lbl_etch_section.setText("Etch switch (1번 direct)")
-            self.lbl_sputter_section.setText(
-                "1번 Direct sputter kernel" if number == 1 else "기존 1번 Direct sputter kernel"
-            )
-        for widget in self._sputter_widgets:
-            widget.setVisible(supports_sputter)
         supports_ion_transmission = self._active_emulator_supports_ion_transmission()
         supports_reflected_ion = self._active_emulator_supports_reflected_ion()
         supports_redeposition = self._active_emulator_supports_redeposition()
         supports_depth_deposition = self._active_emulator_supports_depth_deposition()
+        supports_lf_overhang = self._active_emulator_supports_lf_overhang()
+        supports_closure_redepo = self._active_emulator_supports_closure_redepo()
+
+        self.setWindowTitle(f"트렌치 Depo 에뮬레이션 - Emulator {number:02d}")
+        if changed and not preserve_geometry:
+            self._reset_geometry_to_default()
+
+        if supports_sputter:
+            if number == 0:
+                self.lbl_etch_section.setText("Etch switch (0 통합: direct + ion depth)")
+                self.lbl_sputter_section.setText("2 Direct sputter kernel")
+            elif number == 3:
+                self.lbl_etch_section.setText("Etch switch (3 ion transmission depth)")
+                self.lbl_sputter_section.setText("2 Direct sputter kernel")
+            elif number == 6:
+                self.lbl_etch_section.setText("Etch switch (6 reflection redepo source)")
+                self.lbl_sputter_section.setText("2 Direct sputter kernel")
+            else:
+                self.lbl_etch_section.setText("Etch switch (2 direct angle etch)")
+                self.lbl_sputter_section.setText("2 Direct sputter kernel")
+
+        for widget in self._sputter_widgets:
+            widget.setVisible(supports_sputter)
         for widget in self._ion_transmission_widgets:
             widget.setVisible(supports_ion_transmission)
         for widget in self._reflected_ion_widgets:
@@ -3641,68 +4825,117 @@ class TrenchDepoWindow(QMainWindow):
             widget.setVisible(supports_redeposition)
         for widget in self._depth_deposition_widgets:
             widget.setVisible(supports_depth_deposition)
+        for widget in self._lf_overhang_widgets:
+            widget.setVisible(supports_lf_overhang)
+        for widget in self._closure_redepo_widgets:
+            widget.setVisible(supports_closure_redepo)
         self.gaussian_group.setVisible(supports_sputter)
         self._populate_compare_targets()
         self.ion_map_group.setTitle("2 Ion Transmission Depth Map")
         self.gaussian_group.setTitle("1 Direct Sputter Gaussian")
-        self.depth_profile_group.setTitle(
-            "6 Inhibition Base Depth Map" if number == 6 else "5 Depth Deposition Map"
-        )
+        if number == 6:
+            self.chk_redepo.setText("Reflection redepo enabled")
+            self.lbl_redepo_section.setText("6 Reflection Gaussian redepo")
+            self.lbl_redepo_efficiency.setText("Redepo efficiency %")
+            self.lbl_redepo_emit_power.setText("Gaussian width A")
+            self.lbl_redepo_distance_power.setText("Ballistic mix %")
+            self.spin_redepo_emit_power.setDecimals(1)
+            self.spin_redepo_emit_power.setRange(1.0, 5000.0)
+            self.spin_redepo_emit_power.setSingleStep(20.0)
+            self.spin_redepo_distance_power.setDecimals(1)
+            self.spin_redepo_distance_power.setRange(0.0, 100.0)
+            self.spin_redepo_distance_power.setSingleStep(5.0)
+            if changed and self.spin_redepo_emit_power.value() <= 8.0:
+                self.spin_redepo_efficiency.setValue(30.0)
+                self.spin_redepo_emit_power.setValue(180.0)
+                self.spin_redepo_distance_power.setValue(35.0)
+        else:
+            self.chk_redepo.setText("Redeposition")
+            self.lbl_redepo_section.setText("4 Redeposition")
+            self.lbl_redepo_efficiency.setText("Efficiency %")
+            self.lbl_redepo_emit_power.setText("Emit power")
+            self.lbl_redepo_distance_power.setText("Dist power")
+            self.spin_redepo_emit_power.setDecimals(2)
+            self.spin_redepo_emit_power.setRange(0.0, 8.0)
+            self.spin_redepo_emit_power.setSingleStep(0.1)
+            self.spin_redepo_distance_power.setDecimals(2)
+            self.spin_redepo_distance_power.setRange(0.0, 4.0)
+            self.spin_redepo_distance_power.setSingleStep(0.1)
+        if number == 0:
+            self.depth_profile_group.setTitle("0 Integrated Depth/Inhibition Map")
+        elif number == 5:
+            self.depth_profile_group.setTitle("5 Inhibition Base Depth Map")
+        else:
+            self.depth_profile_group.setTitle("4 Depth Deposition Map")
 
         if supports_sputter:
-            self.chk_depth_deposition.setChecked(False)
             if changed:
                 self.chk_sputter.setChecked(True)
                 self.chk_ion_transmission.setChecked(supports_ion_transmission)
                 self.chk_reflected_ion.setChecked(supports_reflected_ion)
                 self.chk_redepo.setChecked(supports_redeposition)
-            if supports_ion_transmission:
+                self.chk_depth_deposition.setChecked(supports_depth_deposition)
+                self.chk_lf_overhang.setChecked(supports_lf_overhang)
+                self.chk_closure_redepo.setChecked(supports_closure_redepo)
+                if number == 0:
+                    self.cmb_depth_feature_type.setCurrentIndex(0)
+            elif not supports_depth_deposition:
+                self.chk_depth_deposition.setChecked(False)
+            if number == 0:
+                self.chk_depth_deposition.setText("Depth/Inhibition deposition")
+                self.lbl_depth_depo_section.setText("0 Depth/Inhibition deposition")
+                self.lbl_depth_parameter_help.setText(
+                    "통합 모델: conformal deposition 위에 direct/ion etch와 depth/inhibition deposition만 결합합니다. Redepo/reflected/LF/closure는 제외됩니다."
+                )
+                self.edit_request_note.setPlaceholderText("요청사항 / 통합모델에서 제외할 항목이나 관찰 메모를 적으면 run 파일명과 요약에 같이 들어갑니다.")
+            elif supports_ion_transmission:
+                self.chk_depth_deposition.setText("Depth-dependent deposition")
                 self.edit_request_note.setPlaceholderText("요청사항 / ion transmission, shadowing 메모를 적으면 run 파일명과 요약에 같이 들어갑니다.")
-            elif supports_reflected_ion:
-                self.edit_request_note.setPlaceholderText("요청사항 / reflected ion, bowing, microtrenching 메모를 적으면 run 파일명과 요약에 같이 들어갑니다.")
-            elif supports_redeposition:
-                self.edit_request_note.setPlaceholderText("요청사항 / redeposition 결합 가설과 비교 메모를 적으면 run 파일명과 요약에 같이 들어갑니다.")
+            elif number == 6:
+                self.chk_depth_deposition.setText("Depth-dependent deposition")
+                self.edit_request_note.setPlaceholderText("요청사항 / 반사 hit 기반 Gaussian+ballistic redepo 메모를 적으면 run 파일명과 요약에 같이 들어갑니다.")
             else:
+                self.chk_depth_deposition.setText("Depth-dependent deposition")
                 self.edit_request_note.setPlaceholderText("요청사항 / etch 물리 메모를 적으면 run 파일명과 요약에 같이 들어갑니다.")
         elif supports_depth_deposition:
             self.chk_sputter.setChecked(False)
             self.chk_ion_transmission.setChecked(False)
             self.chk_reflected_ion.setChecked(False)
             self.chk_redepo.setChecked(False)
+            self.chk_lf_overhang.setChecked(False)
+            self.chk_closure_redepo.setChecked(False)
             if changed:
                 self.chk_depth_deposition.setChecked(True)
                 self.cmb_depth_feature_type.setCurrentIndex(0)
-            if number == 6:
+            if number == 5:
                 self.chk_depth_deposition.setText("Inhibition deposition")
-                self.lbl_depth_depo_section.setText("6 Inhibition-weighted deposition")
+                self.lbl_depth_depo_section.setText("5 Inhibition-weighted deposition")
                 self.lbl_depth_parameter_help.setText(
                     "Inhibition map: active structure fills the background."
                 )
-                self.edit_request_note.setPlaceholderText("Request note / inhibition notes are saved with the run.")
+                self.edit_request_note.setPlaceholderText("요청사항 / inhibition 메모를 적으면 run 파일명과 요약에 같이 들어갑니다.")
             else:
                 self.chk_depth_deposition.setText("Depth-dependent deposition")
-                self.lbl_depth_depo_section.setText("5 Depth-dependent deposition")
+                self.lbl_depth_depo_section.setText("4 Depth-dependent deposition")
                 self.lbl_depth_parameter_help.setText(
                     "Depth map: active structure fills the background."
                 )
-                self.edit_request_note.setPlaceholderText("Request note / depth fill notes are saved with the run.")
+                self.edit_request_note.setPlaceholderText("요청사항 / depth fill 메모를 적으면 run 파일명과 요약에 같이 들어갑니다.")
         else:
             self.chk_depth_deposition.setText("Depth-dependent deposition")
             self.chk_sputter.setChecked(False)
             self.chk_ion_transmission.setChecked(False)
             self.chk_reflected_ion.setChecked(False)
             self.chk_redepo.setChecked(False)
+            self.chk_lf_overhang.setChecked(False)
+            self.chk_closure_redepo.setChecked(False)
             self.chk_depth_deposition.setChecked(False)
-            if number == 0:
+            if number == 1:
                 self.edit_request_note.setPlaceholderText("요청사항 / conformal depo 메모를 적으면 run 파일명과 요약에 같이 들어갑니다.")
             else:
                 self.edit_request_note.setPlaceholderText("아직 물리 모델이 배정되지 않은 슬롯입니다. 기본 conformal depo로만 실행됩니다.")
 
         self._populate_emulator_default_presets()
-        if changed:
-            settings = self.cmb_emulator_default_preset.currentData()
-            if isinstance(settings, dict):
-                self._apply_emulator_preset(settings)
 
         self.sync_depth_deposition_editor_from_spins()
         self._populate_split_parameters()
@@ -3712,7 +4945,7 @@ class TrenchDepoWindow(QMainWindow):
             self._schedule_emulator_preview_run()
 
     def _schedule_emulator_preview_run(self) -> None:
-        self.statusBar().showMessage("Emulator mode changed", 1200)
+        self.statusBar().showMessage("에뮬레이터 모드 변경됨", 1200)
         self._emulator_run_timer.start()
 
     def _run_deferred_emulator_preview(self) -> None:
@@ -3905,9 +5138,33 @@ class TrenchDepoWindow(QMainWindow):
 
     def _sync_depth_advanced_visibility(self, _checked: bool = False) -> None:
         supports_depth = self._active_emulator_supports_depth_deposition()
-        show_advanced = bool(supports_depth and self.btn_depth_advanced.isChecked())
+        show_advanced = bool(
+            supports_depth
+            and self.chk_depth_deposition.isChecked()
+            and self.btn_depth_advanced.isChecked()
+        )
         for widget in self._depth_advanced_widgets():
             widget.setVisible(show_advanced)
+
+    def _sync_collapsible_section(
+        self,
+        *,
+        section_header: QWidget,
+        master_checkbox: QCheckBox,
+        detail_widgets: Sequence[QWidget],
+        supported: bool,
+        checkbox_enabled: bool,
+        expanded: bool,
+        detail_enabled: bool,
+    ) -> None:
+        section_header.setVisible(bool(supported))
+        section_header.setEnabled(bool(supported))
+        master_checkbox.setVisible(bool(supported))
+        master_checkbox.setEnabled(bool(supported and checkbox_enabled))
+        show_detail = bool(supported and expanded)
+        for widget in detail_widgets:
+            widget.setVisible(show_detail)
+            widget.setEnabled(bool(detail_enabled))
 
     def sync_etch_control_availability(self, _checked: bool = False) -> None:
         supports_sputter = self._active_emulator_supports_sputter()
@@ -3915,6 +5172,8 @@ class TrenchDepoWindow(QMainWindow):
         supports_reflected_ion = self._active_emulator_supports_reflected_ion()
         supports_redeposition = self._active_emulator_supports_redeposition()
         supports_depth_deposition = self._active_emulator_supports_depth_deposition()
+        supports_lf_overhang = self._active_emulator_supports_lf_overhang()
+        supports_closure_redepo = self._active_emulator_supports_closure_redepo()
         etch_enabled = bool(supports_sputter and self.chk_sputter.isChecked())
 
         direct_sputter_detail_widgets = [
@@ -3933,6 +5192,15 @@ class TrenchDepoWindow(QMainWindow):
         ]
         for widget in direct_sputter_detail_widgets:
             widget.setEnabled(etch_enabled)
+        self._sync_collapsible_section(
+            section_header=self.lbl_etch_section,
+            master_checkbox=self.chk_sputter,
+            detail_widgets=direct_sputter_detail_widgets,
+            supported=supports_sputter,
+            checkbox_enabled=True,
+            expanded=etch_enabled,
+            detail_enabled=etch_enabled,
+        )
 
         self.chk_ion_transmission.setEnabled(etch_enabled and supports_ion_transmission)
         ion_enabled = bool(
@@ -3963,6 +5231,15 @@ class TrenchDepoWindow(QMainWindow):
         ]
         for widget in ion_detail_widgets:
             widget.setEnabled(ion_enabled)
+        self._sync_collapsible_section(
+            section_header=self.lbl_ion_depth_section,
+            master_checkbox=self.chk_ion_transmission,
+            detail_widgets=[widget for widget in ion_detail_widgets if widget is not self.lbl_ion_depth_section],
+            supported=supports_ion_transmission,
+            checkbox_enabled=etch_enabled,
+            expanded=ion_enabled,
+            detail_enabled=ion_enabled,
+        )
 
         self.chk_reflected_ion.setEnabled(etch_enabled and supports_reflected_ion)
         reflected_enabled = bool(
@@ -3982,6 +5259,24 @@ class TrenchDepoWindow(QMainWindow):
             self.spin_reflected_range,
         ]:
             widget.setEnabled(reflected_enabled)
+        self._sync_collapsible_section(
+            section_header=self.lbl_reflected_section,
+            master_checkbox=self.chk_reflected_ion,
+            detail_widgets=[
+                self.lbl_reflected_strength,
+                self.spin_reflected_strength,
+                self.lbl_reflected_bowing,
+                self.spin_reflected_bowing,
+                self.lbl_reflected_microtrench,
+                self.spin_reflected_microtrench,
+                self.lbl_reflected_range,
+                self.spin_reflected_range,
+            ],
+            supported=supports_reflected_ion,
+            checkbox_enabled=etch_enabled,
+            expanded=reflected_enabled,
+            detail_enabled=reflected_enabled,
+        )
 
         self.chk_redepo.setEnabled(etch_enabled and supports_redeposition)
         redepo_enabled = bool(
@@ -3989,21 +5284,94 @@ class TrenchDepoWindow(QMainWindow):
             and supports_redeposition
             and self.chk_redepo.isChecked()
         )
-        for widget in [
+        redepo_source_widgets = [
             self.lbl_redepo_section,
-            self.lbl_redepo_source,
-            self.cmb_redepo_source_model,
             self.lbl_redepo_efficiency,
             self.spin_redepo_efficiency,
             self.lbl_redepo_emit_power,
             self.spin_redepo_emit_power,
             self.lbl_redepo_distance_power,
             self.spin_redepo_distance_power,
+        ]
+        redepo_advanced_widgets = [
+            self.lbl_redepo_source,
+            self.cmb_redepo_source_model,
             self.lbl_redepo_soft_los,
             self.spin_redepo_soft_los,
             self.redepo_lobe_group,
-        ]:
+        ]
+        for widget in [*redepo_source_widgets, *redepo_advanced_widgets]:
             widget.setEnabled(redepo_enabled)
+        if self.active_emulator_number() == 6:
+            redepo_detail_widgets = redepo_source_widgets
+        else:
+            redepo_detail_widgets = [*redepo_source_widgets, *redepo_advanced_widgets]
+        self._sync_collapsible_section(
+            section_header=self.lbl_redepo_section,
+            master_checkbox=self.chk_redepo,
+            detail_widgets=redepo_detail_widgets,
+            supported=supports_redeposition,
+            checkbox_enabled=etch_enabled,
+            expanded=redepo_enabled,
+            detail_enabled=redepo_enabled,
+        )
+        if self.active_emulator_number() == 6:
+            for widget in redepo_advanced_widgets:
+                widget.setVisible(False)
+
+        self.chk_lf_overhang.setEnabled(etch_enabled and supports_lf_overhang)
+        lf_overhang_enabled = bool(
+            etch_enabled
+            and supports_lf_overhang
+            and self.chk_lf_overhang.isChecked()
+        )
+        self._sync_collapsible_section(
+            section_header=self.lbl_lf_overhang_section,
+            master_checkbox=self.chk_lf_overhang,
+            detail_widgets=[
+                self.lbl_lf_overhang_dose,
+                self.spin_lf_overhang_dose,
+                self.lbl_lf_overhang_sputter_gain,
+                self.spin_lf_overhang_sputter_gain,
+                self.lbl_lf_overhang_redepo_fraction,
+                self.spin_lf_overhang_redepo_fraction,
+                self.lbl_lf_overhang_survival,
+                self.spin_lf_overhang_survival,
+                self.lbl_lf_overhang_width,
+                self.spin_lf_overhang_width,
+            ],
+            supported=supports_lf_overhang,
+            checkbox_enabled=etch_enabled,
+            expanded=lf_overhang_enabled,
+            detail_enabled=lf_overhang_enabled,
+        )
+
+        self.chk_closure_redepo.setEnabled(etch_enabled and supports_closure_redepo)
+        closure_redepo_enabled = bool(
+            etch_enabled
+            and supports_closure_redepo
+            and self.chk_closure_redepo.isChecked()
+        )
+        self._sync_collapsible_section(
+            section_header=self.lbl_closure_redepo_section,
+            master_checkbox=self.chk_closure_redepo,
+            detail_widgets=[
+                self.lbl_closure_redepo_efficiency,
+                self.spin_closure_redepo_efficiency,
+                self.lbl_closure_redepo_shadow_gain,
+                self.spin_closure_redepo_shadow_gain,
+                self.lbl_closure_redepo_width,
+                self.spin_closure_redepo_width,
+                self.lbl_closure_redepo_survival,
+                self.spin_closure_redepo_survival,
+                self.lbl_closure_redepo_smoothing,
+                self.spin_closure_redepo_smoothing,
+            ],
+            supported=supports_closure_redepo,
+            checkbox_enabled=etch_enabled,
+            expanded=closure_redepo_enabled,
+            detail_enabled=closure_redepo_enabled,
+        )
 
         self.chk_depth_deposition.setEnabled(supports_depth_deposition)
         depth_enabled = bool(supports_depth_deposition and self.chk_depth_deposition.isChecked())
@@ -4039,6 +5407,45 @@ class TrenchDepoWindow(QMainWindow):
             self.depth_deposition_editor,
         ]:
             widget.setEnabled(depth_enabled)
+        self._sync_collapsible_section(
+            section_header=self.lbl_depth_depo_section,
+            master_checkbox=self.chk_depth_deposition,
+            detail_widgets=[
+                self.lbl_depth_feature_type,
+                self.cmb_depth_feature_type,
+                self.lbl_depth_feature_width,
+                self.spin_depth_feature_width,
+                self.lbl_depth_feature_depth,
+                self.spin_depth_feature_depth,
+                self.lbl_depth_feature_length,
+                self.spin_depth_feature_length,
+                self.lbl_depth_decay_k,
+                self.spin_depth_decay_k,
+                self.lbl_depth_decay_power,
+                self.spin_depth_decay_power,
+                self.lbl_depth_min_ratio,
+                self.spin_depth_min_ratio_pct,
+                self.btn_depth_advanced,
+                self.lbl_depth_closure_section,
+                self.lbl_depth_closure_threshold,
+                self.spin_depth_closure_threshold,
+                self.lbl_depth_post_fill_hole,
+                self.spin_depth_post_fill_hole_pct,
+                self.lbl_depth_post_fill_line,
+                self.spin_depth_post_fill_line_pct,
+                self.lbl_depth_line_open_path,
+                self.spin_depth_line_open_path,
+                self.lbl_depth_residual_decay,
+                self.spin_depth_residual_decay,
+                self.depth_profile_group,
+                self.lbl_depth_parameter_help,
+                self.depth_deposition_editor,
+            ],
+            supported=supports_depth_deposition,
+            checkbox_enabled=True,
+            expanded=depth_enabled,
+            detail_enabled=depth_enabled,
+        )
         length_enabled = bool(
             depth_enabled and str(self.cmb_depth_feature_type.currentData() or "hole") == "line"
         )
@@ -4052,13 +5459,18 @@ class TrenchDepoWindow(QMainWindow):
         supports_reflected_ion = self._active_emulator_supports_reflected_ion()
         supports_redeposition = self._active_emulator_supports_redeposition()
         supports_depth_deposition = self._active_emulator_supports_depth_deposition()
+        supports_lf_overhang = self._active_emulator_supports_lf_overhang()
+        supports_closure_redepo = self._active_emulator_supports_closure_redepo()
         self.spin_cycles.setValue(20)
         self.spin_angstrom_per_cycle.setValue(10.0)
+        self._set_quality_mode_for_ds(DEFAULT_UI_REPARAM_DS_A)
         self.chk_sputter.setChecked(supports_sputter)
         self.chk_ion_transmission.setChecked(supports_ion_transmission)
         self.chk_reflected_ion.setChecked(supports_reflected_ion)
         self.chk_redepo.setChecked(supports_redeposition)
         self.chk_depth_deposition.setChecked(supports_depth_deposition)
+        self.chk_lf_overhang.setChecked(supports_lf_overhang)
+        self.chk_closure_redepo.setChecked(supports_closure_redepo)
         self.spin_ion_start_depth.setValue(0.0)
         self.spin_ion_end_depth.setValue(100.0)
         self.spin_ion_decay_strength.setValue(100.0)
@@ -4073,15 +5485,34 @@ class TrenchDepoWindow(QMainWindow):
         self.spin_reflected_microtrench.setValue(1.0)
         self.spin_reflected_range.setValue(1600.0)
         self.cmb_redepo_source_model.setCurrentIndex(0)
-        self.spin_redepo_efficiency.setValue(25.0)
-        self.spin_redepo_emit_power.setValue(1.0)
-        self.spin_redepo_distance_power.setValue(1.0)
+        if self.active_emulator_number() == 6:
+            self.spin_redepo_efficiency.setValue(30.0)
+            self.spin_redepo_emit_power.setValue(180.0)
+            self.spin_redepo_distance_power.setValue(35.0)
+        else:
+            self.spin_redepo_efficiency.setValue(25.0)
+            self.spin_redepo_emit_power.setValue(1.0)
+            self.spin_redepo_distance_power.setValue(1.0)
         self.spin_redepo_soft_los.setValue(0)
+        self.spin_lf_overhang_dose.setValue(1.0)
+        self.spin_lf_overhang_sputter_gain.setValue(1.0)
+        self.spin_lf_overhang_redepo_fraction.setValue(30.0)
+        self.spin_lf_overhang_survival.setValue(0.75)
+        self.spin_lf_overhang_width.setValue(180.0)
+        self.spin_closure_redepo_efficiency.setValue(35.0)
+        self.spin_closure_redepo_shadow_gain.setValue(2.0)
+        self.spin_closure_redepo_width.setValue(160.0)
+        self.spin_closure_redepo_survival.setValue(0.85)
+        self.spin_closure_redepo_smoothing.setValue(160.0)
         self.cmb_depth_feature_type.setCurrentIndex(0)
         self.spin_depth_feature_width.setValue(240.0)
         self.spin_depth_feature_depth.setValue(4700.0)
         self.spin_depth_feature_length.setValue(0.0)
-        if self.active_emulator_number() == 6:
+        if self.active_emulator_number() == 0:
+            self.spin_depth_decay_k.setValue(0.55)
+            self.spin_depth_decay_power.setValue(1.2)
+            self.spin_depth_min_ratio_pct.setValue(8.0)
+        elif self.active_emulator_number() == 5:
             self.spin_depth_decay_k.setValue(0.35)
             self.spin_depth_decay_power.setValue(1.2)
             self.spin_depth_min_ratio_pct.setValue(8.0)
@@ -4101,19 +5532,19 @@ class TrenchDepoWindow(QMainWindow):
         self.spin_sputter_smoothing.setValue(40.0)
         self._populate_split_parameters()
         self.sync_etch_control_availability()
-        if self.active_emulator_number() == 6:
-            self.edit_request_note.setPlainText("PECVD/PEALD inhibition-weighted deposition: top/opening growth suppression with smooth trench fill")
+        if self.active_emulator_number() == 0:
+            self.edit_request_note.setPlainText("통합모델: conformal + direct/ion etch + depth/inhibition deposition. 리데포/reflected/LF/closure 제외")
         elif self.active_emulator_number() == 5:
+            self.edit_request_note.setPlainText("PECVD/PEALD inhibition-weighted deposition: top/opening growth suppression with smooth trench fill")
+        elif self.active_emulator_number() == 4:
             self.edit_request_note.setPlainText("길쭉한 항아리형 구조에서 depth-dependent depo와 closure 후 잔류 fill 검증")
         elif self.active_emulator_number() == 3:
-            self.edit_request_note.setPlainText("1번 direct sputter 위에 reflected ion bowing/microtrenching 추가 검증")
-        elif self.active_emulator_number() == 4:
-            self.edit_request_note.setPlainText("2번 source 기반 GapSim-style binned lobe LOS redeposition 결합 검증")
+            self.edit_request_note.setPlainText("direct sputter 출력에 ion transmission / geometric shadowing 결합 검증")
         elif self.active_emulator_number() == 2:
-            self.edit_request_note.setPlainText("계단식 넓은 트렌치에서 ion transmission shadowing 검증")
-        elif self.active_emulator_number() == 1:
             self.edit_request_note.setPlainText("각도기반 direct sputter etch 검증")
-        elif self.active_emulator_number() == 0:
+        elif self.active_emulator_number() == 6:
+            self.edit_request_note.setPlainText("입사 ion의 정반사 hit 지점을 기준으로 Gaussian 분포를 만들고 ballistic hit map으로 보정하는 리데포 검증")
+        elif self.active_emulator_number() == 1:
             self.edit_request_note.setPlainText("라운드 conformal offset 기반 트렌치 증착")
         else:
             self.edit_request_note.setPlainText("미배정 슬롯: 기본 conformal deposition만 실행")
@@ -4158,10 +5589,34 @@ class TrenchDepoWindow(QMainWindow):
             values = (600.0, 2400.0, 600.0, 0, 50.0, 10000.0)
         elif parameter == "redepo_efficiency_pct":
             values = (0.0, 50.0, 10.0, 1, 0.0, 100.0)
+        elif parameter == "redepo_emit_power" and self.active_emulator_number() == 6:
+            values = (80.0, 320.0, 80.0, 0, 1.0, 5000.0)
+        elif parameter == "redepo_distance_power" and self.active_emulator_number() == 6:
+            values = (0.0, 80.0, 20.0, 1, 0.0, 100.0)
         elif parameter in {"redepo_emit_power", "redepo_distance_power"}:
             values = (0.5, 2.0, 0.5, 2, 0.0, 8.0)
         elif parameter == "redepo_soft_los_radius_points":
             values = (0.0, 2.0, 1.0, 0, 0.0, 2.0)
+        elif parameter == "lf_overhang_dose":
+            values = (0.0, 2.0, 0.5, 2, 0.0, 10.0)
+        elif parameter == "lf_overhang_sputter_gain":
+            values = (0.5, 2.0, 0.5, 2, 0.0, 10.0)
+        elif parameter == "lf_overhang_redepo_fraction_pct":
+            values = (0.0, 60.0, 15.0, 1, 0.0, 100.0)
+        elif parameter == "lf_overhang_survival_penalty":
+            values = (0.0, 1.5, 0.3, 2, 0.0, 4.0)
+        elif parameter == "lf_overhang_width_a":
+            values = (80.0, 320.0, 80.0, 0, 1.0, 5000.0)
+        elif parameter == "closure_redepo_efficiency_pct":
+            values = (0.0, 60.0, 15.0, 1, 0.0, 100.0)
+        elif parameter == "closure_redepo_shadow_gain":
+            values = (0.0, 4.0, 1.0, 2, 0.0, 20.0)
+        elif parameter == "closure_redepo_width_a":
+            values = (80.0, 320.0, 80.0, 0, 1.0, 5000.0)
+        elif parameter == "closure_redepo_survival_penalty":
+            values = (0.0, 1.5, 0.3, 2, 0.0, 4.0)
+        elif parameter == "closure_redepo_smoothing_a":
+            values = (0.0, 320.0, 80.0, 0, 0.0, 5000.0)
         elif parameter == "deposition_depth_decay_k":
             values = (0.2, 1.4, 0.3, 2, 0.0, 20.0)
         elif parameter == "deposition_depth_decay_power":
@@ -4211,13 +5666,17 @@ class TrenchDepoWindow(QMainWindow):
         supports_reflected_ion = self._active_emulator_supports_reflected_ion()
         supports_redeposition = self._active_emulator_supports_redeposition()
         supports_depth_deposition = self._active_emulator_supports_depth_deposition()
+        supports_lf_overhang = self._active_emulator_supports_lf_overhang()
+        supports_closure_redepo = self._active_emulator_supports_closure_redepo()
         etch_enabled = bool(supports_sputter and self.chk_sputter.isChecked())
         depth_feature_type = str(self.cmb_depth_feature_type.currentData() or "hole")
         depth_feature_length = float(self.spin_depth_feature_length.value())
         return TrenchDepoConfig(
             points=self._current_geometry_points(),
             cycles=int(self.spin_cycles.value()),
+            emulator_number=int(active_emulator),
             angstrom_per_cycle=float(self.spin_angstrom_per_cycle.value()),
+            reparam_ds_a=float(self.spin_reparam_ds.value()),
             sputter_enabled=etch_enabled,
             sputter_strength_a_per_cycle=(
                 float(self.spin_sputter_strength.value()) if supports_sputter else 0.0
@@ -4272,6 +5731,23 @@ class TrenchDepoWindow(QMainWindow):
             redepo_emit_power=float(self.spin_redepo_emit_power.value()),
             redepo_distance_power=float(self.spin_redepo_distance_power.value()),
             redepo_soft_los_radius_points=int(self.spin_redepo_soft_los.value()),
+            redepo_transport_model=TrenchDepoConfig().redepo_transport_model,
+            lf_overhang_enabled=bool(
+                etch_enabled and supports_lf_overhang and self.chk_lf_overhang.isChecked()
+            ),
+            lf_overhang_dose=float(self.spin_lf_overhang_dose.value()),
+            lf_overhang_sputter_gain=float(self.spin_lf_overhang_sputter_gain.value()),
+            lf_overhang_redepo_fraction_pct=float(self.spin_lf_overhang_redepo_fraction.value()),
+            lf_overhang_survival_penalty=float(self.spin_lf_overhang_survival.value()),
+            lf_overhang_width_a=float(self.spin_lf_overhang_width.value()),
+            closure_redepo_enabled=bool(
+                etch_enabled and supports_closure_redepo and self.chk_closure_redepo.isChecked()
+            ),
+            closure_redepo_efficiency_pct=float(self.spin_closure_redepo_efficiency.value()),
+            closure_redepo_shadow_gain=float(self.spin_closure_redepo_shadow_gain.value()),
+            closure_redepo_width_a=float(self.spin_closure_redepo_width.value()),
+            closure_redepo_survival_penalty=float(self.spin_closure_redepo_survival.value()),
+            closure_redepo_smoothing_a=float(self.spin_closure_redepo_smoothing.value()),
             deposition_depth_enabled=bool(
                 supports_depth_deposition and self.chk_depth_deposition.isChecked()
             ),
@@ -4294,7 +5770,9 @@ class TrenchDepoWindow(QMainWindow):
             deposition_residual_fill_distribution="exponential_from_closure",
             deposition_conserve_volume=True,
             inhibition_enabled=bool(
-                active_emulator == 6 and supports_depth_deposition and self.chk_depth_deposition.isChecked()
+                active_emulator in (0, 5)
+                and supports_depth_deposition
+                and self.chk_depth_deposition.isChecked()
             ),
             inhibition_process_model="hybrid",
             inhibition_strength_pct=85.0,
@@ -4306,6 +5784,145 @@ class TrenchDepoWindow(QMainWindow):
             inhibition_smoothing_a=45.0,
         )
 
+    @staticmethod
+    def _fmt_a(value: float) -> str:
+        return f"{float(value):.3f} A"
+
+    @staticmethod
+    def _fmt_pct(value: float) -> str:
+        return f"{float(value):.1f}%"
+
+    @staticmethod
+    def _on_off(enabled: bool) -> str:
+        return "ON" if bool(enabled) else "OFF"
+
+    def _format_result_parameters(
+        self,
+        config: TrenchDepoConfig,
+        result: Optional[TrenchDepoResult],
+    ) -> str:
+        meta = dict(result.meta) if result is not None else {}
+        number = self.active_emulator_number()
+        title = EMULATOR_MODE_TITLES.get(number, "Custom emulator")
+        geometry_source = self._current_geometry_source_name()
+        frames = len(result.frame_profiles) if result is not None else 0
+        final_points = len(result.final_profile) if result is not None else 0
+
+        lines = [
+            f"에뮬레이터: {number:02d} - {title}",
+            f"상태: {'실행 결과' if result is not None else '입력 미리보기'}",
+            f"구조 입력: {geometry_source} | {len(config.points)}점",
+            "",
+            "[기본 공정]",
+            f"Cycles: {int(config.cycles)}",
+            f"Depo: {float(config.angstrom_per_cycle):.3f} A/CYC",
+            f"Reparam ds: {float(config.reparam_ds_a):.3f} A",
+        ]
+
+        lines.extend(
+            [
+                "",
+                "[Etch / Sputter]",
+                f"Direct sputter: {self._on_off(config.sputter_enabled)}",
+            ]
+        )
+        if config.sputter_enabled:
+            lines.extend(
+                [
+                    f"Etch: {float(config.sputter_strength_a_per_cycle):.3f} A/CYC",
+                    f"Peak: {float(config.sputter_peak_pct):.1f}% @ {float(config.sputter_peak_angle_deg):.1f} deg",
+                    f"Width: {float(config.sputter_width_deg):.1f} deg",
+                    f"Smoothing: {self._fmt_a(config.sputter_smoothing_a)}",
+                ]
+            )
+
+        lines.append(f"Ion transmission: {self._on_off(config.ion_transmission_enabled)}")
+        if config.ion_transmission_enabled:
+            lines.extend(
+                [
+                    f"Depth window: {float(config.ion_transmission_start_depth_pct):.1f}% -> {float(config.ion_transmission_end_depth_pct):.1f}%",
+                    f"Drop/Floor/Curve: {self._fmt_pct(config.ion_transmission_decay_strength_pct)} / {self._fmt_pct(config.ion_transmission_floor_pct)} / {float(config.ion_transmission_curve_power):.2f}",
+                    f"Shadow aperture/hidden/edge: {self._fmt_pct(config.ion_transmission_aperture_shadow_pct)} / {self._fmt_pct(config.ion_transmission_lateral_shadow_pct)} / {self._fmt_pct(config.ion_transmission_edge_shadow_pct)}",
+                ]
+            )
+
+        lines.append(f"Reflection redepo: {self._on_off(config.redepo_enabled)}")
+        if config.redepo_enabled:
+            lines.extend(
+                [
+                    f"Redepo efficiency: {self._fmt_pct(config.redepo_efficiency_pct)}",
+                    f"Gaussian width: {self._fmt_a(config.redepo_emit_power)}",
+                    f"Ballistic mix: {self._fmt_pct(config.redepo_distance_power)}",
+                ]
+            )
+        excluded = ["reflected ion", "LF proxy", "closure redepo"]
+        if not config.redepo_enabled:
+            excluded.insert(1, "redeposition")
+        lines.append(f"제외: {' / '.join(excluded)}")
+
+        lines.extend(
+            [
+                "",
+                "[Deposition modifiers]",
+                f"Depth deposition: {self._on_off(config.deposition_depth_enabled)}",
+            ]
+        )
+        if config.deposition_depth_enabled:
+            feature_length = (
+                "None"
+                if config.deposition_feature_length_a is None
+                else self._fmt_a(float(config.deposition_feature_length_a))
+            )
+            lines.extend(
+                [
+                    f"Feature: {config.deposition_feature_type} | W {self._fmt_a(config.deposition_feature_width_a)} | D {self._fmt_a(config.deposition_feature_depth_a)} | L {feature_length}",
+                    f"Decay k/power/min: {float(config.deposition_depth_decay_k):.3f} / {float(config.deposition_depth_decay_power):.3f} / {float(config.deposition_min_ratio) * 100.0:.1f}%",
+                    f"Closure threshold: {self._fmt_a(config.deposition_closure_threshold_a)}",
+                    f"Post closure hole/line: {float(config.deposition_post_closure_fill_pct_hole) * 100.0:.1f}% / {float(config.deposition_post_closure_fill_pct_line) * 100.0:.1f}%",
+                ]
+            )
+
+        lines.append(f"Inhibition: {self._on_off(config.inhibition_enabled)}")
+        if config.inhibition_enabled:
+            lines.extend(
+                [
+                    f"Process: {config.inhibition_process_model}",
+                    f"Strength: {self._fmt_pct(config.inhibition_strength_pct)}",
+                    f"Penetration: {self._fmt_a(config.inhibition_penetration_depth_a)}",
+                    f"Floor/Bottom boost/Recomb: {float(config.inhibition_min_growth_ratio) * 100.0:.1f}% / {self._fmt_pct(config.inhibition_bottom_boost_pct)} / {self._fmt_pct(config.inhibition_peald_recombination_pct)}",
+                ]
+            )
+
+        if result is not None:
+            lines.extend(
+                [
+                    "",
+                    "[결과 요약]",
+                    f"Frames: {frames}",
+                    f"Final points: {final_points}",
+                    f"Growth model: {meta.get('growth_model', 'unknown')}",
+                ]
+            )
+            if meta.get("deposition_closure_detected"):
+                lines.append(
+                    f"Closure: step {meta.get('deposition_closure_step')} | depth {float(meta.get('deposition_closure_depth_a') or 0.0):.3f} A"
+                )
+
+        return "\n".join(lines)
+
+    def _update_result_parameter_summary(
+        self,
+        config: Optional[TrenchDepoConfig] = None,
+        result: Optional[TrenchDepoResult] = None,
+    ) -> None:
+        if not hasattr(self, "edit_result_parameters"):
+            return
+        cfg = config or self._result_config
+        if cfg is None:
+            self.edit_result_parameters.setPlainText("아직 실행된 결과가 없습니다.")
+            return
+        self.edit_result_parameters.setPlainText(self._format_result_parameters(cfg, result))
+
     def current_etch_config(self) -> TrenchDepoConfig:
         cfg = self.current_config()
         if cfg.sputter_enabled or cfg.sputter_strength_a_per_cycle <= 0.0:
@@ -4313,6 +5930,7 @@ class TrenchDepoWindow(QMainWindow):
         return TrenchDepoConfig(
             points=cfg.points,
             cycles=cfg.cycles,
+            emulator_number=cfg.emulator_number,
             angstrom_per_cycle=cfg.angstrom_per_cycle,
             reparam_ds_a=cfg.reparam_ds_a,
             sputter_enabled=True,
@@ -4344,6 +5962,22 @@ class TrenchDepoWindow(QMainWindow):
             redepo_neighbor_exclusion=cfg.redepo_neighbor_exclusion,
             redepo_max_distance_a=cfg.redepo_max_distance_a,
             redepo_soft_los_radius_points=cfg.redepo_soft_los_radius_points,
+            redepo_transport_model=cfg.redepo_transport_model,
+            redepo_ray_count=cfg.redepo_ray_count,
+            redepo_footprint_sigma_a=cfg.redepo_footprint_sigma_a,
+            redepo_footprint_radius_sigma=cfg.redepo_footprint_radius_sigma,
+            lf_overhang_enabled=cfg.lf_overhang_enabled,
+            lf_overhang_dose=cfg.lf_overhang_dose,
+            lf_overhang_sputter_gain=cfg.lf_overhang_sputter_gain,
+            lf_overhang_redepo_fraction_pct=cfg.lf_overhang_redepo_fraction_pct,
+            lf_overhang_survival_penalty=cfg.lf_overhang_survival_penalty,
+            lf_overhang_width_a=cfg.lf_overhang_width_a,
+            closure_redepo_enabled=cfg.closure_redepo_enabled,
+            closure_redepo_efficiency_pct=cfg.closure_redepo_efficiency_pct,
+            closure_redepo_shadow_gain=cfg.closure_redepo_shadow_gain,
+            closure_redepo_width_a=cfg.closure_redepo_width_a,
+            closure_redepo_survival_penalty=cfg.closure_redepo_survival_penalty,
+            closure_redepo_smoothing_a=cfg.closure_redepo_smoothing_a,
         )
 
     def _config_for_emulator_number(
@@ -4359,12 +5993,15 @@ class TrenchDepoWindow(QMainWindow):
         supports_reflected_ion = self._emulator_supports_reflected_ion(target)
         supports_redeposition = self._emulator_supports_redeposition(target)
         supports_depth_deposition = self._emulator_supports_depth_deposition(target)
+        supports_lf_overhang = self._emulator_supports_lf_overhang(target)
+        supports_closure_redepo = self._emulator_supports_closure_redepo(target)
         etch_enabled = bool(supports_sputter and (force_model_enabled or self.chk_sputter.isChecked()))
         depth_enabled = bool(
             supports_depth_deposition and (force_model_enabled or self.chk_depth_deposition.isChecked())
         )
         return replace(
             cfg,
+            emulator_number=int(target),
             sputter_enabled=etch_enabled,
             sputter_strength_a_per_cycle=(
                 float(self.spin_sputter_strength.value()) if supports_sputter else 0.0
@@ -4415,8 +6052,29 @@ class TrenchDepoWindow(QMainWindow):
             redepo_efficiency_pct=(
                 float(self.spin_redepo_efficiency.value()) if supports_redeposition else 0.0
             ),
+            redepo_transport_model=TrenchDepoConfig().redepo_transport_model,
+            lf_overhang_enabled=bool(
+                etch_enabled
+                and supports_lf_overhang
+                and (force_model_enabled or self.chk_lf_overhang.isChecked())
+            ),
+            lf_overhang_dose=float(self.spin_lf_overhang_dose.value()),
+            lf_overhang_sputter_gain=float(self.spin_lf_overhang_sputter_gain.value()),
+            lf_overhang_redepo_fraction_pct=float(self.spin_lf_overhang_redepo_fraction.value()),
+            lf_overhang_survival_penalty=float(self.spin_lf_overhang_survival.value()),
+            lf_overhang_width_a=float(self.spin_lf_overhang_width.value()),
+            closure_redepo_enabled=bool(
+                etch_enabled
+                and supports_closure_redepo
+                and (force_model_enabled or self.chk_closure_redepo.isChecked())
+            ),
+            closure_redepo_efficiency_pct=float(self.spin_closure_redepo_efficiency.value()),
+            closure_redepo_shadow_gain=float(self.spin_closure_redepo_shadow_gain.value()),
+            closure_redepo_width_a=float(self.spin_closure_redepo_width.value()),
+            closure_redepo_survival_penalty=float(self.spin_closure_redepo_survival.value()),
+            closure_redepo_smoothing_a=float(self.spin_closure_redepo_smoothing.value()),
             deposition_depth_enabled=depth_enabled,
-            inhibition_enabled=bool(target == 6 and depth_enabled),
+            inhibition_enabled=bool(target in (0, 5) and depth_enabled),
         )
 
     def _set_run_dir_label(self, run_dir: Optional[Path]) -> None:
@@ -4432,6 +6090,7 @@ class TrenchDepoWindow(QMainWindow):
         return (
             tuple((float(x), float(y)) for x, y in config.points),
             int(config.cycles),
+            int(getattr(config, "emulator_number", 0) or 0),
             float(config.angstrom_per_cycle),
             float(config.reparam_ds_a),
             bool(config.sputter_enabled),
@@ -4467,6 +6126,22 @@ class TrenchDepoWindow(QMainWindow):
             int(config.redepo_neighbor_exclusion),
             float(config.redepo_max_distance_a),
             int(config.redepo_soft_los_radius_points),
+            str(config.redepo_transport_model),
+            int(config.redepo_ray_count),
+            float(config.redepo_footprint_sigma_a),
+            float(config.redepo_footprint_radius_sigma),
+            bool(config.lf_overhang_enabled),
+            float(config.lf_overhang_dose),
+            float(config.lf_overhang_sputter_gain),
+            float(config.lf_overhang_redepo_fraction_pct),
+            float(config.lf_overhang_survival_penalty),
+            float(config.lf_overhang_width_a),
+            bool(config.closure_redepo_enabled),
+            float(config.closure_redepo_efficiency_pct),
+            float(config.closure_redepo_shadow_gain),
+            float(config.closure_redepo_width_a),
+            float(config.closure_redepo_survival_penalty),
+            float(config.closure_redepo_smoothing_a),
             bool(config.deposition_depth_enabled),
             str(config.deposition_feature_type),
             float(config.deposition_feature_width_a),
@@ -4509,22 +6184,43 @@ class TrenchDepoWindow(QMainWindow):
         self.progress_run.setValue(0)
         self.progress_run.setFormat(label)
         self.progress_run.setVisible(True)
+        if hasattr(self, "lbl_progress_view_status"):
+            self.lbl_progress_view_status.setText(label)
+            self.progress_view_bar.setRange(0, 0)
+            self.progress_view_bar.setValue(0)
+            self.progress_view_bar.setFormat(label)
         QApplication.processEvents()
 
-    def _update_run_progress(self, step: int, total: int, *, label: str = "Running") -> None:
+    def _update_run_progress(self, step: int, total: int, *, label: str = "실행 중") -> None:
         total_i = max(0, int(total))
         step_i = max(0, int(step))
         if total_i <= 0:
             self.progress_run.setRange(0, 1)
             self.progress_run.setValue(1)
-            self.progress_run.setFormat(f"{label}: complete")
-            self.lbl_status.setText(f"{label}: complete")
+            self.progress_run.setFormat(f"{label}: 완료")
+            self.lbl_status.setText(f"{label}: 완료")
+            if hasattr(self, "lbl_progress_view_status"):
+                self.lbl_progress_view_status.setText(f"{label}: 완료")
+                self.progress_view_bar.setRange(0, 1)
+                self.progress_view_bar.setValue(1)
+                self.progress_view_bar.setFormat("완료")
         else:
             step_i = min(step_i, total_i)
-            self.progress_run.setRange(0, total_i)
-            self.progress_run.setValue(step_i)
+            if step_i <= 0:
+                self.progress_run.setRange(0, 0)
+            else:
+                self.progress_run.setRange(0, total_i)
+                self.progress_run.setValue(step_i)
             self.progress_run.setFormat(f"{label}: {step_i}/{total_i}")
             self.lbl_status.setText(f"{label}: {step_i}/{total_i}")
+            if hasattr(self, "lbl_progress_view_status"):
+                self.lbl_progress_view_status.setText(f"{label}: {step_i}/{total_i}")
+                if step_i <= 0:
+                    self.progress_view_bar.setRange(0, 0)
+                else:
+                    self.progress_view_bar.setRange(0, total_i)
+                    self.progress_view_bar.setValue(step_i)
+                self.progress_view_bar.setFormat(f"{step_i}/{total_i}")
         self.progress_run.setVisible(True)
         QApplication.processEvents()
 
@@ -4533,66 +6229,38 @@ class TrenchDepoWindow(QMainWindow):
             maximum = max(1, self.progress_run.maximum())
             self.progress_run.setRange(0, maximum)
             self.progress_run.setValue(maximum)
-            self.progress_run.setFormat("Done")
+            self.progress_run.setFormat("완료")
+            if hasattr(self, "lbl_progress_view_status"):
+                self.lbl_progress_view_status.setText("진행 완료")
+                self.progress_view_bar.setRange(0, maximum)
+                self.progress_view_bar.setValue(maximum)
+                self.progress_view_bar.setFormat("완료")
             QApplication.processEvents()
+        elif hasattr(self, "lbl_progress_view_status"):
+            self.lbl_progress_view_status.setText("진행 실패")
+            self.progress_view_bar.setRange(0, 1)
+            self.progress_view_bar.setValue(0)
+            self.progress_view_bar.setFormat("실패")
         self.progress_run.setVisible(False)
 
-    def run_emulation(
+    def _apply_emulation_result(
         self,
-        _checked: bool = False,
+        config: TrenchDepoConfig,
+        result: TrenchDepoResult,
+        run_dir: Optional[Path],
         *,
-        save_artifacts: bool = True,
-        use_preview_cache: bool = False,
+        use_preview_cache: bool,
     ) -> None:
-        self._emulator_run_timer.stop()
-        self.btn_run.setEnabled(False)
-        success = False
-        try:
-            config = self.current_config()
-            run_dir: Optional[Path] = None
-            cache_key = self._preview_cache_key(config)
-            if use_preview_cache and not save_artifacts and cache_key in self._preview_result_cache:
-                self._start_run_progress("Loading cached run")
-                result = self._preview_result_cache[cache_key]
-                self._update_run_progress(1, 1, label="Cached run")
-            else:
-                self._start_run_progress("Running simulation")
-                result = run_trench_depo(
-                    config,
-                    progress_cb=lambda step, total: self._update_run_progress(
-                        step,
-                        total,
-                        label="Run",
-                    ),
-                )
-                self._preview_result_cache[cache_key] = result
-            if save_artifacts:
-                self._start_run_progress("Saving run")
-                run_dir = export_trench_depo_run(
-                    config,
-                    result,
-                    request_note=self.edit_request_note.toPlainText(),
-                    runs_root=DEFAULT_RUNS_ROOT,
-                )
-                self._update_run_progress(1, 1, label="Saved")
-            success = True
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(
-                self,
-                "Trench Depo Emulation",
-                f"Failed to run trench deposition emulation:\n{exc}",
-            )
-            return
-        finally:
-            self.btn_run.setEnabled(True)
-            self._finish_run_progress(success=success)
-
         self._result = result
+        self._result_config = config
         self._last_run_dir = run_dir.resolve() if run_dir is not None else None
         solid_playback = _use_solid_playback(result)
         self.view.set_frames(
             result.frame_profiles,
             voids=result.frame_voids,
+            redepo_overlays=result.meta.get("frame_redepo_overlays"),
+            etch_overlays=result.meta.get("frame_etch_overlays"),
+            transport_lines=result.meta.get("frame_transport_lines"),
             void_mode="current",
             dynamic_substrate_fill=solid_playback,
             history_mode="mixed_etch" if solid_playback else "film",
@@ -4603,6 +6271,8 @@ class TrenchDepoWindow(QMainWindow):
         self.slider_frame.setValue(max_idx)
         self.slider_frame.setEnabled(max_idx > 0)
         self.slider_frame.blockSignals(False)
+        self._set_result_playback_available(max_idx > 0)
+        self._update_result_parameter_summary(config, result)
         self.show_frame(max_idx)
         if not use_preview_cache:
             self._set_workflow_step("results")
@@ -4614,12 +6284,146 @@ class TrenchDepoWindow(QMainWindow):
         else:
             self.btn_open_run_dir.setEnabled(self._last_run_dir is not None)
 
+    def _on_emulation_worker_progress(self, step: int, total: int, label: str) -> None:
+        self._update_run_progress(int(step), int(total), label=str(label or "실행"))
+
+    def _on_emulation_worker_finished(
+        self,
+        config: TrenchDepoConfig,
+        result: TrenchDepoResult,
+        use_preview_cache: bool,
+        cache_key: tuple[object, ...],
+        save_artifacts: bool,
+        request_note: str,
+    ) -> None:
+        run_dir: Optional[Path] = None
+        if bool(save_artifacts):
+            try:
+                self._start_run_progress("run 저장 중")
+                run_dir = export_trench_depo_run(
+                    config,
+                    result,
+                    request_note=str(request_note),
+                    runs_root=DEFAULT_RUNS_ROOT,
+                )
+                self._update_run_progress(1, 1, label="저장")
+            except Exception as exc:  # noqa: BLE001
+                self.btn_run.setEnabled(True)
+                self._finish_run_progress(success=False)
+                QMessageBox.critical(
+                    self,
+                    "트렌치 Depo 에뮬레이션",
+                    f"Run 저장 실패:\n{exc}",
+                )
+                return
+        self._preview_result_cache[cache_key] = result
+        self.btn_run.setEnabled(True)
+        self._finish_run_progress(success=True)
+        self._apply_emulation_result(
+            config,
+            result,
+            run_dir,
+            use_preview_cache=bool(use_preview_cache),
+        )
+
+    def _on_emulation_worker_failed(self, message: str) -> None:
+        self.btn_run.setEnabled(True)
+        self._finish_run_progress(success=False)
+        QMessageBox.critical(
+            self,
+            "트렌치 Depo 에뮬레이션",
+            f"트렌치 증착 에뮬레이션 실행 실패:\n{message}",
+        )
+
+    def _on_emulation_thread_finished(self) -> None:
+        self._emulation_thread = None
+        self._emulation_worker = None
+
+    def run_emulation(
+        self,
+        _checked: bool = False,
+        *,
+        save_artifacts: bool = True,
+        use_preview_cache: bool = False,
+    ) -> None:
+        if self._emulation_thread is not None:
+            self.statusBar().showMessage("이미 시뮬레이션 실행 중입니다.", 2000)
+            return
+        self._emulator_run_timer.stop()
+        self._stop_result_playback()
+        self.btn_run.setEnabled(False)
+        success = False
+        try:
+            config = self.current_config()
+            run_dir: Optional[Path] = None
+            cache_key = self._preview_cache_key(config)
+            if use_preview_cache and not save_artifacts and cache_key in self._preview_result_cache:
+                self._start_run_progress("캐시 run 불러오는 중")
+                result = self._preview_result_cache[cache_key]
+                self._update_run_progress(1, 1, label="캐시 run")
+                success = True
+            elif save_artifacts:
+                self._start_run_progress("시뮬레이션 실행 중")
+                worker = _EmulationRunWorker(
+                    config=config,
+                    cache_key=cache_key,
+                    request_note=self.edit_request_note.toPlainText(),
+                    save_artifacts=save_artifacts,
+                    use_preview_cache=use_preview_cache,
+                )
+                thread = QThread(self)
+                worker.moveToThread(thread)
+                self._emulation_thread = thread
+                self._emulation_worker = worker
+                thread.started.connect(worker.run)
+                worker.progress.connect(self._on_emulation_worker_progress)
+                worker.finished.connect(self._on_emulation_worker_finished)
+                worker.failed.connect(self._on_emulation_worker_failed)
+                worker.finished.connect(worker.deleteLater)
+                worker.failed.connect(worker.deleteLater)
+                worker.finished.connect(thread.quit)
+                worker.failed.connect(thread.quit)
+                thread.finished.connect(self._on_emulation_thread_finished)
+                thread.finished.connect(thread.deleteLater)
+                thread.start()
+                return
+            else:
+                self._start_run_progress("시뮬레이션 실행 중")
+                result = run_trench_depo(
+                    config,
+                    progress_cb=lambda step, total: self._update_run_progress(
+                        step,
+                        total,
+                        label="실행",
+                    ),
+                )
+                self._preview_result_cache[cache_key] = result
+                success = True
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(
+                self,
+                "트렌치 Depo 에뮬레이션",
+                f"트렌치 증착 에뮬레이션 실행 실패:\n{exc}",
+            )
+            return
+        finally:
+            if self._emulation_thread is None:
+                self.btn_run.setEnabled(True)
+                self._finish_run_progress(success=success)
+
+        self._apply_emulation_result(
+            config,
+            result,
+            run_dir,
+            use_preview_cache=use_preview_cache,
+        )
+
     def run_split_test(self, _checked: bool = False) -> None:
         self.btn_run_split.setEnabled(False)
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         self.statusBar().showMessage("Split test 계산 중...")
         success = False
-        self._start_run_progress("Running split")
+        self._start_run_progress("Split 실행 중")
         try:
             parameter = str(self.cmb_split_parameter.currentData())
             cases = run_trench_depo_sweep(
@@ -4641,13 +6445,13 @@ class TrenchDepoWindow(QMainWindow):
                 request_note=self.edit_request_note.toPlainText(),
                 runs_root=DEFAULT_RUNS_ROOT,
             )
-            self._update_run_progress(1, 1, label="Saved")
+            self._update_run_progress(1, 1, label="저장")
             success = True
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(
                 self,
                 "Trench Depo Split Test",
-                f"Failed to run or save split test:\n{exc}",
+                f"Split test 실행 또는 저장 실패:\n{exc}",
             )
             return
         finally:
@@ -4693,7 +6497,7 @@ class TrenchDepoWindow(QMainWindow):
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         self.statusBar().showMessage(f"Emulator {active_number:02d}/{target:02d} 비교 계산 중...")
         success = False
-        self._start_run_progress(f"Running emulator {active_number:02d}")
+        self._start_run_progress(f"Emulator {active_number:02d} 실행 중")
         try:
             current_cfg = self._config_for_emulator_number(active_number, force_model_enabled=True)
             target_cfg = self._config_for_emulator_number(target, force_model_enabled=True)
@@ -4708,7 +6512,7 @@ class TrenchDepoWindow(QMainWindow):
             )
             current_elapsed = time.perf_counter() - t0
             t1 = time.perf_counter()
-            self._start_run_progress(f"Running emulator {target:02d}")
+            self._start_run_progress(f"Emulator {target:02d} 실행 중")
             target_result = run_trench_depo(
                 target_cfg,
                 progress_cb=lambda step, total: self._update_run_progress(
@@ -4739,7 +6543,7 @@ class TrenchDepoWindow(QMainWindow):
             QMessageBox.critical(
                 self,
                 "Emulator Compare",
-                f"Failed to compare Emulator {active_number:02d} and {target:02d}:\n{exc}",
+                f"Emulator {active_number:02d}/{target:02d} 비교 실패:\n{exc}",
             )
             return
         finally:
@@ -4767,7 +6571,7 @@ class TrenchDepoWindow(QMainWindow):
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         self.statusBar().showMessage("GapSim angle-only 비교 계산 중...")
         success = False
-        self._start_run_progress("Running current model")
+        self._start_run_progress("현재 모델 실행 중")
         try:
             config = self._config_for_emulator_number(self.active_emulator_number(), force_model_enabled=True)
             t0 = time.perf_counter()
@@ -4782,7 +6586,7 @@ class TrenchDepoWindow(QMainWindow):
             mini_elapsed = time.perf_counter() - t0
             t1 = time.perf_counter()
             baseline_config = config
-            self._start_run_progress("Running GapSim legacy")
+            self._start_run_progress("GapSim legacy 실행 중")
             comparison_result = run_trench_depo_legacy_sputter(
                 config,
                 progress_cb=lambda step, total: self._update_run_progress(
@@ -4814,7 +6618,7 @@ class TrenchDepoWindow(QMainWindow):
             QMessageBox.critical(
                 self,
                 "GapSim Angle Compare",
-                f"Failed to run GapSim angle-only comparison:\n{exc}",
+                f"GapSim angle-only 비교 실패:\n{exc}",
             )
             return
         finally:
@@ -4829,6 +6633,79 @@ class TrenchDepoWindow(QMainWindow):
         window.raise_()
         window.activateWindow()
         self.statusBar().showMessage("GapSim angle-only 비교 완료", 5000)
+
+    def run_gapsim_redepo_compare(self, _checked: bool = False) -> None:
+        if not self._active_emulator_supports_redeposition():
+            QMessageBox.information(
+                self,
+                "Model Compare",
+                "GapSim redeposition comparison is available in Emulator 04.",
+            )
+            return
+        self.btn_run_compare.setEnabled(False)
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        self.statusBar().showMessage("GapSim redepo 비교 계산 중...")
+        success = False
+        self._start_run_progress("Mini Model4 실행 중")
+        try:
+            config = self._config_for_emulator_number(self.active_emulator_number(), force_model_enabled=True)
+            t0 = time.perf_counter()
+            mini_result = run_trench_depo(
+                config,
+                progress_cb=lambda step, total: self._update_run_progress(
+                    step,
+                    total,
+                    label="Mini Model4",
+                ),
+            )
+            mini_elapsed = time.perf_counter() - t0
+            t1 = time.perf_counter()
+            self._start_run_progress("GapSim redepo 실행 중")
+            comparison_result = run_trench_depo_legacy_redeposition(
+                config,
+                progress_cb=lambda step, total: self._update_run_progress(
+                    step,
+                    total,
+                    label="GapSim redepo",
+                ),
+            )
+            comparison_elapsed = time.perf_counter() - t1
+            cases = [
+                TrenchSweepResult(
+                    parameter="model_compare",
+                    label=f"Mini Emulator 04 redepo ({mini_elapsed:.2f}s)",
+                    value=0.0,
+                    config=config,
+                    result=mini_result,
+                ),
+                TrenchSweepResult(
+                    parameter="model_compare",
+                    label=f"GapSim original redepo ({comparison_elapsed:.2f}s)",
+                    value=1.0,
+                    config=config,
+                    result=comparison_result,
+                ),
+            ]
+            success = True
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(
+                self,
+                "GapSim Redepo Compare",
+                f"GapSim redeposition 비교 실패:\n{exc}",
+            )
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+            self.btn_run_compare.setEnabled(True)
+            self._finish_run_progress(success=success)
+
+        window = SplitTestWindow(cases)
+        window.destroyed.connect(lambda _obj=None, w=window: self._forget_split_window(w))
+        self._split_windows.append(window)
+        window.show()
+        window.raise_()
+        window.activateWindow()
+        self.statusBar().showMessage("GapSim redepo 비교 완료", 5000)
 
     def _forget_split_window(self, window: SplitTestWindow) -> None:
         if window in self._split_windows:
@@ -4851,6 +6728,41 @@ class TrenchDepoWindow(QMainWindow):
             return
         self._show_split_group_window(cases, status=f"Split 묶음 로드 완료: {len(cases)} cases")
 
+    def _set_result_playback_available(self, available: bool) -> None:
+        if not hasattr(self, "btn_result_play"):
+            return
+        enabled = bool(available)
+        self.btn_result_play.setEnabled(enabled)
+        if not enabled:
+            self._stop_result_playback()
+
+    def _stop_result_playback(self) -> None:
+        if hasattr(self, "_result_playback_timer") and self._result_playback_timer.isActive():
+            self._result_playback_timer.stop()
+        if hasattr(self, "btn_result_play"):
+            self.btn_result_play.setText("반복재생")
+
+    def toggle_result_playback(self, _checked: bool = False) -> None:
+        if self._result is None or self.slider_frame.maximum() <= 0:
+            self._set_result_playback_available(False)
+            return
+        if self._result_playback_timer.isActive():
+            self._stop_result_playback()
+            return
+        if self.slider_frame.value() >= self.slider_frame.maximum():
+            self.slider_frame.setValue(0)
+        self._result_playback_timer.start()
+        self.btn_result_play.setText("정지")
+
+    def _advance_result_playback(self) -> None:
+        if self._result is None or self.slider_frame.maximum() <= 0:
+            self._set_result_playback_available(False)
+            return
+        next_index = int(self.slider_frame.value()) + 1
+        if next_index > self.slider_frame.maximum():
+            next_index = 0
+        self.slider_frame.setValue(next_index)
+
     def show_frame(self, index: int) -> None:
         if self._result is None or not self._result.frame_profiles:
             self._show_result_input_preview(fit=False)
@@ -4861,34 +6773,45 @@ class TrenchDepoWindow(QMainWindow):
         cycle = self._result.frame_steps[idx] if idx < len(self._result.frame_steps) else idx
         total = self._result.meta.get("cycles", len(self._result.frame_profiles) - 1)
         points = len(self._result.frame_profiles[idx])
-        self.lbl_status.setText(f"Cycle {cycle}/{total} | Points {points}")
+        self.lbl_status.setText(f"Cycle {cycle}/{total} | 점 {points}")
+        if hasattr(self, "lbl_result_summary"):
+            self.lbl_result_summary.setText(f"결과: Cycle {cycle}/{total} | 점 {points}")
 
     def load_replay_json(self, path: Path | str) -> None:
+        self._stop_result_playback()
         replay_path = Path(path).resolve()
         config, result, note = load_trench_depo_run(replay_path)
-        replay_emulator = (
-            6
-            if bool(config.inhibition_enabled)
-            else 5
-            if bool(config.deposition_depth_enabled)
-            else (
-                4
-                if bool(config.redepo_enabled)
-                else (
-                    3
-                    if bool(config.reflected_ion_enabled)
-                    else (2 if bool(config.ion_transmission_enabled) else (1 if bool(config.sputter_enabled) else 0))
-                )
-            )
-        )
+        if bool(config.sputter_enabled) and bool(config.ion_transmission_enabled) and (
+            bool(config.deposition_depth_enabled) or bool(config.inhibition_enabled)
+        ):
+            replay_emulator = 0
+        elif bool(config.inhibition_enabled):
+            replay_emulator = 5
+        elif bool(config.deposition_depth_enabled):
+            replay_emulator = 4
+        elif bool(config.sputter_enabled) and bool(config.ion_transmission_enabled):
+            replay_emulator = 3
+        elif bool(config.sputter_enabled) and bool(config.redepo_enabled):
+            replay_emulator = 6
+        elif bool(config.sputter_enabled):
+            replay_emulator = 2
+        else:
+            replay_emulator = 1
         self.set_active_emulator_number(replay_emulator, run=False)
-        self._set_structure_points(config.points)
+        self._set_structure_points(config.points, preserve_on_emulator_switch=True)
         self.spin_cycles.setValue(int(config.cycles))
         self.spin_angstrom_per_cycle.setValue(float(config.angstrom_per_cycle))
-        self.chk_sputter.setChecked(bool(config.sputter_enabled))
-        self.chk_ion_transmission.setChecked(bool(config.ion_transmission_enabled))
-        self.chk_reflected_ion.setChecked(bool(config.reflected_ion_enabled))
-        self.chk_redepo.setChecked(bool(config.redepo_enabled))
+        self._set_quality_mode_for_ds(float(config.reparam_ds_a))
+        self.chk_sputter.setChecked(
+            bool(self._active_emulator_supports_sputter() and config.sputter_enabled)
+        )
+        self.chk_ion_transmission.setChecked(
+            bool(self._active_emulator_supports_ion_transmission() and config.ion_transmission_enabled)
+        )
+        self.chk_reflected_ion.setChecked(False)
+        self.chk_redepo.setChecked(False)
+        self.chk_lf_overhang.setChecked(False)
+        self.chk_closure_redepo.setChecked(False)
         self.spin_ion_start_depth.setValue(float(config.ion_transmission_start_depth_pct))
         self.spin_ion_end_depth.setValue(float(config.ion_transmission_end_depth_pct))
         self.spin_ion_decay_strength.setValue(float(config.ion_transmission_decay_strength_pct))
@@ -4908,7 +6831,19 @@ class TrenchDepoWindow(QMainWindow):
         self.spin_redepo_emit_power.setValue(float(config.redepo_emit_power))
         self.spin_redepo_distance_power.setValue(float(config.redepo_distance_power))
         self.spin_redepo_soft_los.setValue(int(config.redepo_soft_los_radius_points))
-        self.chk_depth_deposition.setChecked(bool(config.deposition_depth_enabled))
+        self.spin_lf_overhang_dose.setValue(float(config.lf_overhang_dose))
+        self.spin_lf_overhang_sputter_gain.setValue(float(config.lf_overhang_sputter_gain))
+        self.spin_lf_overhang_redepo_fraction.setValue(float(config.lf_overhang_redepo_fraction_pct))
+        self.spin_lf_overhang_survival.setValue(float(config.lf_overhang_survival_penalty))
+        self.spin_lf_overhang_width.setValue(float(config.lf_overhang_width_a))
+        self.spin_closure_redepo_efficiency.setValue(float(config.closure_redepo_efficiency_pct))
+        self.spin_closure_redepo_shadow_gain.setValue(float(config.closure_redepo_shadow_gain))
+        self.spin_closure_redepo_width.setValue(float(config.closure_redepo_width_a))
+        self.spin_closure_redepo_survival.setValue(float(config.closure_redepo_survival_penalty))
+        self.spin_closure_redepo_smoothing.setValue(float(config.closure_redepo_smoothing_a))
+        self.chk_depth_deposition.setChecked(
+            bool(self._active_emulator_supports_depth_deposition() and config.deposition_depth_enabled)
+        )
         feature_index = self.cmb_depth_feature_type.findData(str(config.deposition_feature_type))
         self.cmb_depth_feature_type.setCurrentIndex(feature_index if feature_index >= 0 else 0)
         self.spin_depth_feature_width.setValue(float(config.deposition_feature_width_a))
@@ -4932,11 +6867,15 @@ class TrenchDepoWindow(QMainWindow):
         self.sync_etch_control_availability()
         self.edit_request_note.setPlainText(note)
         self._result = result
+        self._result_config = config
         self._last_run_dir = replay_path.parent
         solid_playback = _use_solid_playback(result)
         self.view.set_frames(
             result.frame_profiles,
             voids=result.frame_voids,
+            redepo_overlays=result.meta.get("frame_redepo_overlays"),
+            etch_overlays=result.meta.get("frame_etch_overlays"),
+            transport_lines=result.meta.get("frame_transport_lines"),
             void_mode="current",
             dynamic_substrate_fill=solid_playback,
             history_mode="mixed_etch" if solid_playback else "film",
@@ -4947,18 +6886,20 @@ class TrenchDepoWindow(QMainWindow):
         self.slider_frame.setValue(max_idx)
         self.slider_frame.setEnabled(max_idx > 0)
         self.slider_frame.blockSignals(False)
+        self._set_result_playback_available(max_idx > 0)
+        self._update_result_parameter_summary(config, result)
         self.show_frame(max_idx)
         self._set_workflow_step("results")
         QTimer.singleShot(0, self.view.fit_content)
         self._set_run_dir_label(self._last_run_dir)
         self.btn_open_run_dir.setEnabled(True)
-        self.statusBar().showMessage(f"JSON 런 로드 완료: {replay_path}", 5000)
+        self.statusBar().showMessage(f"Run 불러오기 완료: {replay_path}", 5000)
         self._open_split_group_for_replay(replay_path)
 
     def open_replay_json_dialog(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self,
-            "Open Trench Replay JSON",
+            "저장된 Run 불러오기",
             str(self._last_run_dir or DEFAULT_RUNS_ROOT),
             "JSON (*.json);;All Files (*)",
         )
@@ -4967,14 +6908,14 @@ class TrenchDepoWindow(QMainWindow):
         try:
             self.load_replay_json(path)
         except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(self, "Trench Depo Emulation", f"Failed to open replay JSON:\n{exc}")
+            QMessageBox.critical(self, "트렌치 Depo 에뮬레이션", f"Run 불러오기 실패:\n{exc}")
 
     def open_last_run_dir(self) -> None:
         if self._last_run_dir is None:
             return
         run_dir = self._last_run_dir.resolve()
         if not run_dir.exists():
-            QMessageBox.warning(self, "Trench Depo Emulation", f"Run folder not found:\n{run_dir}")
+            QMessageBox.warning(self, "트렌치 Depo 에뮬레이션", f"Run 폴더를 찾을 수 없습니다:\n{run_dir}")
             self.btn_open_run_dir.setEnabled(False)
             return
 
@@ -4987,7 +6928,16 @@ class TrenchDepoWindow(QMainWindow):
 
         ok = QDesktopServices.openUrl(QUrl.fromLocalFile(str(run_dir)))
         if not ok:
-            QMessageBox.warning(self, "Trench Depo Emulation", f"Failed to open run folder:\n{run_dir}")
+            QMessageBox.warning(self, "트렌치 Depo 에뮬레이션", f"Run 폴더 열기 실패:\n{run_dir}")
+
+    def closeEvent(self, event) -> None:  # noqa: N802, ANN001
+        if self._emulation_thread is not None and self._emulation_thread.isRunning():
+            self.statusBar().showMessage("시뮬레이션 실행 중에는 창을 닫을 수 없습니다.", 2500)
+            event.ignore()
+            return
+        self._emulator_run_timer.stop()
+        self._stop_result_playback()
+        super().closeEvent(event)
 
 
 def main() -> int:
@@ -5013,7 +6963,7 @@ def main() -> int:
         try:
             window.load_replay_json(replay_arg)
         except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(window, "Trench Depo Emulation", f"Failed to open replay JSON:\n{exc}")
+            QMessageBox.critical(window, "트렌치 Depo 에뮬레이션", f"Run 불러오기 실패:\n{exc}")
     window.show()
     return app.exec()
 

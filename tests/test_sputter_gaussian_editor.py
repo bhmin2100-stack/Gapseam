@@ -13,10 +13,11 @@ os.environ.setdefault(
     str(Path(_STRUCTURE_LIBRARY_TMP.name) / "structures.xlsx"),
 )
 
-from PySide6.QtCore import QPointF, QRectF
+from PySide6.QtCore import QEvent, QPointF, QRectF
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QApplication
 
+from gapsim.emulation.research_registry import DEFAULT_CREATED_EMULATOR_NUMBERS
 from gapsim.emulation.trench_depo import (
     BOWED_JAR_TRENCH_POINTS,
     ION_TRANSMISSION_STEPPED_TRENCH_POINTS,
@@ -28,10 +29,14 @@ from gapsim.emulation.trench_depo_ui import (
     DepthDepositionProfileEditor,
     IonTransmissionEditor,
     RedepositionLobeEditor,
+    SplitTestWindow,
     SputterGaussianEditor,
     TrenchDepoWindow,
     _map_structure_points_to_rect,
 )
+
+
+EXPECTED_EMULATOR_NUMBERS = list(DEFAULT_CREATED_EMULATOR_NUMBERS)
 
 
 class SputterGaussianEditorTest(unittest.TestCase):
@@ -209,7 +214,7 @@ class SputterGaussianEditorTest(unittest.TestCase):
             window = TrenchDepoWindow()
 
         try:
-            window.set_active_emulator_number(1, run=False)
+            window.set_active_emulator_number(2, run=False)
             window.spin_sputter_peak.setValue(62.0)
             self.assertAlmostEqual(window.sputter_curve_editor.parameters()[1], 62.0, places=6)
 
@@ -227,7 +232,7 @@ class SputterGaussianEditorTest(unittest.TestCase):
         finally:
             window.close()
 
-    def test_emulator_two_shows_ion_transmission_map_controls(self) -> None:
+    def test_emulator_switch_preserves_shared_numeric_parameters(self) -> None:
         result = TrenchDepoResult(
             frame_steps=[0],
             frame_profiles=[[(0.0, 0.0), (1.0, 0.0)]],
@@ -243,12 +248,188 @@ class SputterGaussianEditorTest(unittest.TestCase):
 
         try:
             window.set_active_emulator_number(2, run=False)
+            window.spin_cycles.setValue(37)
+            window.spin_angstrom_per_cycle.setValue(12.25)
+            window.spin_sputter_strength.setValue(8.75)
+            window.spin_sputter_peak_pct.setValue(72.0)
+            window.spin_sputter_peak.setValue(61.0)
+            window.spin_sputter_width.setValue(19.0)
+            window.spin_sputter_smoothing.setValue(52.5)
+
+            window.set_active_emulator_number(3, run=False)
+
+            self.assertEqual(window.spin_cycles.value(), 37)
+            self.assertAlmostEqual(window.spin_angstrom_per_cycle.value(), 12.25, places=6)
+            self.assertAlmostEqual(window.spin_sputter_strength.value(), 8.75, places=6)
+            self.assertAlmostEqual(window.spin_sputter_peak_pct.value(), 72.0, places=6)
+            self.assertAlmostEqual(window.spin_sputter_peak.value(), 61.0, places=6)
+            self.assertAlmostEqual(window.spin_sputter_width.value(), 19.0, places=6)
+            self.assertAlmostEqual(window.spin_sputter_smoothing.value(), 52.5, places=6)
+
+            window.spin_ion_start_depth.setValue(31.5)
+            window.spin_ion_curve_power.setValue(1.75)
+            window.spin_redepo_efficiency.setValue(43.0)
+            window.spin_depth_decay_k.setValue(0.72)
+            window.spin_depth_min_ratio_pct.setValue(11.0)
+
+            window.set_active_emulator_number(0, run=False)
+
+            self.assertEqual(window.spin_cycles.value(), 37)
+            self.assertAlmostEqual(window.spin_angstrom_per_cycle.value(), 12.25, places=6)
+            self.assertAlmostEqual(window.spin_sputter_strength.value(), 8.75, places=6)
+            self.assertAlmostEqual(window.spin_ion_start_depth.value(), 31.5, places=6)
+            self.assertAlmostEqual(window.spin_ion_curve_power.value(), 1.75, places=6)
+            self.assertAlmostEqual(window.spin_redepo_efficiency.value(), 43.0, places=6)
+            self.assertAlmostEqual(window.spin_depth_decay_k.value(), 0.72, places=6)
+            self.assertAlmostEqual(window.spin_depth_min_ratio_pct.value(), 11.0, places=6)
+            self.assertTrue(window.chk_sputter.isChecked())
+            self.assertTrue(window.chk_ion_transmission.isChecked())
+            self.assertFalse(window.chk_redepo.isChecked())
+            self.assertTrue(window.chk_depth_deposition.isChecked())
+            self.assertFalse(window.chk_reflected_ion.isChecked())
+        finally:
+            window.close()
+
+    def test_quality_mode_controls_reparam_ds(self) -> None:
+        result = TrenchDepoResult(
+            frame_steps=[0],
+            frame_profiles=[[(0.0, 0.0), (1.0, 0.0)]],
+            frame_voids=[[]],
+            final_profile=[(0.0, 0.0), (1.0, 0.0)],
+            meta={"cycles": 0},
+        )
+        with (
+            mock.patch("gapsim.emulation.trench_depo_ui.run_trench_depo", return_value=result),
+            mock.patch("gapsim.emulation.trench_depo_ui.QTimer.singleShot"),
+        ):
+            window = TrenchDepoWindow()
+
+        try:
+            self.assertIn("보통", window.cmb_quality_mode.currentText())
+            self.assertAlmostEqual(window.current_config().reparam_ds_a, 10.0, places=6)
+
+            fast_idx = window.cmb_quality_mode.findText("빠름 (20 A)")
+            window.cmb_quality_mode.setCurrentIndex(fast_idx)
+            self.assertAlmostEqual(window.spin_reparam_ds.value(), 20.0, places=6)
+            self.assertAlmostEqual(window.current_config().reparam_ds_a, 20.0, places=6)
+
+            window.spin_reparam_ds.setValue(7.5)
+            self.assertEqual(window.cmb_quality_mode.currentText(), "사용자")
+            self.assertAlmostEqual(window.current_config().reparam_ds_a, 7.5, places=6)
+
+            window._apply_parameter_config_values({"reparam_ds_a": 5.0})
+            self.assertIn("정밀", window.cmb_quality_mode.currentText())
+            self.assertAlmostEqual(window.current_config().reparam_ds_a, 5.0, places=6)
+        finally:
+            window.close()
+
+    def test_value_control_wheel_is_ignored_until_control_has_focus(self) -> None:
+        class FakeWheelEvent:
+            def __init__(self) -> None:
+                self.ignored = False
+
+            def type(self):
+                return QEvent.Type.Wheel
+
+            def ignore(self) -> None:
+                self.ignored = True
+
+        result = TrenchDepoResult(
+            frame_steps=[0],
+            frame_profiles=[[(0.0, 0.0), (1.0, 0.0)]],
+            frame_voids=[[]],
+            final_profile=[(0.0, 0.0), (1.0, 0.0)],
+            meta={"cycles": 0},
+        )
+        with (
+            mock.patch("gapsim.emulation.trench_depo_ui.run_trench_depo", return_value=result),
+            mock.patch("gapsim.emulation.trench_depo_ui.QTimer.singleShot"),
+        ):
+            window = TrenchDepoWindow()
+
+        try:
+            window.clearFocus()
+            QApplication.processEvents()
+            wheel_event = FakeWheelEvent()
+
+            filtered = window.eventFilter(window.spin_angstrom_per_cycle, wheel_event)
+
+            self.assertTrue(filtered)
+            self.assertTrue(wheel_event.ignored)
+
+            slider_wheel_event = FakeWheelEvent()
+            filtered = window.eventFilter(window.slider_ion_aperture_shadow, slider_wheel_event)
+
+            self.assertTrue(filtered)
+            self.assertTrue(slider_wheel_event.ignored)
+        finally:
+            window.close()
+
+    def test_split_window_slider_wheel_is_ignored_until_slider_has_focus(self) -> None:
+        class FakeWheelEvent:
+            def __init__(self) -> None:
+                self.ignored = False
+
+            def type(self):
+                return QEvent.Type.Wheel
+
+            def ignore(self) -> None:
+                self.ignored = True
+
+        result = TrenchDepoResult(
+            frame_steps=[0, 1],
+            frame_profiles=[
+                [(0.0, 0.0), (1.0, 0.0)],
+                [(0.0, -1.0), (1.0, -1.0)],
+            ],
+            frame_voids=[[], []],
+            final_profile=[(0.0, -1.0), (1.0, -1.0)],
+            meta={"cycles": 1},
+        )
+        case = TrenchSweepResult(
+            parameter="split",
+            label="Case",
+            value=0.0,
+            config=TrenchDepoConfig(cycles=1),
+            result=result,
+        )
+        with mock.patch("gapsim.emulation.trench_depo_ui.QTimer.singleShot"):
+            window = SplitTestWindow([case])
+
+        try:
+            window.clearFocus()
+            QApplication.processEvents()
+            slider_wheel_event = FakeWheelEvent()
+
+            filtered = window.eventFilter(window.slider_frame, slider_wheel_event)
+
+            self.assertTrue(filtered)
+            self.assertTrue(slider_wheel_event.ignored)
+        finally:
+            window.close()
+
+    def test_emulator_three_shows_ion_transmission_map_controls(self) -> None:
+        result = TrenchDepoResult(
+            frame_steps=[0],
+            frame_profiles=[[(0.0, 0.0), (1.0, 0.0)]],
+            frame_voids=[[]],
+            final_profile=[(0.0, 0.0), (1.0, 0.0)],
+            meta={"cycles": 0},
+        )
+        with (
+            mock.patch("gapsim.emulation.trench_depo_ui.run_trench_depo", return_value=result),
+            mock.patch("gapsim.emulation.trench_depo_ui.QTimer.singleShot"),
+        ):
+            window = TrenchDepoWindow()
+
+        try:
+            window.set_active_emulator_number(3, run=False)
 
             self.assertTrue(window._active_emulator_supports_sputter())
             self.assertTrue(window._active_emulator_supports_ion_transmission())
             self.assertFalse(window._active_emulator_supports_reflected_ion())
             self.assertEqual(window.chk_sputter.text(), "Etch enabled")
-            self.assertEqual(window.lbl_etch_section.text(), "Etch switch (1번 direct + 2번 modifier)")
+            self.assertEqual(window.lbl_etch_section.text(), "Etch switch (3 ion transmission depth)")
             self.assertFalse(window.ion_map_group.isHidden())
             self.assertTrue(all(not widget.isHidden() for widget in window._ion_transmission_widgets))
             self.assertEqual(tuple(window.ion_transmission_editor._points), tuple(window._current_geometry_points()))
@@ -300,6 +481,7 @@ class SputterGaussianEditorTest(unittest.TestCase):
         finally:
             window.close()
 
+    @unittest.skip("Reflected ion emulator was removed from the rebuilt 0-5 active menu.")
     def test_emulator_three_inherits_sputter_controls_and_adds_reflected_controls(self) -> None:
         result = TrenchDepoResult(
             frame_steps=[0],
@@ -350,7 +532,8 @@ class SputterGaussianEditorTest(unittest.TestCase):
         finally:
             window.close()
 
-    def test_emulator_four_is_redeposition_prep_and_compares_to_emulator_one(self) -> None:
+    @unittest.skip("Emulator 04 is now depth depletion, not GapSim redeposition.")
+    def test_emulator_four_is_gapsim_redeposition_and_compares_to_model_one(self) -> None:
         result = TrenchDepoResult(
             frame_steps=[0],
             frame_profiles=[[(0.0, 0.0), (1.0, 0.0)]],
@@ -372,8 +555,11 @@ class SputterGaussianEditorTest(unittest.TestCase):
             self.assertFalse(window._active_emulator_supports_ion_transmission())
             self.assertFalse(window._active_emulator_supports_reflected_ion())
             self.assertFalse(window.gaussian_group.isHidden())
+            self.assertEqual(window.current_config().emulator_number, 4)
+            self.assertEqual(window.current_config().redepo_transport_model, "gapsim_original_per_vertex_los")
             self.assertEqual(window.cmb_compare_target.currentData(), 1)
             self.assertIn("Emulator 01", window.cmb_compare_target.currentText())
+            self.assertGreaterEqual(window.cmb_compare_target.findData(1), 0)
             self.assertEqual(window.lbl_etch_section.text(), "Etch switch (2번 source + 4번 redepo)")
             self.assertEqual(window.lbl_sputter_section.text(), "기존 1번 Direct sputter kernel")
             self.assertTrue(all(not widget.isHidden() for widget in window._sputter_widgets))
@@ -413,6 +599,7 @@ class SputterGaussianEditorTest(unittest.TestCase):
         finally:
             window.close()
 
+    @unittest.skip("Redeposition/reflected compare path was removed from the active menu.")
     def test_compare_options_run_selected_emulator_target(self) -> None:
         result = TrenchDepoResult(
             frame_steps=[0],
@@ -440,6 +627,51 @@ class SputterGaussianEditorTest(unittest.TestCase):
                 self.assertTrue(current_cfg.redepo_enabled)
                 self.assertFalse(current_cfg.reflected_ion_enabled)
                 self.assertTrue(target_cfg.reflected_ion_enabled)
+                self.assertFalse(target_cfg.redepo_enabled)
+                self.assertEqual(len(window._split_windows), 1)
+            finally:
+                for split_window in list(window._split_windows):
+                    split_window.close()
+                window.close()
+
+    @unittest.skip("GapSim redeposition compare target was removed from the active menu.")
+    def test_compare_options_run_gapsim_redepo_target(self) -> None:
+        result = TrenchDepoResult(
+            frame_steps=[0],
+            frame_profiles=[[(0.0, 0.0), (1.0, 0.0)]],
+            frame_voids=[[]],
+            final_profile=[(0.0, 0.0), (1.0, 0.0)],
+            meta={"cycles": 0},
+        )
+        legacy_result = TrenchDepoResult(
+            frame_steps=[0],
+            frame_profiles=[[(0.0, 0.0), (2.0, 0.0)]],
+            frame_voids=[[]],
+            final_profile=[(0.0, 0.0), (2.0, 0.0)],
+            meta={"cycles": 0, "redepo_model": "gapsim_original_per_vertex_los"},
+        )
+        with (
+            mock.patch("gapsim.emulation.trench_depo_ui.run_trench_depo", return_value=result) as run_mock,
+            mock.patch(
+                "gapsim.emulation.trench_depo_ui.run_trench_depo_legacy_redeposition",
+                return_value=legacy_result,
+            ) as legacy_mock,
+            mock.patch("gapsim.emulation.trench_depo_ui.QTimer.singleShot"),
+        ):
+            window = TrenchDepoWindow()
+            try:
+                window.set_active_emulator_number(4, run=False)
+                self.assertEqual(window.cmb_compare_target.currentData(), 1)
+
+                window.run_compare_for_active_emulator()
+
+                self.assertEqual(run_mock.call_count, 2)
+                self.assertEqual(legacy_mock.call_count, 0)
+                first_cfg = run_mock.call_args_list[0].args[0]
+                target_cfg = run_mock.call_args_list[1].args[0]
+                self.assertEqual(first_cfg.emulator_number, 4)
+                self.assertEqual(target_cfg.emulator_number, 1)
+                self.assertTrue(first_cfg.redepo_enabled)
                 self.assertFalse(target_cfg.redepo_enabled)
                 self.assertEqual(len(window._split_windows), 1)
             finally:
@@ -514,11 +746,72 @@ class SputterGaussianEditorTest(unittest.TestCase):
                 window.run_emulation(save_artifacts=False)
 
                 self.assertTrue(window.progress_run.isHidden())
-                self.assertEqual(window.lbl_status.text(), "Cycle 3/3 | Points 2")
+                self.assertEqual(window.lbl_status.text(), "Cycle 3/3 | 점 2")
             finally:
                 window.close()
 
-    def test_emulator_five_is_depth_deposition_only_with_bowed_jar_geometry(self) -> None:
+    def test_result_panel_shows_parameters_and_repeat_playback(self) -> None:
+        result = TrenchDepoResult(
+            frame_steps=[0, 1, 2],
+            frame_profiles=[
+                [(0.0, 0.0), (1.0, 0.0)],
+                [(0.0, -1.0), (1.0, -1.0)],
+                [(0.0, -2.0), (1.0, -2.0)],
+            ],
+            frame_voids=[[], [], []],
+            final_profile=[(0.0, -2.0), (1.0, -2.0)],
+            meta={"cycles": 2, "growth_model": "test_model"},
+        )
+        captured = {}
+
+        def fake_run(config, **_kwargs):
+            captured["config"] = config
+            return result
+
+        with (
+            mock.patch("gapsim.emulation.trench_depo_ui.run_trench_depo", side_effect=fake_run),
+            mock.patch("gapsim.emulation.trench_depo_ui.QTimer.singleShot"),
+        ):
+            window = TrenchDepoWindow()
+            try:
+                window.set_active_emulator_number(2, run=False)
+                window.spin_cycles.setValue(2)
+                window.spin_angstrom_per_cycle.setValue(12.5)
+                window.spin_sputter_strength.setValue(6.25)
+
+                window.run_emulation(save_artifacts=False)
+
+                self.assertIs(captured["config"], window._result_config)
+                params_text = window.edit_result_parameters.toPlainText()
+                self.assertIn("에뮬레이터: 02", params_text)
+                self.assertIn("Cycles: 2", params_text)
+                self.assertIn("Depo: 12.500 A/CYC", params_text)
+                self.assertIn("Direct sputter: ON", params_text)
+                self.assertIn("Etch: 6.250 A/CYC", params_text)
+                self.assertIn("Growth model: test_model", params_text)
+
+                self.assertTrue(window.btn_result_play.isEnabled())
+                self.assertEqual(window.slider_frame.value(), 2)
+                window.btn_result_play.click()
+                self.assertTrue(window._result_playback_timer.isActive())
+                self.assertEqual(window.btn_result_play.text(), "정지")
+                self.assertEqual(window.slider_frame.value(), 0)
+
+                window._advance_result_playback()
+                self.assertEqual(window.slider_frame.value(), 1)
+                window._advance_result_playback()
+                self.assertEqual(window.slider_frame.value(), 2)
+                window._advance_result_playback()
+                self.assertEqual(window.slider_frame.value(), 0)
+
+                window.btn_result_play.click()
+                self.assertFalse(window._result_playback_timer.isActive())
+                self.assertEqual(window.btn_result_play.text(), "반복재생")
+            finally:
+                window.close()
+
+    @unittest.skip("Model7 LF overhang proxy was removed from the rebuilt 0-5 active menu.")
+    def test_emulator_seven_exposes_lf_overhang_proxy_and_collapses_sections(self) -> None:
         result = TrenchDepoResult(
             frame_steps=[0],
             frame_profiles=[[(0.0, 0.0), (1.0, 0.0)]],
@@ -533,10 +826,67 @@ class SputterGaussianEditorTest(unittest.TestCase):
             window = TrenchDepoWindow()
 
         try:
-            window.set_active_emulator_number(5, run=False)
+            window.set_active_emulator_number(7, run=False)
+
+            self.assertTrue(window._active_emulator_supports_sputter())
+            self.assertTrue(window._active_emulator_supports_ion_transmission())
+            self.assertTrue(window._active_emulator_supports_lf_overhang())
+            self.assertFalse(window._active_emulator_supports_redeposition())
+            self.assertFalse(window._active_emulator_supports_reflected_ion())
+            self.assertFalse(window._active_emulator_supports_depth_deposition())
+            self.assertEqual(window.cmb_compare_target.currentData(), 1)
+            self.assertIn("7번 LF", window.lbl_lf_overhang_section.text())
+            self.assertFalse(window.chk_lf_overhang.isHidden())
+            self.assertFalse(window.spin_lf_overhang_dose.isHidden())
+
+            split_keys = {
+                window.cmb_split_parameter.itemData(idx)
+                for idx in range(window.cmb_split_parameter.count())
+            }
+            self.assertIn("lf_overhang_dose", split_keys)
+            self.assertIn("lf_overhang_width_a", split_keys)
+
+            config = window.current_config()
+            self.assertTrue(config.sputter_enabled)
+            self.assertTrue(config.ion_transmission_enabled)
+            self.assertTrue(config.lf_overhang_enabled)
+            self.assertAlmostEqual(config.lf_overhang_redepo_fraction_pct, 30.0, places=6)
+
+            window.spin_lf_overhang_dose.setValue(1.75)
+            window.chk_lf_overhang.setChecked(False)
+            QApplication.processEvents()
+            self.assertFalse(window.chk_lf_overhang.isHidden())
+            self.assertTrue(window.spin_lf_overhang_dose.isHidden())
+            self.assertAlmostEqual(window.spin_lf_overhang_dose.value(), 1.75, places=6)
+            self.assertFalse(window.current_config().lf_overhang_enabled)
+
+            window.chk_lf_overhang.setChecked(True)
+            QApplication.processEvents()
+            self.assertFalse(window.spin_lf_overhang_dose.isHidden())
+            self.assertAlmostEqual(window.current_config().lf_overhang_dose, 1.75, places=6)
+        finally:
+            window.close()
+
+    def test_emulator_four_is_depth_deposition_only_with_current_geometry(self) -> None:
+        result = TrenchDepoResult(
+            frame_steps=[0],
+            frame_profiles=[[(0.0, 0.0), (1.0, 0.0)]],
+            frame_voids=[[]],
+            final_profile=[(0.0, 0.0), (1.0, 0.0)],
+            meta={"cycles": 0},
+        )
+        with (
+            mock.patch("gapsim.emulation.trench_depo_ui.run_trench_depo", return_value=result),
+            mock.patch("gapsim.emulation.trench_depo_ui.QTimer.singleShot"),
+        ):
+            window = TrenchDepoWindow()
+
+        try:
+            window.set_active_emulator_number(4, run=False)
 
             self.assertFalse(window._active_emulator_supports_sputter())
             self.assertTrue(window._active_emulator_supports_depth_deposition())
+            self.assertFalse(window._active_emulator_supports_lf_overhang())
             self.assertTrue(all(not widget.isHidden() for widget in [
                 window.lbl_depth_depo_section,
                 window.chk_depth_deposition,
@@ -560,6 +910,7 @@ class SputterGaussianEditorTest(unittest.TestCase):
             self.assertTrue(all(not widget.isHidden() for widget in window._depth_advanced_widgets()))
             self.assertTrue(all(widget.isHidden() for widget in window._sputter_widgets))
             self.assertTrue(all(widget.isHidden() for widget in window._redeposition_widgets))
+            self.assertTrue(all(widget.isHidden() for widget in window._lf_overhang_widgets))
             self.assertFalse(window.depth_profile_group.isHidden())
             self.assertTrue(window.chk_depth_deposition.isChecked())
             self.assertGreaterEqual(window.cmb_emulator_default_preset.findText("Depth fill default"), 0)
@@ -568,27 +919,28 @@ class SputterGaussianEditorTest(unittest.TestCase):
             self.assertIs(window.overlay_group.parent(), window.structure_panel_content)
             self.assertIs(window.smoothing_controls_group.parent(), window.smoothing_panel_content)
             self.assertIs(window.smoothed_points_group.parent(), window.smoothing_panel_content)
-            self.assertIs(window.emulator_group.parent(), window.results_panel_content)
-            self.assertIs(window.params_group.parent(), window.results_panel_content)
-            self.assertIs(window.gaussian_group.parent(), window.results_panel_content)
-            self.assertIs(window.ion_map_group.parent(), window.results_panel_content)
-            self.assertIs(window.redepo_lobe_group.parent(), window.results_panel_content)
-            self.assertIs(window.depth_profile_group.parent(), window.results_panel_content)
-            self.assertEqual(window.emulator_group.title(), "3 Result / Emulator Version")
+            self.assertIs(window.emulator_group.parent(), window.progress_panel_content)
+            self.assertIs(window.params_group.parent(), window.progress_panel_content)
+            self.assertIs(window.gaussian_group.parent(), window.progress_panel_content)
+            self.assertIs(window.ion_map_group.parent(), window.progress_panel_content)
+            self.assertIs(window.redepo_lobe_group.parent(), window.progress_panel_content)
+            self.assertIs(window.depth_profile_group.parent(), window.progress_panel_content)
+            self.assertIs(window.result_summary_group.parent(), window.result_panel_content)
+            self.assertEqual(window.emulator_group.title(), "3 진행 / 에뮬레이터 버전")
             self.assertFalse(hasattr(window, "btn_new_emulator"))
             self.assertEqual(
                 [window.view_tabs.tabText(idx) for idx in range(window.view_tabs.count())],
-                ["1 Structure", "2 Smoothing", "3 Result"],
+                ["1 구조", "2 스무딩", "3 진행", "4 결과"],
             )
             self.assertEqual(
                 [window.workflow_tabs.tabText(idx) for idx in range(window.workflow_tabs.count())],
-                ["1 Structure", "2 Smoothing", "3 Result"],
+                ["1 구조", "2 스무딩", "3 진행", "4 결과"],
             )
             self.assertGreaterEqual(window.right_panel.minimumWidth(), 440)
             self.assertGreaterEqual(window.right_panel.maximumWidth(), 560)
 
             config = window.current_config()
-            self.assertEqual(tuple(config.points), BOWED_JAR_TRENCH_POINTS)
+            self.assertEqual(tuple(config.points), tuple(window._current_geometry_points()))
             self.assertTrue(config.deposition_depth_enabled)
             self.assertFalse(config.sputter_enabled)
             self.assertFalse(config.redepo_enabled)
@@ -631,8 +983,82 @@ class SputterGaussianEditorTest(unittest.TestCase):
             window.resize(1280, 720)
             window.show()
             QApplication.processEvents()
-            self.assertEqual(window.results_scroll_area.horizontalScrollBar().maximum(), 0)
-            self.assertGreater(window.results_scroll_area.verticalScrollBar().maximum(), 0)
+            self.assertEqual(window.progress_scroll_area.horizontalScrollBar().maximum(), 0)
+            self.assertGreater(window.progress_scroll_area.verticalScrollBar().maximum(), 0)
+        finally:
+            window.close()
+
+    def test_emulator_zero_integrates_active_models_without_redepo_or_reflected_ion(self) -> None:
+        result = TrenchDepoResult(
+            frame_steps=[0],
+            frame_profiles=[[(0.0, 0.0), (1.0, 0.0)]],
+            frame_voids=[[]],
+            final_profile=[(0.0, 0.0), (1.0, 0.0)],
+            meta={"cycles": 0},
+        )
+        with (
+            mock.patch("gapsim.emulation.trench_depo_ui.run_trench_depo", return_value=result),
+            mock.patch("gapsim.emulation.trench_depo_ui.QTimer.singleShot"),
+        ):
+            window = TrenchDepoWindow()
+
+        try:
+            window.set_active_emulator_number(0, run=False)
+
+            self.assertTrue(window._active_emulator_supports_sputter())
+            self.assertTrue(window._active_emulator_supports_ion_transmission())
+            self.assertTrue(window._active_emulator_supports_depth_deposition())
+            self.assertFalse(window._active_emulator_supports_redeposition())
+            self.assertFalse(window._active_emulator_supports_lf_overhang())
+            self.assertFalse(window._active_emulator_supports_reflected_ion())
+            self.assertFalse(window.chk_sputter.isHidden())
+            self.assertTrue(all(not widget.isHidden() for widget in window._ion_transmission_widgets))
+            self.assertTrue(all(widget.isHidden() for widget in window._redeposition_widgets))
+            self.assertTrue(all(widget.isHidden() for widget in window._lf_overhang_widgets))
+            self.assertTrue(all(not widget.isHidden() for widget in [
+                window.lbl_depth_depo_section,
+                window.chk_depth_deposition,
+                window.lbl_depth_feature_type,
+                window.cmb_depth_feature_type,
+                window.lbl_depth_feature_width,
+                window.spin_depth_feature_width,
+                window.lbl_depth_feature_depth,
+                window.spin_depth_feature_depth,
+                window.lbl_depth_decay_k,
+                window.spin_depth_decay_k,
+                window.lbl_depth_decay_power,
+                window.spin_depth_decay_power,
+                window.lbl_depth_min_ratio,
+                window.spin_depth_min_ratio_pct,
+                window.btn_depth_advanced,
+                window.depth_profile_group,
+            ]))
+            self.assertTrue(all(widget.isHidden() for widget in window._reflected_ion_widgets))
+            self.assertIn("통합", window.lbl_etch_section.text())
+            self.assertIn("Depth/Inhibition", window.chk_depth_deposition.text())
+            self.assertEqual(window.cmb_compare_target.currentData(), 1)
+
+            split_parameters = {
+                str(window.cmb_split_parameter.itemData(idx))
+                for idx in range(window.cmb_split_parameter.count())
+            }
+            self.assertIn("sputter_strength_a_per_cycle", split_parameters)
+            self.assertIn("ion_transmission_start_depth_pct", split_parameters)
+            self.assertNotIn("redepo_efficiency_pct", split_parameters)
+            self.assertNotIn("lf_overhang_dose", split_parameters)
+            self.assertIn("deposition_depth_decay_k", split_parameters)
+            self.assertIn("inhibition_strength_pct", split_parameters)
+            self.assertNotIn("reflected_ion_strength_pct", split_parameters)
+
+            config = window.current_config()
+            self.assertEqual(tuple(config.points), tuple(window._current_geometry_points()))
+            self.assertTrue(config.sputter_enabled)
+            self.assertTrue(config.ion_transmission_enabled)
+            self.assertFalse(config.redepo_enabled)
+            self.assertFalse(config.lf_overhang_enabled)
+            self.assertTrue(config.deposition_depth_enabled)
+            self.assertTrue(config.inhibition_enabled)
+            self.assertFalse(config.reflected_ion_enabled)
         finally:
             window.close()
 
@@ -654,14 +1080,18 @@ class SputterGaussianEditorTest(unittest.TestCase):
             self.assertEqual(window.view_tabs.currentIndex(), 0)
             self.assertEqual(window.workflow_tabs.currentIndex(), 0)
             self.assertTrue(window.result_controls_widget.isHidden())
-            self.assertIs(window.emulator_group.parent(), window.results_panel_content)
+            self.assertIs(window.emulator_group.parent(), window.progress_panel_content)
             self.assertFalse(hasattr(window, "btn_new_emulator"))
             self.assertIs(window.structure_library_group.parent(), window.structure_panel_content)
             self.assertIs(window.smoothing_controls_group.parent(), window.smoothing_panel_content)
-            self.assertIs(window.params_group.parent(), window.results_panel_content)
-            self.assertIs(window.action_group.parent(), window.results_panel_content)
-            self.assertIs(window.split_group.parent(), window.results_panel_content)
-            self.assertIs(window.compare_group.parent(), window.results_panel_content)
+            self.assertIs(window.params_group.parent(), window.progress_panel_content)
+            self.assertIs(window.action_group.parent(), window.progress_panel_content)
+            self.assertIs(window.split_group.parent(), window.action_group)
+            self.assertIs(window.compare_group.parent(), window.action_group)
+            self.assertEqual(window.btn_split_options.text(), "Split Test")
+            self.assertEqual(window.btn_compare_options.text(), "Compare Test")
+            self.assertEqual(window.split_group.title(), "Split Test 파라미터")
+            self.assertEqual(window.compare_group.title(), "Compare Test 파라미터")
             self.assertTrue(window.split_group.isHidden())
             self.assertTrue(window.compare_group.isHidden())
 
@@ -673,14 +1103,22 @@ class SputterGaussianEditorTest(unittest.TestCase):
             self.assertTrue(window.split_group.isHidden())
             self.assertFalse(window.compare_group.isHidden())
 
-            window.btn_structure_next.click()
+            self.assertFalse(hasattr(window, "btn_structure_next"))
+            window.btn_structure_panel_next.click()
             self.assertEqual(window.view_tabs.currentIndex(), 1)
             self.assertEqual(window.workflow_tabs.currentIndex(), 1)
             self.assertTrue(window.result_controls_widget.isHidden())
 
-            window.btn_smoothing_next.click()
+            self.assertFalse(hasattr(window, "btn_smoothing_next"))
+            self.assertFalse(hasattr(window, "btn_smoothing_back"))
+            window.btn_smoothing_panel_next.click()
             self.assertEqual(window.view_tabs.currentIndex(), 2)
             self.assertEqual(window.workflow_tabs.currentIndex(), 2)
+            self.assertTrue(window.result_controls_widget.isHidden())
+
+            window.btn_progress_panel_next.click()
+            self.assertEqual(window.view_tabs.currentIndex(), 3)
+            self.assertEqual(window.workflow_tabs.currentIndex(), 3)
             self.assertFalse(window.result_controls_widget.isHidden())
 
             window.workflow_tabs.setCurrentIndex(0)
@@ -688,8 +1126,8 @@ class SputterGaussianEditorTest(unittest.TestCase):
             self.assertTrue(window.result_controls_widget.isHidden())
 
             window.run_emulation(save_artifacts=False)
-            self.assertEqual(window.view_tabs.currentIndex(), 2)
-            self.assertEqual(window.workflow_tabs.currentIndex(), 2)
+            self.assertEqual(window.view_tabs.currentIndex(), 3)
+            self.assertEqual(window.workflow_tabs.currentIndex(), 3)
             self.assertFalse(window.result_controls_widget.isHidden())
         finally:
             window.close()
@@ -718,7 +1156,7 @@ class SputterGaussianEditorTest(unittest.TestCase):
             window._set_structure_points(custom_points, fit=False)
 
             self.assertEqual(tuple(window.current_config().points), tuple(custom_points))
-            self.assertIn("4 pts", window.lbl_geometry_source.text())
+            self.assertIn("4점", window.lbl_geometry_source.text())
         finally:
             window.close()
 
@@ -741,22 +1179,29 @@ class SputterGaussianEditorTest(unittest.TestCase):
                 window.refresh_structure_library(show_status=False)
 
                 window.export_default_structures_to_library()
-                self.assertGreaterEqual(window.cmb_structure_library.count(), 7)
-                stepped_idx = window.cmb_structure_library.findText("em02_stepped_trench")
+                self.assertEqual(window.cmb_structure_library.count(), 4)
+                self.assertEqual(
+                    [
+                        window.cmb_structure_library.itemText(idx)
+                        for idx in range(window.cmb_structure_library.count())
+                    ],
+                    ["통합 트렌치", "기본 트렌치", "계단형 트렌치", "Bowed Jar 트렌치"],
+                )
+                stepped_idx = window.cmb_structure_library.findData("em03_ion_transmission_etch")
                 self.assertGreaterEqual(stepped_idx, 0)
                 window.cmb_structure_library.setCurrentIndex(stepped_idx)
-                window.load_selected_structure_from_library()
                 self.assertEqual(tuple(window.current_config().points), tuple(ION_TRANSMISSION_STEPPED_TRENCH_POINTS))
-                self.assertEqual(window.edit_structure_name.text(), "em02_stepped_trench")
-                self.assertFalse(window.btn_load_structure_view.isHidden())
-                self.assertFalse(window.btn_save_structure_view.isHidden())
+                self.assertEqual(window.edit_structure_name.text(), "계단형 트렌치")
+                self.assertFalse(hasattr(window, "btn_load_structure"))
+                self.assertFalse(hasattr(window, "btn_load_structure_view"))
+                self.assertFalse(hasattr(window, "btn_save_structure_view"))
 
                 custom_points = [(-50.0, 0.0), (0.0, -80.0), (50.0, 0.0)]
                 window._set_structure_points(custom_points, fit=False)
                 window.edit_structure_name.setText("custom_test_structure")
                 window.save_current_structure_to_library()
-                self.assertGreaterEqual(window.cmb_structure_library.findText("custom_test_structure"), 0)
-                self.assertEqual(window.edit_structure_name.text(), "custom_test_structure")
+                self.assertGreaterEqual(window.cmb_structure_library.findData("custom_test_structure"), 0)
+                self.assertEqual(window.edit_structure_name.text(), "custom test structure")
                 self.assertEqual(tuple(window.current_config().points), tuple(custom_points))
             finally:
                 window.close()
@@ -825,16 +1270,136 @@ class SputterGaussianEditorTest(unittest.TestCase):
             self.assertGreater(len(window._smoothed_points), len(raw_points))
             self.assertEqual(tuple(window.current_config().points), tuple(window._smoothed_points))
 
-            window.btn_smoothing_next.click()
+            window.btn_smoothing_panel_next.click()
             self.assertEqual(window.view_tabs.currentIndex(), 2)
+            window.btn_progress_panel_next.click()
+            self.assertEqual(window.view_tabs.currentIndex(), 3)
             self.assertEqual(tuple(window.view._frame_profiles_raw[0]), tuple(window._smoothed_points))
-            self.assertIn("Input preview: smooth", window.lbl_status.text())
+            self.assertIn("입력 미리보기: smooth", window.lbl_status.text())
             self.assertFalse(window.slider_frame.isEnabled())
 
             window.use_raw_geometry()
             self.assertEqual(tuple(window.current_config().points), tuple(raw_points))
             self.assertEqual(tuple(window.view._frame_profiles_raw[0]), tuple(raw_points))
-            self.assertIn("Input preview: raw", window.lbl_status.text())
+            self.assertIn("입력 미리보기: raw", window.lbl_status.text())
+        finally:
+            window.close()
+
+    def test_structure_edits_refresh_smoothing_base_preview(self) -> None:
+        result = TrenchDepoResult(
+            frame_steps=[0],
+            frame_profiles=[[(0.0, 0.0), (1.0, 0.0)]],
+            frame_voids=[[]],
+            final_profile=[(0.0, 0.0), (1.0, 0.0)],
+            meta={"cycles": 0},
+        )
+        with (
+            mock.patch("gapsim.emulation.trench_depo_ui.run_trench_depo", return_value=result),
+            mock.patch("gapsim.emulation.trench_depo_ui.QTimer.singleShot"),
+        ):
+            window = TrenchDepoWindow()
+
+        try:
+            raw_points = [(-200.0, 0.0), (-120.0, -200.0), (120.0, -200.0), (200.0, 0.0)]
+            moved_points = [(-200.0, 0.0), (-90.0, -240.0), (120.0, -200.0), (200.0, 0.0)]
+            window._set_structure_points(raw_points, fit=False)
+
+            window._on_structure_point_moved(1, -90.0, -240.0)
+
+            self.assertEqual(tuple(window._structure_points), tuple(moved_points))
+            self.assertFalse(window._use_smoothed_geometry)
+            self.assertEqual(window._smoothed_points, [])
+            self.assertEqual(
+                tuple(window.smoothing_view._pts),
+                tuple((float(x), -float(y)) for x, y in moved_points),
+            )
+
+            window.spin_smooth_segments.setValue(12)
+            window.spin_smooth_iterations.setValue(1)
+            window.apply_structure_smoothing()
+            self.assertTrue(window._use_smoothed_geometry)
+            self.assertGreater(len(window._smoothed_points), len(moved_points))
+
+            edited_again = [(-200.0, 0.0), (-90.0, -240.0), (90.0, -260.0), (200.0, 0.0)]
+            window._on_structure_point_moved(2, 90.0, -260.0)
+
+            self.assertEqual(tuple(window._structure_points), tuple(edited_again))
+            self.assertFalse(window._use_smoothed_geometry)
+            self.assertEqual(window._smoothed_points, [])
+            self.assertEqual(
+                tuple(window.smoothing_view._pts),
+                tuple((float(x), -float(y)) for x, y in edited_again),
+            )
+        finally:
+            window.close()
+
+    def test_geometry_changes_invalidate_result_and_show_latest_preview(self) -> None:
+        result = TrenchDepoResult(
+            frame_steps=[0],
+            frame_profiles=[[(10.0, 10.0), (20.0, 10.0)]],
+            frame_voids=[[]],
+            final_profile=[(10.0, 10.0), (20.0, 10.0)],
+            meta={"cycles": 0},
+        )
+        with (
+            mock.patch("gapsim.emulation.trench_depo_ui.run_trench_depo", return_value=result),
+            mock.patch("gapsim.emulation.trench_depo_ui.QTimer.singleShot"),
+        ):
+            window = TrenchDepoWindow()
+
+        try:
+            raw_points = [(-200.0, 0.0), (-120.0, -200.0), (120.0, -200.0), (200.0, 0.0)]
+            moved_points = [(-200.0, 0.0), (-90.0, -240.0), (120.0, -200.0), (200.0, 0.0)]
+            window._set_structure_points(raw_points, fit=False)
+            with mock.patch("gapsim.emulation.trench_depo_ui.run_trench_depo", return_value=result):
+                window.run_emulation(save_artifacts=False)
+
+            self.assertIs(window._result, result)
+            self.assertEqual(tuple(window.view._frame_profiles_raw[0]), tuple(result.frame_profiles[0]))
+
+            window.btn_results_panel_back.click()
+            window.btn_progress_panel_back.click()
+            window.btn_smoothing_panel_back.click()
+            self.assertEqual(window.view_tabs.currentIndex(), 0)
+            window._on_structure_point_moved(1, -90.0, -240.0)
+            window.btn_structure_panel_next.click()
+            window.btn_smoothing_panel_next.click()
+            window.btn_progress_panel_next.click()
+
+            self.assertIsNone(window._result)
+            self.assertEqual(tuple(window.current_config().points), tuple(moved_points))
+            self.assertEqual(tuple(window.view._frame_profiles_raw[0]), tuple(moved_points))
+            self.assertIn("입력 미리보기: raw", window.lbl_status.text())
+        finally:
+            window.close()
+
+    def test_raw_structure_edits_survive_emulator_switch(self) -> None:
+        result = TrenchDepoResult(
+            frame_steps=[0],
+            frame_profiles=[[(0.0, 0.0), (1.0, 0.0)]],
+            frame_voids=[[]],
+            final_profile=[(0.0, 0.0), (1.0, 0.0)],
+            meta={"cycles": 0},
+        )
+        with (
+            mock.patch("gapsim.emulation.trench_depo_ui.run_trench_depo", return_value=result),
+            mock.patch("gapsim.emulation.trench_depo_ui.QTimer.singleShot"),
+        ):
+            window = TrenchDepoWindow()
+
+        try:
+            custom_points = [(-220.0, 0.0), (-80.0, -260.0), (90.0, -230.0), (220.0, 0.0)]
+            window._on_structure_table_replace_points_requested(custom_points)
+            self.assertEqual(tuple(window.current_config().points), tuple(custom_points))
+            self.assertFalse(window._use_smoothed_geometry)
+
+            window.set_active_emulator_number(2, run=False)
+
+            self.assertEqual(window.active_emulator_number(), 2)
+            self.assertEqual(tuple(window._structure_points), tuple(custom_points))
+            self.assertEqual(tuple(window.current_config().points), tuple(custom_points))
+            self.assertFalse(window._use_smoothed_geometry)
+            self.assertEqual(tuple(window.ion_transmission_editor._points), tuple(custom_points))
         finally:
             window.close()
 
@@ -860,17 +1425,19 @@ class SputterGaussianEditorTest(unittest.TestCase):
             window.apply_structure_smoothing()
             smoothed_points = tuple(window._smoothed_points)
 
-            window.btn_smoothing_next.click()
+            window.btn_smoothing_panel_next.click()
             self.assertEqual(window.view_tabs.currentIndex(), 2)
+            window.btn_progress_panel_next.click()
+            self.assertEqual(window.view_tabs.currentIndex(), 3)
             window.set_active_emulator_number(5, run=False)
 
             self.assertEqual(window.active_emulator_number(), 5)
-            self.assertEqual(window.view_tabs.currentIndex(), 2)
+            self.assertEqual(window.view_tabs.currentIndex(), 3)
             self.assertTrue(window._use_smoothed_geometry)
             self.assertEqual(tuple(window._smoothed_points), smoothed_points)
             self.assertEqual(tuple(window.current_config().points), smoothed_points)
             self.assertEqual(tuple(window.depth_deposition_editor._structure_points), smoothed_points)
-            self.assertIn("Input preview: smooth", window.lbl_status.text())
+            self.assertIn("입력 미리보기: smooth", window.lbl_status.text())
         finally:
             window.close()
 
@@ -890,19 +1457,15 @@ class SputterGaussianEditorTest(unittest.TestCase):
 
         try:
             self.assertEqual(window.active_emulator_number(), 0)
-            self.assertEqual(window._emulator_numbers, [0, 1, 2, 3, 4, 5, 6])
-            self.assertEqual(sorted(window._emulator_buttons), [0, 1, 2, 3, 4, 5, 6])
+            self.assertEqual(window._emulator_numbers, EXPECTED_EMULATOR_NUMBERS)
+            self.assertEqual(sorted(window._emulator_buttons), EXPECTED_EMULATOR_NUMBERS)
             self.assertTrue(window._emulator_buttons[0].isChecked())
-            self.assertFalse(window._emulator_buttons[1].isChecked())
-            self.assertFalse(window._emulator_buttons[2].isChecked())
-            self.assertFalse(window._emulator_buttons[3].isChecked())
-            self.assertFalse(window._emulator_buttons[4].isChecked())
-            self.assertFalse(window._emulator_buttons[5].isChecked())
-            self.assertFalse(window._emulator_buttons[6].isChecked())
+            for number in EXPECTED_EMULATOR_NUMBERS[1:]:
+                self.assertFalse(window._emulator_buttons[number].isChecked())
         finally:
             window.close()
 
-    def test_window_can_create_next_emulator_toggle(self) -> None:
+    def test_window_reports_full_emulator_slots_after_last_default_exists(self) -> None:
         result = TrenchDepoResult(
             frame_steps=[0],
             frame_profiles=[[(0.0, 0.0), (1.0, 0.0)]],
@@ -914,6 +1477,7 @@ class SputterGaussianEditorTest(unittest.TestCase):
             mock.patch("gapsim.emulation.trench_depo_ui.run_trench_depo", return_value=result),
             mock.patch("gapsim.emulation.trench_depo_ui.ensure_emulator_research_slot") as ensure_slot,
             mock.patch("gapsim.emulation.trench_depo_ui.save_created_emulator_numbers") as save_numbers,
+            mock.patch("gapsim.emulation.trench_depo_ui.QMessageBox.information") as info_box,
             mock.patch("gapsim.emulation.trench_depo_ui.QTimer.singleShot"),
         ):
             window = TrenchDepoWindow()
@@ -921,11 +1485,11 @@ class SputterGaussianEditorTest(unittest.TestCase):
             try:
                 window.create_new_emulator()
 
-                self.assertEqual(window.active_emulator_number(), 7)
-                self.assertEqual(window._emulator_numbers, [0, 1, 2, 3, 4, 5, 6, 7])
-                self.assertTrue(window._emulator_buttons[7].isChecked())
-                ensure_slot.assert_called_once_with(7)
-                save_numbers.assert_called_once_with([0, 1, 2, 3, 4, 5, 6, 7])
+                self.assertEqual(window.active_emulator_number(), 0)
+                self.assertEqual(window._emulator_numbers, EXPECTED_EMULATOR_NUMBERS)
+                ensure_slot.assert_not_called()
+                save_numbers.assert_not_called()
+                info_box.assert_called_once()
             finally:
                 window.close()
 

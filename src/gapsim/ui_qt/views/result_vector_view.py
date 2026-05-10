@@ -10,12 +10,16 @@ from PySide6.QtGui import QBrush, QColor, QNativeGestureEvent, QPainter, QPainte
 from PySide6.QtWidgets import (
     QGraphicsEllipseItem,
     QGraphicsItem,
+    QGraphicsLineItem,
     QGraphicsPathItem,
     QGraphicsScene,
     QGraphicsView,
 )
 
 Point = Tuple[float, float]  # USER coords (x, y_user)
+FieldOverlaySample = Tuple[float, float, float]
+TransportLineSample = Tuple[float, float, float, float, float]
+_AUTO_DECIMATION_TARGET_POINTS = 2200
 
 
 def _nice_step(raw: float) -> float:
@@ -105,6 +109,13 @@ def _decimate_profile(profile: Sequence[Point], stride: int) -> List[Point]:
     return out
 
 
+def _auto_decimation_stride(frames: Sequence[Sequence[Point]]) -> int:
+    max_points = max((len(frame) for frame in frames), default=0)
+    if max_points <= _AUTO_DECIMATION_TARGET_POINTS:
+        return 1
+    return max(1, int(math.ceil(max_points / float(_AUTO_DECIMATION_TARGET_POINTS))))
+
+
 class ResultVectorView(QGraphicsView):
     viewportChanged = Signal(object)
 
@@ -115,6 +126,9 @@ class ResultVectorView(QGraphicsView):
 
         self._frame_profiles_raw: List[List[Point]] = []
         self._frame_voids_raw: List[List[List[Point]]] = []
+        self._frame_redepo_overlays_raw: List[List[FieldOverlaySample]] = []
+        self._frame_etch_overlays_raw: List[List[FieldOverlaySample]] = []
+        self._frame_transport_lines_raw: List[List[TransportLineSample]] = []
         self._frame_stage_ids: List[int] = []
         self._profile_cache: "OrderedDict[int, List[QPointF]]" = OrderedDict()
         self._void_cache: "OrderedDict[int, List[List[QPointF]]]" = OrderedDict()
@@ -138,6 +152,11 @@ class ResultVectorView(QGraphicsView):
         self._etch_ghost_items: List[Optional[QGraphicsPathItem]] = []
         self._etch_ghost_base_paths: List[QPainterPath] = []
         self._void_items_by_frame: List[List[QGraphicsPathItem]] = []
+        self._etch_overlay_items: List[QGraphicsEllipseItem] = []
+        self._redepo_overlay_items: List[QGraphicsEllipseItem] = []
+        self._transport_line_items: List[QGraphicsLineItem] = []
+        self._show_etch_overlay = True
+        self._show_redepo_overlay = True
         self._initial_point_items: List[QGraphicsEllipseItem] = []
         self._substrate_item: Optional[QGraphicsPathItem] = None
         self._boundary_item: Optional[QGraphicsPathItem] = None
@@ -224,6 +243,9 @@ class ResultVectorView(QGraphicsView):
     def clear_data(self) -> None:
         self._frame_profiles_raw = []
         self._frame_voids_raw = []
+        self._frame_redepo_overlays_raw = []
+        self._frame_etch_overlays_raw = []
+        self._frame_transport_lines_raw = []
         self._frame_stage_ids = []
         self._profile_cache.clear()
         self._void_cache.clear()
@@ -244,6 +266,9 @@ class ResultVectorView(QGraphicsView):
         self._etch_ghost_items = []
         self._etch_ghost_base_paths = []
         self._void_items_by_frame = []
+        self._etch_overlay_items = []
+        self._redepo_overlay_items = []
+        self._transport_line_items = []
         self._initial_point_items = []
         self._substrate_item = None
         self._boundary_item = None
@@ -289,6 +314,9 @@ class ResultVectorView(QGraphicsView):
         *,
         x_window: Optional[Tuple[float, float]] = None,
         voids: Optional[Sequence[Sequence[Sequence[Point]]]] = None,
+        redepo_overlays: Optional[Sequence[Sequence[Sequence[float]]]] = None,
+        etch_overlays: Optional[Sequence[Sequence[Sequence[float]]]] = None,
+        transport_lines: Optional[Sequence[Sequence[Sequence[float]]]] = None,
         stage_ids: Optional[Sequence[int]] = None,
         void_mode: str = "legacy_cumulative",
         dynamic_substrate_fill: bool = False,
@@ -312,6 +340,59 @@ class ResultVectorView(QGraphicsView):
         if len(self._frame_voids_raw) != len(self._frame_profiles_raw):
             self._frame_voids_raw = [[] for _ in self._frame_profiles_raw]
 
+        def load_overlay_frames(raw_frames: Optional[Sequence[Sequence[Sequence[float]]]]) -> List[List[FieldOverlaySample]]:
+            overlays: List[List[FieldOverlaySample]] = []
+            if raw_frames is not None:
+                for frame_samples in raw_frames[: len(self._frame_profiles_raw)]:
+                    samples: List[FieldOverlaySample] = []
+                    for sample in frame_samples:
+                        if len(sample) < 3:
+                            continue
+                        try:
+                            value = max(0.0, float(sample[2]))
+                            if value <= 0.0:
+                                continue
+                            samples.append((float(sample[0]), float(sample[1]), value))
+                        except (TypeError, ValueError):
+                            continue
+                    overlays.append(samples)
+            if len(overlays) != len(self._frame_profiles_raw):
+                overlays = [[] for _ in self._frame_profiles_raw]
+            return overlays
+
+        self._frame_redepo_overlays_raw = load_overlay_frames(redepo_overlays)
+        self._frame_etch_overlays_raw = load_overlay_frames(etch_overlays)
+
+        def load_transport_line_frames(raw_frames: Optional[Sequence[Sequence[Sequence[float]]]]) -> List[List[TransportLineSample]]:
+            frames_out: List[List[TransportLineSample]] = []
+            if raw_frames is not None:
+                for frame_samples in raw_frames[: len(self._frame_profiles_raw)]:
+                    samples: List[TransportLineSample] = []
+                    for sample in frame_samples:
+                        if len(sample) < 5:
+                            continue
+                        try:
+                            value = max(0.0, float(sample[4]))
+                            if value <= 0.0:
+                                continue
+                            samples.append(
+                                (
+                                    float(sample[0]),
+                                    float(sample[1]),
+                                    float(sample[2]),
+                                    float(sample[3]),
+                                    value,
+                                )
+                            )
+                        except (TypeError, ValueError):
+                            continue
+                    frames_out.append(samples)
+            if len(frames_out) != len(self._frame_profiles_raw):
+                frames_out = [[] for _ in self._frame_profiles_raw]
+            return frames_out
+
+        self._frame_transport_lines_raw = load_transport_line_frames(transport_lines)
+
         self._frame_stage_ids = []
         if stage_ids is not None:
             for sid in stage_ids[: len(self._frame_profiles_raw)]:
@@ -319,6 +400,7 @@ class ResultVectorView(QGraphicsView):
         if len(self._frame_stage_ids) != len(self._frame_profiles_raw):
             self._frame_stage_ids = [1 for _ in self._frame_profiles_raw]
 
+        self._decimation_stride = _auto_decimation_stride(self._frame_profiles_raw)
         self._profile_cache.clear()
         self._void_cache.clear()
         self._void_mode = "current" if str(void_mode).lower() == "current" else "legacy_cumulative"
@@ -366,6 +448,22 @@ class ResultVectorView(QGraphicsView):
         for item in self._initial_point_items:
             item.setVisible(enabled)
 
+    def set_etch_overlay_visible(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if self._show_etch_overlay == enabled:
+            return
+        self._show_etch_overlay = enabled
+        if self._current_index >= 0:
+            self._draw_field_overlays_for_frame(self._current_index)
+
+    def set_redepo_overlay_visible(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if self._show_redepo_overlay == enabled:
+            return
+        self._show_redepo_overlay = enabled
+        if self._current_index >= 0:
+            self._draw_field_overlays_for_frame(self._current_index)
+
     def _build_scene_items(self) -> None:
         self._scene.clear()
         self._layer_items = []
@@ -374,6 +472,9 @@ class ResultVectorView(QGraphicsView):
         self._etch_ghost_items = []
         self._etch_ghost_base_paths = []
         self._void_items_by_frame = [[] for _ in self._frame_profiles_raw]
+        self._etch_overlay_items = []
+        self._redepo_overlay_items = []
+        self._transport_line_items = []
         self._initial_point_items = []
         self._substrate_item = None
         self._boundary_item = None
@@ -608,6 +709,93 @@ class ResultVectorView(QGraphicsView):
         for item in self._void_items_by_frame[frame_index]:
             item.setVisible(bool(visible))
 
+    def _clear_redepo_overlay_items(self) -> None:
+        for item in self._redepo_overlay_items:
+            self._scene.removeItem(item)
+        self._redepo_overlay_items = []
+
+    def _clear_etch_overlay_items(self) -> None:
+        for item in self._etch_overlay_items:
+            self._scene.removeItem(item)
+        self._etch_overlay_items = []
+
+    def _clear_transport_line_items(self) -> None:
+        for item in self._transport_line_items:
+            self._scene.removeItem(item)
+        self._transport_line_items = []
+
+    def _add_overlay_dots(
+        self,
+        samples: Sequence[FieldOverlaySample],
+        *,
+        color: QColor,
+        items: List[QGraphicsEllipseItem],
+        z_value: float,
+    ) -> None:
+        if not samples:
+            return
+        max_value = max((float(value) for _x, _y, value in samples), default=0.0)
+        if max_value <= 0.0:
+            return
+        pen_alpha = min(140, max(35, color.alpha() + 20))
+        pen = QPen(QColor(color.red(), color.green(), color.blue(), pen_alpha), 0.65)
+        pen.setCosmetic(True)
+        brush = QBrush(color)
+        for x, y_user, value in samples:
+            ratio = max(0.0, min(1.0, float(value) / max_value))
+            radius = 1.15 + (2.35 * math.sqrt(ratio))
+            dot = QGraphicsEllipseItem(-radius, -radius, radius * 2.0, radius * 2.0)
+            dot.setPos(QPointF(float(x), -float(y_user)))
+            dot.setPen(pen)
+            dot.setBrush(brush)
+            dot.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, True)
+            dot.setZValue(z_value)
+            self._scene.addItem(dot)
+            items.append(dot)
+
+    def _draw_transport_lines_for_frame(self, frame_index: int) -> None:
+        if not (0 <= frame_index < len(self._frame_transport_lines_raw)):
+            return
+        lines = self._frame_transport_lines_raw[frame_index]
+        if not lines:
+            return
+        max_value = max((float(value) for _x1, _y1, _x2, _y2, value in lines), default=0.0)
+        if max_value <= 0.0:
+            return
+        for x1, y1, x2, y2, value in lines:
+            ratio = max(0.0, min(1.0, float(value) / max_value))
+            alpha = 42 + int(58 * math.sqrt(ratio))
+            pen = QPen(QColor(245, 158, 11, alpha), 0.95)
+            pen.setCosmetic(True)
+            line = QGraphicsLineItem(float(x1), -float(y1), float(x2), -float(y2))
+            line.setPen(pen)
+            line.setZValue(22.5)
+            self._scene.addItem(line)
+            self._transport_line_items.append(line)
+
+    def _draw_field_overlays_for_frame(self, frame_index: int) -> None:
+        self._clear_etch_overlay_items()
+        self._clear_redepo_overlay_items()
+        self._clear_transport_line_items()
+        if self._show_etch_overlay and 0 <= frame_index < len(self._frame_etch_overlays_raw):
+            self._add_overlay_dots(
+                self._frame_etch_overlays_raw[frame_index],
+                color=QColor(37, 99, 235, 70),
+                items=self._etch_overlay_items,
+                z_value=23.0,
+            )
+        if self._show_redepo_overlay and 0 <= frame_index < len(self._frame_redepo_overlays_raw):
+            self._draw_transport_lines_for_frame(frame_index)
+            self._add_overlay_dots(
+                self._frame_redepo_overlays_raw[frame_index],
+                color=QColor(239, 39, 39, 82),
+                items=self._redepo_overlay_items,
+                z_value=24.0,
+            )
+
+    def _draw_redepo_overlay_for_frame(self, frame_index: int) -> None:
+        self._draw_field_overlays_for_frame(frame_index)
+
     def show_frame(self, index: int, *, fit: bool = False) -> bool:
         if not self._frame_profiles_raw:
             return False
@@ -693,6 +881,7 @@ class ResultVectorView(QGraphicsView):
         if self._substrate_item is not None:
             fill_profile = curr if solid_fill else self._cache_get_profile_scene(0)
             self._substrate_item.setPath(self._profile_fill_path(fill_profile, self._floor_y))
+        self._draw_redepo_overlay_for_frame(draw_idx)
         self._last_draw_idx = draw_idx
         self._last_solid_fill_mode = solid_fill
 
