@@ -1418,6 +1418,44 @@ class SputterGaussianEditorTest(unittest.TestCase):
         finally:
             window.close()
 
+    def test_structure_symmetric_edit_moves_mirror_point(self) -> None:
+        result = TrenchDepoResult(
+            frame_steps=[0],
+            frame_profiles=[[(0.0, 0.0), (1.0, 0.0)]],
+            frame_voids=[[]],
+            final_profile=[(0.0, 0.0), (1.0, 0.0)],
+            meta={"cycles": 0},
+        )
+        with (
+            mock.patch("gapsim.emulation.trench_depo_ui.run_trench_depo", return_value=result),
+            mock.patch("gapsim.emulation.trench_depo_ui.QTimer.singleShot"),
+        ):
+            window = TrenchDepoWindow()
+
+        try:
+            raw_points = [(-200.0, 0.0), (-120.0, -200.0), (120.0, -200.0), (200.0, 0.0)]
+            window._set_structure_points(raw_points, fit=False)
+            self.assertFalse(window.chk_symmetric_structure_edit.isHidden())
+            window.chk_symmetric_structure_edit.setChecked(True)
+
+            window._on_structure_point_moved(1, -90.0, -240.0)
+
+            moved_points = [(-200.0, 0.0), (-90.0, -240.0), (90.0, -240.0), (200.0, 0.0)]
+            self.assertEqual(tuple(window._structure_points), tuple(moved_points))
+            self.assertEqual(
+                tuple(window.structure_view._pts),
+                tuple((float(x), -float(y)) for x, y in moved_points),
+            )
+            self.assertEqual(tuple(window.structure_points_model.get_points()), tuple(moved_points))
+
+            window._on_structure_table_point_edit_requested(2, 80.0, -260.0)
+
+            table_moved_points = [(-200.0, 0.0), (-80.0, -260.0), (80.0, -260.0), (200.0, 0.0)]
+            self.assertEqual(tuple(window._structure_points), tuple(table_moved_points))
+            self.assertEqual(tuple(window.structure_points_model.get_points()), tuple(table_moved_points))
+        finally:
+            window.close()
+
     def test_geometry_changes_invalidate_result_and_show_latest_preview(self) -> None:
         result = TrenchDepoResult(
             frame_steps=[0],

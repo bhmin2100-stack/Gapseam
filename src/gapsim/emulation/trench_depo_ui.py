@@ -2545,6 +2545,8 @@ class TrenchDepoWindow(QMainWindow):
 
         self.btn_fit_structure = QPushButton("화면 맞춤")
         self.btn_reset_structure = QPushButton("기본 구조")
+        self.chk_symmetric_structure_edit = QCheckBox("좌우대칭 이동")
+        self.chk_symmetric_structure_edit.setToolTip("구조 점을 움직일 때 x=0 기준 반대편 대응점을 (-x, y)로 같이 이동합니다.")
         self.lbl_geometry_points = QLabel("구조: 0점")
         self.lbl_geometry_source = QLabel("입력: raw")
         self.lbl_geometry_source.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -2564,6 +2566,7 @@ class TrenchDepoWindow(QMainWindow):
         structure_buttons.setContentsMargins(0, 0, 0, 0)
         structure_buttons.addWidget(self.btn_fit_structure)
         structure_buttons.addWidget(self.btn_reset_structure)
+        structure_buttons.addWidget(self.chk_symmetric_structure_edit)
         structure_buttons.addWidget(self.lbl_geometry_points, 1)
         structure_buttons.addWidget(self.lbl_geometry_source)
 
@@ -3975,12 +3978,72 @@ class TrenchDepoWindow(QMainWindow):
         if fit:
             QTimer.singleShot(0, self.structure_view.fit_points)
 
+    def _find_symmetric_structure_point_index(
+        self,
+        points: Sequence[Tuple[float, float]],
+        idx: int,
+    ) -> Optional[int]:
+        source_idx = int(idx)
+        if source_idx < 0 or source_idx >= len(points):
+            return None
+        sx, sy = points[source_idx]
+        if abs(float(sx)) <= 1e-9:
+            return None
+        xs = [float(x) for x, _y in points]
+        ys = [float(y) for _x, y in points]
+        diag = math.hypot(max(xs, default=0.0) - min(xs, default=0.0), max(ys, default=0.0) - min(ys, default=0.0))
+        tolerance = max(5.0, diag * 0.04)
+        best_idx: Optional[int] = None
+        best_score = float("inf")
+        target_x = -float(sx)
+        target_y = float(sy)
+        source_sign = -1 if float(sx) < 0.0 else 1
+        for candidate_idx, (cx_raw, cy_raw) in enumerate(points):
+            if candidate_idx == source_idx:
+                continue
+            cx, cy = float(cx_raw), float(cy_raw)
+            if abs(cx) <= 1e-9:
+                continue
+            candidate_sign = -1 if cx < 0.0 else 1
+            if candidate_sign == source_sign:
+                continue
+            score = math.hypot(cx - target_x, cy - target_y)
+            if score < best_score:
+                best_idx = candidate_idx
+                best_score = score
+        if best_idx is None or best_score > tolerance:
+            return None
+        return best_idx
+
+    def _structure_points_with_symmetric_move(
+        self,
+        idx: int,
+        x: float,
+        y: float,
+    ) -> Tuple[List[Tuple[float, float]], Optional[int]]:
+        pts = [(float(px), float(py)) for px, py in self._structure_points]
+        point_idx = int(idx)
+        if point_idx < 0 or point_idx >= len(pts):
+            return pts, None
+        mirror_idx = (
+            self._find_symmetric_structure_point_index(pts, point_idx)
+            if self.chk_symmetric_structure_edit.isChecked()
+            else None
+        )
+        pts[point_idx] = (float(x), float(y))
+        if mirror_idx is not None:
+            pts[mirror_idx] = (-float(x), float(y))
+        return pts, mirror_idx
+
     def _on_structure_table_point_edit_requested(self, row: int, x: float, y: float) -> None:
         if self._syncing_structure_table:
             return
+        updated_points, mirror_idx = self._structure_points_with_symmetric_move(int(row), float(x), float(y))
         self._syncing_structure_table = True
         try:
-            self.structure_points_model.set_point(int(row), (float(x), float(y)))
+            self.structure_points_model.set_point(int(row), updated_points[int(row)])
+            if mirror_idx is not None:
+                self.structure_points_model.set_point(int(mirror_idx), updated_points[int(mirror_idx)])
         finally:
             self._syncing_structure_table = False
         self._refresh_structure_from_table_model()
@@ -4041,7 +4104,13 @@ class TrenchDepoWindow(QMainWindow):
         if self._syncing_structure_view:
             return
         if 0 <= int(idx) < len(self._structure_points):
-            self._structure_points[int(idx)] = (float(x), float(y))
+            updated_points, mirror_idx = self._structure_points_with_symmetric_move(int(idx), float(x), float(y))
+            self._structure_points = updated_points
+            moved_x, moved_y = updated_points[int(idx)]
+            self.structure_view.set_point_xy_silent(int(idx), moved_x, moved_y)
+            if mirror_idx is not None:
+                mirror_x, mirror_y = updated_points[int(mirror_idx)]
+                self.structure_view.set_point_xy_silent(int(mirror_idx), mirror_x, mirror_y)
             self._mark_structure_edited()
 
     def _on_structure_point_inserted(self, idx: int, x: float, y: float) -> None:

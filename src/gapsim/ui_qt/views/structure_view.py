@@ -117,6 +117,7 @@ class StructureView(QGraphicsView):
         self._overlay_drag_enabled = False
         self._overlay_dragging = False
         self._overlay_drag_last_scene: Optional[QPointF] = None
+        self._suppress_point_item_change = False
 
         self._drag_label: Optional[QGraphicsSimpleTextItem] = None
         self._recreate_drag_label()
@@ -160,6 +161,20 @@ class StructureView(QGraphicsView):
         self._pts = [(float(x), -float(y)) for x, y in pts]
         self._rebuild_items()
         self._fit_if_first()
+
+    def set_point_xy_silent(self, idx: int, x: float, y: float) -> None:
+        point_idx = int(idx)
+        if point_idx < 0 or point_idx >= len(self._pts):
+            return
+        sx, sy = float(x), -float(y)
+        self._pts[point_idx] = (sx, sy)
+        if point_idx < len(self._point_items):
+            self._suppress_point_item_change = True
+            try:
+                self._point_items[point_idx].setPos(QPointF(sx, sy))
+            finally:
+                self._suppress_point_item_change = False
+        self._update_path_from_points()
 
     def set_reference_profiles_xy(self, profiles: List[List[Point]]) -> None:
         converted: List[List[Tuple[float, float]]] = []
@@ -306,6 +321,8 @@ class StructureView(QGraphicsView):
         return sx, sy
 
     def _on_item_move_raw(self, idx: int, x: float, y: float) -> Tuple[float, float]:
+        if self._suppress_point_item_change:
+            return float(x), float(y)
         if not self._editing_enabled:
             if 0 <= idx < len(self._pts):
                 return self._pts[idx]
