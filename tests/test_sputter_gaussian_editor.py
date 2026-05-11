@@ -907,7 +907,21 @@ class SputterGaussianEditorTest(unittest.TestCase):
             ]))
             self.assertTrue(all(widget.isHidden() for widget in window._depth_advanced_widgets()))
             window.btn_depth_advanced.setChecked(True)
-            self.assertTrue(all(not widget.isHidden() for widget in window._depth_advanced_widgets()))
+            self.assertTrue(all(not widget.isHidden() for widget in [
+                window.lbl_depth_closure_section,
+                window.lbl_depth_closure_threshold,
+                window.spin_depth_closure_threshold,
+                window.lbl_depth_post_fill_hole,
+                window.spin_depth_post_fill_hole_pct,
+            ]))
+            self.assertTrue(all(widget.isHidden() for widget in [
+                window.lbl_depth_post_fill_line,
+                window.spin_depth_post_fill_line_pct,
+                window.lbl_depth_line_open_path,
+                window.spin_depth_line_open_path,
+                window.lbl_depth_residual_decay,
+                window.spin_depth_residual_decay,
+            ]))
             self.assertTrue(all(widget.isHidden() for widget in window._sputter_widgets))
             self.assertTrue(all(widget.isHidden() for widget in window._redeposition_widgets))
             self.assertTrue(all(widget.isHidden() for widget in window._lf_overhang_widgets))
@@ -1038,7 +1052,9 @@ class SputterGaussianEditorTest(unittest.TestCase):
             ]))
             self.assertTrue(all(widget.isHidden() for widget in window._reflected_ion_widgets))
             self.assertIn("통합", window.lbl_etch_section.text())
-            self.assertIn("Depth/Inhibition", window.chk_depth_deposition.text())
+            self.assertEqual(window.chk_depth_deposition.text(), "Depth depletion")
+            self.assertEqual(window.chk_inhibition_deposition.text(), "Inhibition deposition")
+            self.assertFalse(window.chk_inhibition_deposition.isHidden())
             self.assertEqual(window.cmb_compare_target.currentData(), 1)
 
             split_parameters = {
@@ -1064,7 +1080,7 @@ class SputterGaussianEditorTest(unittest.TestCase):
             self.assertAlmostEqual(config.redepo_distance_power, 25.0, places=6)
             self.assertFalse(config.lf_overhang_enabled)
             self.assertTrue(config.deposition_depth_enabled)
-            self.assertTrue(config.inhibition_enabled)
+            self.assertFalse(config.inhibition_enabled)
             self.assertFalse(config.reflected_ion_enabled)
         finally:
             window.close()

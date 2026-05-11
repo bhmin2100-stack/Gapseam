@@ -198,11 +198,11 @@ def _structure_preset_items(sheet_names: Sequence[str]) -> List[Tuple[str, str]]
 
 
 EMULATOR_MODE_TITLES = {
-    0: "Integrated depo/etch/depth/inhibition",
+    0: "Integrated depo/etch/depletion/inhibition",
     1: "Conformal depo baseline",
     2: "Direct angle sputter etch",
     3: "Ion transmission etch",
-    4: "Depth-dependent depo fill",
+    4: "Depth depletion depo fill",
     5: "Inhibition deposition fill",
     6: "Normal/specular lobe redepo",
 }
@@ -2300,9 +2300,12 @@ class TrenchDepoWindow(QMainWindow):
         self.spin_closure_redepo_smoothing.setDecimals(1)
         self.spin_closure_redepo_smoothing.setSingleStep(20.0)
         self.spin_closure_redepo_smoothing.setValue(160.0)
-        self.chk_depth_deposition = QCheckBox("Depth-dependent deposition")
-        self.chk_depth_deposition.setToolTip("4/5번은 etch/redeposition 없이 기본 deposition에 깊이 감쇠 또는 inhibition을 적용합니다.")
+        self.chk_depth_deposition = QCheckBox("Depth depletion deposition")
+        self.chk_depth_deposition.setToolTip("깊이/등가 AR에 따라 deposition 양이 줄어드는 순수 depth depletion 모델입니다.")
         self.chk_depth_deposition.setChecked(True)
+        self.chk_inhibition_deposition = QCheckBox("Inhibition deposition")
+        self.chk_inhibition_deposition.setToolTip("표면 inhibition coverage로 상부/노출부 성장을 억제하는 별도 deposition 모델입니다.")
+        self.chk_inhibition_deposition.setChecked(False)
         self.cmb_depth_feature_type = QComboBox()
         self.cmb_depth_feature_type.addItem("Hole", "hole")
         self.cmb_depth_feature_type.addItem("Line", "line")
@@ -2363,6 +2366,41 @@ class TrenchDepoWindow(QMainWindow):
         self.spin_depth_residual_decay.setDecimals(1)
         self.spin_depth_residual_decay.setSingleStep(100.0)
         self.spin_depth_residual_decay.setValue(1175.0)
+        self.spin_inhibition_strength = QDoubleSpinBox()
+        self.spin_inhibition_strength.setRange(0.0, 100.0)
+        self.spin_inhibition_strength.setDecimals(1)
+        self.spin_inhibition_strength.setSingleStep(5.0)
+        self.spin_inhibition_strength.setValue(85.0)
+        self.spin_inhibition_penetration = QDoubleSpinBox()
+        self.spin_inhibition_penetration.setRange(1.0, 200000.0)
+        self.spin_inhibition_penetration.setDecimals(1)
+        self.spin_inhibition_penetration.setSingleStep(100.0)
+        self.spin_inhibition_penetration.setValue(1100.0)
+        self.spin_inhibition_decay_power = QDoubleSpinBox()
+        self.spin_inhibition_decay_power.setRange(0.05, 8.0)
+        self.spin_inhibition_decay_power.setDecimals(2)
+        self.spin_inhibition_decay_power.setSingleStep(0.1)
+        self.spin_inhibition_decay_power.setValue(1.2)
+        self.spin_inhibition_min_growth = QDoubleSpinBox()
+        self.spin_inhibition_min_growth.setRange(0.0, 100.0)
+        self.spin_inhibition_min_growth.setDecimals(1)
+        self.spin_inhibition_min_growth.setSingleStep(1.0)
+        self.spin_inhibition_min_growth.setValue(8.0)
+        self.spin_inhibition_bottom_boost = QDoubleSpinBox()
+        self.spin_inhibition_bottom_boost.setRange(0.0, 100.0)
+        self.spin_inhibition_bottom_boost.setDecimals(1)
+        self.spin_inhibition_bottom_boost.setSingleStep(5.0)
+        self.spin_inhibition_bottom_boost.setValue(20.0)
+        self.spin_inhibition_recombination = QDoubleSpinBox()
+        self.spin_inhibition_recombination.setRange(0.0, 100.0)
+        self.spin_inhibition_recombination.setDecimals(1)
+        self.spin_inhibition_recombination.setSingleStep(5.0)
+        self.spin_inhibition_recombination.setValue(35.0)
+        self.spin_inhibition_smoothing = QDoubleSpinBox()
+        self.spin_inhibition_smoothing.setRange(0.0, 1000.0)
+        self.spin_inhibition_smoothing.setDecimals(1)
+        self.spin_inhibition_smoothing.setSingleStep(10.0)
+        self.spin_inhibition_smoothing.setValue(45.0)
         self.depth_deposition_editor = DepthDepositionProfileEditor()
         self.depth_deposition_editor.set_feature_geometry(
             str(self.cmb_depth_feature_type.currentData() or "hole"),
@@ -2861,35 +2899,60 @@ class TrenchDepoWindow(QMainWindow):
         params_grid.addWidget(self.lbl_redepo_soft_los, 34, 0)
         params_grid.addWidget(self.spin_redepo_soft_los, 34, 1)
         self.lbl_depth_depo_section = self._make_parameter_section(
-            "5번 Depth depo only",
+            "4번 Depth depletion deposition",
             color="#166534",
             background="#f0fdf4",
             border="#bbf7d0",
         )
         params_grid.addWidget(self.lbl_depth_depo_section, 35, 0, 1, 2)
         params_grid.addWidget(self.chk_depth_deposition, 36, 0, 1, 2)
-        self.lbl_depth_feature_type = QLabel("Feature")
-        self.lbl_depth_feature_width = QLabel("Width A")
-        self.lbl_depth_feature_depth = QLabel("Depth A")
-        self.lbl_depth_feature_length = QLabel("Length A")
+        self.lbl_depth_feature_section = self._make_parameter_section(
+            "Hole / Line geometry",
+            color="#365314",
+            background="#f7fee7",
+            border="#d9f99d",
+        )
+        self.lbl_depth_feature_type = QLabel("형상 타입")
+        self.lbl_depth_feature_width = QLabel("입구폭 A")
+        self.lbl_depth_feature_depth = QLabel("그래프 기준깊이 A")
+        self.lbl_depth_feature_length = QLabel("Line 길이 A")
+        self.lbl_depth_curve_section = self._make_parameter_section(
+            "Depletion curve",
+            color="#166534",
+            background="#f0fdf4",
+            border="#bbf7d0",
+        )
         self.lbl_depth_decay_k = QLabel("Decay K")
         self.lbl_depth_decay_power = QLabel("Power")
-        self.lbl_depth_min_ratio = QLabel("Min %")
+        self.lbl_depth_min_ratio = QLabel("최소 depo %")
         self.lbl_depth_closure_section = self._make_parameter_section(
-            "Closure residual fill",
+            "Closure 후 추가 fill",
             color="#3f6212",
             background="#f7fee7",
             border="#d9f99d",
         )
         self.lbl_depth_closure_threshold = QLabel("Close A")
-        self.lbl_depth_post_fill_hole = QLabel("Hole fill %")
-        self.lbl_depth_post_fill_line = QLabel("Line fill %")
+        self.lbl_depth_post_fill_hole = QLabel("닫힌 뒤 추가 fill %")
+        self.lbl_depth_post_fill_line = QLabel("닫힌 뒤 추가 fill %")
         self.lbl_depth_line_open_path = QLabel("Line open")
         self.lbl_depth_residual_decay = QLabel("Decay len A")
         self.btn_depth_advanced = QPushButton("고급 fill 옵션")
         self.btn_depth_advanced.setCheckable(True)
+        self.lbl_inhibition_section = self._make_parameter_section(
+            "5번 Inhibition deposition",
+            color="#854d0e",
+            background="#fffbeb",
+            border="#fde68a",
+        )
+        self.lbl_inhibition_strength = QLabel("억제 강도 %")
+        self.lbl_inhibition_penetration = QLabel("침투 깊이 A")
+        self.lbl_inhibition_decay_power = QLabel("감쇠 Power")
+        self.lbl_inhibition_min_growth = QLabel("최소 성장 %")
+        self.lbl_inhibition_bottom_boost = QLabel("Bottom boost %")
+        self.lbl_inhibition_recombination = QLabel("PEALD recomb %")
+        self.lbl_inhibition_smoothing = QLabel("스무딩 A")
         self.lbl_depth_parameter_help = QLabel(
-            "Depth map: deeper areas receive less deposition. Drag the dots or use the fields."
+            "Depth depletion: 깊이/등가 AR이 커질수록 deposition 양을 줄입니다. Inhibition은 별도 섹션에서 켭니다."
         )
         self.lbl_depth_parameter_help.setWordWrap(True)
         self.lbl_depth_parameter_help.setStyleSheet(
@@ -2897,12 +2960,12 @@ class TrenchDepoWindow(QMainWindow):
             "border-radius: 4px; padding: 6px; }"
         )
         for widget, tooltip in (
-            (self.lbl_depth_feature_type, "Hole은 원형/컨택홀, Line은 길게 열린 트렌치의 등가 aspect ratio로 계산합니다."),
-            (self.cmb_depth_feature_type, "Hole은 원형/컨택홀, Line은 길게 열린 트렌치의 등가 aspect ratio로 계산합니다."),
+            (self.lbl_depth_feature_type, "Hole/Line에 따라 등가 aspect ratio와 closure 후 fill 기준이 달라집니다."),
+            (self.cmb_depth_feature_type, "Hole/Line에 따라 등가 aspect ratio와 closure 후 fill 기준이 달라집니다."),
             (self.lbl_depth_feature_width, "입구 폭입니다. 폭이 좁을수록 같은 깊이에서 등가 AR이 커져 증착 비율이 낮아집니다."),
             (self.spin_depth_feature_width, "입구 폭입니다. 폭이 좁을수록 같은 깊이에서 등가 AR이 커져 증착 비율이 낮아집니다."),
-            (self.lbl_depth_feature_depth, "시각 편집기의 100% 깊이와 depth-dependent attenuation 계산 기준 깊이입니다."),
-            (self.spin_depth_feature_depth, "시각 편집기의 100% 깊이와 depth-dependent attenuation 계산 기준 깊이입니다."),
+            (self.lbl_depth_feature_depth, "계산 자체보다는 depth map 그래프의 100% 깊이 기준입니다. 실제 점별 depletion은 현재 geometry 깊이를 사용합니다."),
+            (self.spin_depth_feature_depth, "계산 자체보다는 depth map 그래프의 100% 깊이 기준입니다. 실제 점별 depletion은 현재 geometry 깊이를 사용합니다."),
             (self.lbl_depth_feature_length, "Line 구조의 길이입니다. 0이면 길게 열린 라인으로 간주합니다."),
             (self.spin_depth_feature_length, "Line 구조의 길이입니다. 0이면 길게 열린 라인으로 간주합니다."),
             (self.lbl_depth_decay_k, "깊이 감쇠 세기입니다. 값이 클수록 바닥 증착 비율이 빠르게 낮아집니다."),
@@ -2913,88 +2976,120 @@ class TrenchDepoWindow(QMainWindow):
             (self.spin_depth_min_ratio_pct, "아무리 깊어도 유지되는 최저 증착률입니다."),
             (self.lbl_depth_closure_threshold, "입구 폭이 이 값 이하로 줄면 closure로 보고 잔류 fill 제한을 적용합니다."),
             (self.spin_depth_closure_threshold, "입구 폭이 이 값 이하로 줄면 closure로 보고 잔류 fill 제한을 적용합니다."),
-            (self.lbl_depth_post_fill_hole, "Hole closure 후 남은 void 중 추가로 채울 수 있는 면적 비율입니다."),
-            (self.spin_depth_post_fill_hole_pct, "Hole closure 후 남은 void 중 추가로 채울 수 있는 면적 비율입니다."),
-            (self.lbl_depth_post_fill_line, "Line closure 후 남은 void 중 추가로 채울 수 있는 면적 비율입니다."),
-            (self.spin_depth_post_fill_line_pct, "Line closure 후 남은 void 중 추가로 채울 수 있는 면적 비율입니다."),
+            (self.lbl_depth_post_fill_hole, "현재 형상이 Hole일 때, closure 후 남은 void 중 추가로 채울 수 있는 면적 비율입니다."),
+            (self.spin_depth_post_fill_hole_pct, "현재 형상이 Hole일 때, closure 후 남은 void 중 추가로 채울 수 있는 면적 비율입니다."),
+            (self.lbl_depth_post_fill_line, "현재 형상이 Line일 때, closure 후 남은 void 중 추가로 채울 수 있는 면적 비율입니다."),
+            (self.spin_depth_post_fill_line_pct, "현재 형상이 Line일 때, closure 후 남은 void 중 추가로 채울 수 있는 면적 비율입니다."),
             (self.lbl_depth_line_open_path, "Line 구조에서 열려 있는 우회 경로를 얼마나 인정할지 정합니다."),
             (self.spin_depth_line_open_path, "Line 구조에서 열려 있는 우회 경로를 얼마나 인정할지 정합니다."),
             (self.lbl_depth_residual_decay, "Closure 후 잔류 fill이 깊이 방향으로 줄어드는 길이 스케일입니다."),
             (self.spin_depth_residual_decay, "Closure 후 잔류 fill이 깊이 방향으로 줄어드는 길이 스케일입니다."),
+            (self.lbl_inhibition_strength, "상부/노출부 성장을 얼마나 강하게 억제할지 정합니다."),
+            (self.spin_inhibition_strength, "상부/노출부 성장을 얼마나 강하게 억제할지 정합니다."),
+            (self.lbl_inhibition_penetration, "inhibition 영향이 trench 내부로 유지되는 깊이 스케일입니다."),
+            (self.spin_inhibition_penetration, "inhibition 영향이 trench 내부로 유지되는 깊이 스케일입니다."),
+            (self.lbl_inhibition_decay_power, "inhibition coverage가 깊이에 따라 줄어드는 곡선 모양입니다."),
+            (self.spin_inhibition_decay_power, "inhibition coverage가 깊이에 따라 줄어드는 곡선 모양입니다."),
+            (self.lbl_inhibition_min_growth, "inhibition이 강해도 유지되는 최소 성장률입니다."),
+            (self.spin_inhibition_min_growth, "inhibition이 강해도 유지되는 최소 성장률입니다."),
+            (self.lbl_inhibition_bottom_boost, "깊은 쪽 성장을 상대적으로 보강하는 항입니다."),
+            (self.spin_inhibition_bottom_boost, "깊은 쪽 성장을 상대적으로 보강하는 항입니다."),
+            (self.lbl_inhibition_recombination, "PEALD radical recombination loss 가중치입니다."),
+            (self.spin_inhibition_recombination, "PEALD radical recombination loss 가중치입니다."),
+            (self.lbl_inhibition_smoothing, "inhibition growth ratio field를 arc 방향으로 부드럽게 하는 길이입니다."),
+            (self.spin_inhibition_smoothing, "inhibition growth ratio field를 arc 방향으로 부드럽게 하는 길이입니다."),
         ):
             widget.setToolTip(tooltip)
-        params_grid.addWidget(self.lbl_depth_feature_type, 37, 0)
-        params_grid.addWidget(self.cmb_depth_feature_type, 37, 1)
-        params_grid.addWidget(self.lbl_depth_feature_width, 38, 0)
-        params_grid.addWidget(self.spin_depth_feature_width, 38, 1)
-        params_grid.addWidget(self.lbl_depth_feature_depth, 39, 0)
-        params_grid.addWidget(self.spin_depth_feature_depth, 39, 1)
-        params_grid.addWidget(self.lbl_depth_feature_length, 40, 0)
-        params_grid.addWidget(self.spin_depth_feature_length, 40, 1)
-        params_grid.addWidget(self.lbl_depth_decay_k, 41, 0)
-        params_grid.addWidget(self.spin_depth_decay_k, 41, 1)
-        params_grid.addWidget(self.lbl_depth_decay_power, 42, 0)
-        params_grid.addWidget(self.spin_depth_decay_power, 42, 1)
-        params_grid.addWidget(self.lbl_depth_min_ratio, 43, 0)
-        params_grid.addWidget(self.spin_depth_min_ratio_pct, 43, 1)
-        params_grid.addWidget(self.btn_depth_advanced, 44, 0, 1, 2)
-        params_grid.addWidget(self.lbl_depth_closure_section, 45, 0, 1, 2)
-        params_grid.addWidget(self.lbl_depth_closure_threshold, 46, 0)
-        params_grid.addWidget(self.spin_depth_closure_threshold, 46, 1)
-        params_grid.addWidget(self.lbl_depth_post_fill_hole, 47, 0)
-        params_grid.addWidget(self.spin_depth_post_fill_hole_pct, 47, 1)
-        params_grid.addWidget(self.lbl_depth_post_fill_line, 48, 0)
-        params_grid.addWidget(self.spin_depth_post_fill_line_pct, 48, 1)
-        params_grid.addWidget(self.lbl_depth_line_open_path, 49, 0)
-        params_grid.addWidget(self.spin_depth_line_open_path, 49, 1)
-        params_grid.addWidget(self.lbl_depth_residual_decay, 50, 0)
-        params_grid.addWidget(self.spin_depth_residual_decay, 50, 1)
+        params_grid.addWidget(self.lbl_depth_feature_section, 37, 0, 1, 2)
+        params_grid.addWidget(self.lbl_depth_feature_type, 38, 0)
+        params_grid.addWidget(self.cmb_depth_feature_type, 38, 1)
+        params_grid.addWidget(self.lbl_depth_feature_width, 39, 0)
+        params_grid.addWidget(self.spin_depth_feature_width, 39, 1)
+        params_grid.addWidget(self.lbl_depth_feature_depth, 40, 0)
+        params_grid.addWidget(self.spin_depth_feature_depth, 40, 1)
+        params_grid.addWidget(self.lbl_depth_feature_length, 41, 0)
+        params_grid.addWidget(self.spin_depth_feature_length, 41, 1)
+        params_grid.addWidget(self.lbl_depth_curve_section, 42, 0, 1, 2)
+        params_grid.addWidget(self.lbl_depth_decay_k, 43, 0)
+        params_grid.addWidget(self.spin_depth_decay_k, 43, 1)
+        params_grid.addWidget(self.lbl_depth_decay_power, 44, 0)
+        params_grid.addWidget(self.spin_depth_decay_power, 44, 1)
+        params_grid.addWidget(self.lbl_depth_min_ratio, 45, 0)
+        params_grid.addWidget(self.spin_depth_min_ratio_pct, 45, 1)
+        params_grid.addWidget(self.btn_depth_advanced, 46, 0, 1, 2)
+        params_grid.addWidget(self.lbl_depth_closure_section, 47, 0, 1, 2)
+        params_grid.addWidget(self.lbl_depth_closure_threshold, 48, 0)
+        params_grid.addWidget(self.spin_depth_closure_threshold, 48, 1)
+        params_grid.addWidget(self.lbl_depth_post_fill_hole, 49, 0)
+        params_grid.addWidget(self.spin_depth_post_fill_hole_pct, 49, 1)
+        params_grid.addWidget(self.lbl_depth_post_fill_line, 50, 0)
+        params_grid.addWidget(self.spin_depth_post_fill_line_pct, 50, 1)
+        params_grid.addWidget(self.lbl_depth_line_open_path, 51, 0)
+        params_grid.addWidget(self.spin_depth_line_open_path, 51, 1)
+        params_grid.addWidget(self.lbl_depth_residual_decay, 52, 0)
+        params_grid.addWidget(self.spin_depth_residual_decay, 52, 1)
+        params_grid.addWidget(self.lbl_inhibition_section, 53, 0, 1, 2)
+        params_grid.addWidget(self.chk_inhibition_deposition, 54, 0, 1, 2)
+        params_grid.addWidget(self.lbl_inhibition_strength, 55, 0)
+        params_grid.addWidget(self.spin_inhibition_strength, 55, 1)
+        params_grid.addWidget(self.lbl_inhibition_penetration, 56, 0)
+        params_grid.addWidget(self.spin_inhibition_penetration, 56, 1)
+        params_grid.addWidget(self.lbl_inhibition_decay_power, 57, 0)
+        params_grid.addWidget(self.spin_inhibition_decay_power, 57, 1)
+        params_grid.addWidget(self.lbl_inhibition_min_growth, 58, 0)
+        params_grid.addWidget(self.spin_inhibition_min_growth, 58, 1)
+        params_grid.addWidget(self.lbl_inhibition_bottom_boost, 59, 0)
+        params_grid.addWidget(self.spin_inhibition_bottom_boost, 59, 1)
+        params_grid.addWidget(self.lbl_inhibition_recombination, 60, 0)
+        params_grid.addWidget(self.spin_inhibition_recombination, 60, 1)
+        params_grid.addWidget(self.lbl_inhibition_smoothing, 61, 0)
+        params_grid.addWidget(self.spin_inhibition_smoothing, 61, 1)
         self.lbl_lf_overhang_section = self._make_parameter_section(
             "7번 LF overhang proxy",
             color="#7c3aed",
             background="#f5f3ff",
             border="#ddd6fe",
         )
-        params_grid.addWidget(self.lbl_lf_overhang_section, 51, 0, 1, 2)
-        params_grid.addWidget(self.chk_lf_overhang, 52, 0, 1, 2)
+        params_grid.addWidget(self.lbl_lf_overhang_section, 62, 0, 1, 2)
+        params_grid.addWidget(self.chk_lf_overhang, 63, 0, 1, 2)
         self.lbl_lf_overhang_dose = QLabel("LF dose")
         self.lbl_lf_overhang_sputter_gain = QLabel("Sputter gain")
         self.lbl_lf_overhang_redepo_fraction = QLabel("Redepo %")
         self.lbl_lf_overhang_survival = QLabel("Survival loss")
         self.lbl_lf_overhang_width = QLabel("Width A")
-        params_grid.addWidget(self.lbl_lf_overhang_dose, 53, 0)
-        params_grid.addWidget(self.spin_lf_overhang_dose, 53, 1)
-        params_grid.addWidget(self.lbl_lf_overhang_sputter_gain, 54, 0)
-        params_grid.addWidget(self.spin_lf_overhang_sputter_gain, 54, 1)
-        params_grid.addWidget(self.lbl_lf_overhang_redepo_fraction, 55, 0)
-        params_grid.addWidget(self.spin_lf_overhang_redepo_fraction, 55, 1)
-        params_grid.addWidget(self.lbl_lf_overhang_survival, 56, 0)
-        params_grid.addWidget(self.spin_lf_overhang_survival, 56, 1)
-        params_grid.addWidget(self.lbl_lf_overhang_width, 57, 0)
-        params_grid.addWidget(self.spin_lf_overhang_width, 57, 1)
+        params_grid.addWidget(self.lbl_lf_overhang_dose, 64, 0)
+        params_grid.addWidget(self.spin_lf_overhang_dose, 64, 1)
+        params_grid.addWidget(self.lbl_lf_overhang_sputter_gain, 65, 0)
+        params_grid.addWidget(self.spin_lf_overhang_sputter_gain, 65, 1)
+        params_grid.addWidget(self.lbl_lf_overhang_redepo_fraction, 66, 0)
+        params_grid.addWidget(self.spin_lf_overhang_redepo_fraction, 66, 1)
+        params_grid.addWidget(self.lbl_lf_overhang_survival, 67, 0)
+        params_grid.addWidget(self.spin_lf_overhang_survival, 67, 1)
+        params_grid.addWidget(self.lbl_lf_overhang_width, 68, 0)
+        params_grid.addWidget(self.spin_lf_overhang_width, 68, 1)
         self.lbl_closure_redepo_section = self._make_parameter_section(
             "8번 Etch+Redepo closure",
             color="#b91c1c",
             background="#fff1f2",
             border="#fecdd3",
         )
-        params_grid.addWidget(self.lbl_closure_redepo_section, 58, 0, 1, 2)
-        params_grid.addWidget(self.chk_closure_redepo, 59, 0, 1, 2)
+        params_grid.addWidget(self.lbl_closure_redepo_section, 69, 0, 1, 2)
+        params_grid.addWidget(self.chk_closure_redepo, 70, 0, 1, 2)
         self.lbl_closure_redepo_efficiency = QLabel("Closure redepo %")
         self.lbl_closure_redepo_shadow_gain = QLabel("Shadow capture")
         self.lbl_closure_redepo_width = QLabel("Width A")
         self.lbl_closure_redepo_survival = QLabel("Survival loss")
         self.lbl_closure_redepo_smoothing = QLabel("Smooth A")
-        params_grid.addWidget(self.lbl_closure_redepo_efficiency, 60, 0)
-        params_grid.addWidget(self.spin_closure_redepo_efficiency, 60, 1)
-        params_grid.addWidget(self.lbl_closure_redepo_shadow_gain, 61, 0)
-        params_grid.addWidget(self.spin_closure_redepo_shadow_gain, 61, 1)
-        params_grid.addWidget(self.lbl_closure_redepo_width, 62, 0)
-        params_grid.addWidget(self.spin_closure_redepo_width, 62, 1)
-        params_grid.addWidget(self.lbl_closure_redepo_survival, 63, 0)
-        params_grid.addWidget(self.spin_closure_redepo_survival, 63, 1)
-        params_grid.addWidget(self.lbl_closure_redepo_smoothing, 64, 0)
-        params_grid.addWidget(self.spin_closure_redepo_smoothing, 64, 1)
+        params_grid.addWidget(self.lbl_closure_redepo_efficiency, 71, 0)
+        params_grid.addWidget(self.spin_closure_redepo_efficiency, 71, 1)
+        params_grid.addWidget(self.lbl_closure_redepo_shadow_gain, 72, 0)
+        params_grid.addWidget(self.spin_closure_redepo_shadow_gain, 72, 1)
+        params_grid.addWidget(self.lbl_closure_redepo_width, 73, 0)
+        params_grid.addWidget(self.spin_closure_redepo_width, 73, 1)
+        params_grid.addWidget(self.lbl_closure_redepo_survival, 74, 0)
+        params_grid.addWidget(self.spin_closure_redepo_survival, 74, 1)
+        params_grid.addWidget(self.lbl_closure_redepo_smoothing, 75, 0)
+        params_grid.addWidget(self.spin_closure_redepo_smoothing, 75, 1)
         params_group.setLayout(params_grid)
 
         self.redepo_lobe_group = QGroupBox("4 Redeposition Lobe")
@@ -3154,6 +3249,7 @@ class TrenchDepoWindow(QMainWindow):
         self._depth_deposition_widgets = [
             self.lbl_depth_depo_section,
             self.chk_depth_deposition,
+            self.lbl_depth_feature_section,
             self.lbl_depth_feature_type,
             self.cmb_depth_feature_type,
             self.lbl_depth_feature_width,
@@ -3162,6 +3258,7 @@ class TrenchDepoWindow(QMainWindow):
             self.spin_depth_feature_depth,
             self.lbl_depth_feature_length,
             self.spin_depth_feature_length,
+            self.lbl_depth_curve_section,
             self.lbl_depth_decay_k,
             self.spin_depth_decay_k,
             self.lbl_depth_decay_power,
@@ -3183,6 +3280,24 @@ class TrenchDepoWindow(QMainWindow):
             self.depth_profile_group,
             self.lbl_depth_parameter_help,
             self.depth_deposition_editor,
+        ]
+        self._inhibition_widgets = [
+            self.lbl_inhibition_section,
+            self.chk_inhibition_deposition,
+            self.lbl_inhibition_strength,
+            self.spin_inhibition_strength,
+            self.lbl_inhibition_penetration,
+            self.spin_inhibition_penetration,
+            self.lbl_inhibition_decay_power,
+            self.spin_inhibition_decay_power,
+            self.lbl_inhibition_min_growth,
+            self.spin_inhibition_min_growth,
+            self.lbl_inhibition_bottom_boost,
+            self.spin_inhibition_bottom_boost,
+            self.lbl_inhibition_recombination,
+            self.spin_inhibition_recombination,
+            self.lbl_inhibition_smoothing,
+            self.spin_inhibition_smoothing,
         ]
         self._lf_overhang_widgets = [
             self.lbl_lf_overhang_section,
@@ -3382,6 +3497,7 @@ class TrenchDepoWindow(QMainWindow):
         self.chk_reflected_ion.toggled.connect(self.sync_etch_control_availability)
         self.chk_redepo.toggled.connect(self.sync_etch_control_availability)
         self.chk_depth_deposition.toggled.connect(self.sync_etch_control_availability)
+        self.chk_inhibition_deposition.toggled.connect(self.sync_etch_control_availability)
         self.chk_lf_overhang.toggled.connect(self.sync_etch_control_availability)
         self.chk_closure_redepo.toggled.connect(self.sync_etch_control_availability)
         self.spin_sputter_strength.valueChanged.connect(self.sync_sputter_curve_cap_from_spin)
@@ -3399,6 +3515,7 @@ class TrenchDepoWindow(QMainWindow):
         self.spin_redepo_distance_power.valueChanged.connect(self.sync_redepo_lobe_from_spins)
         self.redepo_lobe_editor.parametersChanged.connect(self.apply_redepo_lobe_parameters)
         self.cmb_depth_feature_type.currentIndexChanged.connect(self.sync_depth_deposition_editor_from_spins)
+        self.cmb_depth_feature_type.currentIndexChanged.connect(self.sync_etch_control_availability)
         self.spin_depth_feature_width.valueChanged.connect(self.sync_depth_deposition_editor_from_spins)
         self.spin_depth_feature_depth.valueChanged.connect(self.sync_depth_deposition_editor_from_spins)
         self.spin_depth_feature_length.valueChanged.connect(self.sync_depth_deposition_editor_from_spins)
@@ -3743,6 +3860,7 @@ class TrenchDepoWindow(QMainWindow):
         supports_reflected = self._active_emulator_supports_reflected_ion()
         supports_redepo = self._active_emulator_supports_redeposition()
         supports_depth = self._active_emulator_supports_depth_deposition()
+        supports_inhibition = self._active_emulator_supports_inhibition()
         supports_lf = self._active_emulator_supports_lf_overhang()
         supports_closure = self._active_emulator_supports_closure_redepo()
 
@@ -3772,6 +3890,11 @@ class TrenchDepoWindow(QMainWindow):
         self.chk_depth_deposition.setChecked(
             bool(supports_depth and b("deposition_depth_enabled", self.chk_depth_deposition.isChecked()))
         )
+        self.chk_inhibition_deposition.setChecked(
+            bool(supports_inhibition and b("inhibition_enabled", self.chk_inhibition_deposition.isChecked()))
+        )
+        if supports_depth and supports_inhibition and self.chk_depth_deposition.isChecked() and self.chk_inhibition_deposition.isChecked():
+            self.chk_depth_deposition.setChecked(False)
         self.chk_lf_overhang.setChecked(
             bool(supports_lf and b("lf_overhang_enabled", self.chk_lf_overhang.isChecked()))
         )
@@ -3856,6 +3979,23 @@ class TrenchDepoWindow(QMainWindow):
         self.spin_depth_residual_decay.setValue(
             f("deposition_residual_fill_decay_length_a", self.spin_depth_residual_decay.value())
         )
+        self.spin_inhibition_strength.setValue(f("inhibition_strength_pct", self.spin_inhibition_strength.value()))
+        self.spin_inhibition_penetration.setValue(
+            f("inhibition_penetration_depth_a", self.spin_inhibition_penetration.value())
+        )
+        self.spin_inhibition_decay_power.setValue(
+            f("inhibition_decay_power", self.spin_inhibition_decay_power.value())
+        )
+        self.spin_inhibition_min_growth.setValue(
+            f("inhibition_min_growth_ratio", self.spin_inhibition_min_growth.value() / 100.0) * 100.0
+        )
+        self.spin_inhibition_bottom_boost.setValue(
+            f("inhibition_bottom_boost_pct", self.spin_inhibition_bottom_boost.value())
+        )
+        self.spin_inhibition_recombination.setValue(
+            f("inhibition_peald_recombination_pct", self.spin_inhibition_recombination.value())
+        )
+        self.spin_inhibition_smoothing.setValue(f("inhibition_smoothing_a", self.spin_inhibition_smoothing.value()))
 
         self.sync_ion_shadow_slider_labels()
         self.sync_sputter_curve_from_spins()
@@ -4612,7 +4752,10 @@ class TrenchDepoWindow(QMainWindow):
         return self.active_emulator_number() in (0, 6)
 
     def _active_emulator_supports_depth_deposition(self) -> bool:
-        return self.active_emulator_number() in (0, 4, 5)
+        return self.active_emulator_number() in (0, 4)
+
+    def _active_emulator_supports_inhibition(self) -> bool:
+        return self.active_emulator_number() in (0, 5)
 
     def _active_emulator_supports_lf_overhang(self) -> bool:
         return False
@@ -4638,7 +4781,11 @@ class TrenchDepoWindow(QMainWindow):
 
     @staticmethod
     def _emulator_supports_depth_deposition(number: int) -> bool:
-        return int(number) in (0, 4, 5)
+        return int(number) in (0, 4)
+
+    @staticmethod
+    def _emulator_supports_inhibition(number: int) -> bool:
+        return int(number) in (0, 5)
 
     @staticmethod
     def _emulator_supports_lf_overhang(number: int) -> bool:
@@ -4764,22 +4911,21 @@ class TrenchDepoWindow(QMainWindow):
                 ("Depth power", "deposition_depth_decay_power"),
                 ("Min depo ratio", "deposition_min_ratio"),
                 ("Closure threshold", "deposition_closure_threshold_a"),
-                ("Hole post-fill", "deposition_post_closure_fill_pct_hole"),
-                ("Line post-fill", "deposition_post_closure_fill_pct_line"),
-                ("Line open path", "deposition_line_open_path_factor"),
-                ("Residual decay", "deposition_residual_fill_decay_length_a"),
+                ("Hole after-close fill %", "deposition_post_closure_fill_pct_hole"),
+                ("Line after-close fill %", "deposition_post_closure_fill_pct_line"),
                 *options,
             ]
-            if self.active_emulator_number() in (0, 5):
-                options = [
-                    ("Inhibit %", "inhibition_strength_pct"),
-                    ("Inhibit depth", "inhibition_penetration_depth_a"),
-                    ("Inhibit floor", "inhibition_min_growth_ratio"),
-                    ("Bottom boost", "inhibition_bottom_boost_pct"),
-                    ("PEALD recomb", "inhibition_peald_recombination_pct"),
-                    ("Inhibit smooth", "inhibition_smoothing_a"),
-                    *options,
-                ]
+        if self._active_emulator_supports_inhibition():
+            options = [
+                ("Inhibit %", "inhibition_strength_pct"),
+                ("Inhibit depth", "inhibition_penetration_depth_a"),
+                ("Inhibit power", "inhibition_decay_power"),
+                ("Inhibit floor", "inhibition_min_growth_ratio"),
+                ("Bottom boost", "inhibition_bottom_boost_pct"),
+                ("PEALD recomb", "inhibition_peald_recombination_pct"),
+                ("Inhibit smooth", "inhibition_smoothing_a"),
+                *options,
+            ]
 
         self.cmb_split_parameter.blockSignals(True)
         self.cmb_split_parameter.clear()
@@ -4824,6 +4970,7 @@ class TrenchDepoWindow(QMainWindow):
         supports_reflected = self._active_emulator_supports_reflected_ion()
         supports_redepo = self._active_emulator_supports_redeposition()
         supports_depth = self._active_emulator_supports_depth_deposition()
+        supports_inhibition = self._active_emulator_supports_inhibition()
         supports_lf = self._active_emulator_supports_lf_overhang()
         supports_closure = self._active_emulator_supports_closure_redepo()
 
@@ -4836,6 +4983,11 @@ class TrenchDepoWindow(QMainWindow):
         self.chk_reflected_ion.setChecked(bool(supports_reflected and settings.get("reflected", supports_reflected)))
         self.chk_redepo.setChecked(bool(supports_redepo and settings.get("redepo", supports_redepo)))
         self.chk_depth_deposition.setChecked(bool(supports_depth and settings.get("depth", supports_depth)))
+        self.chk_inhibition_deposition.setChecked(
+            bool(supports_inhibition and settings.get("inhibition", self.active_emulator_number() == 5))
+        )
+        if supports_depth and supports_inhibition and self.chk_depth_deposition.isChecked() and self.chk_inhibition_deposition.isChecked():
+            self.chk_depth_deposition.setChecked(False)
         self.chk_lf_overhang.setChecked(bool(supports_lf and settings.get("lf", supports_lf)))
         self.chk_closure_redepo.setChecked(bool(supports_closure and settings.get("closure", supports_closure)))
 
@@ -4870,6 +5022,27 @@ class TrenchDepoWindow(QMainWindow):
         self.spin_depth_decay_k.setValue(float(settings.get("depth_k", self.spin_depth_decay_k.value())))
         self.spin_depth_decay_power.setValue(float(settings.get("depth_power", self.spin_depth_decay_power.value())))
         self.spin_depth_min_ratio_pct.setValue(float(settings.get("depth_min", self.spin_depth_min_ratio_pct.value())))
+        self.spin_inhibition_strength.setValue(
+            float(settings.get("inhibition_strength", self.spin_inhibition_strength.value()))
+        )
+        self.spin_inhibition_penetration.setValue(
+            float(settings.get("inhibition_depth", self.spin_inhibition_penetration.value()))
+        )
+        self.spin_inhibition_decay_power.setValue(
+            float(settings.get("inhibition_power", settings.get("depth_power", self.spin_inhibition_decay_power.value())))
+        )
+        self.spin_inhibition_min_growth.setValue(
+            float(settings.get("inhibition_min", settings.get("depth_min", self.spin_inhibition_min_growth.value())))
+        )
+        self.spin_inhibition_bottom_boost.setValue(
+            float(settings.get("inhibition_bottom", self.spin_inhibition_bottom_boost.value()))
+        )
+        self.spin_inhibition_recombination.setValue(
+            float(settings.get("inhibition_recomb", self.spin_inhibition_recombination.value()))
+        )
+        self.spin_inhibition_smoothing.setValue(
+            float(settings.get("inhibition_smooth", self.spin_inhibition_smoothing.value()))
+        )
 
         self.sync_sputter_curve_from_spins()
         self.sync_ion_transmission_editor_from_spins()
@@ -4892,6 +5065,7 @@ class TrenchDepoWindow(QMainWindow):
         supports_reflected_ion = self._active_emulator_supports_reflected_ion()
         supports_redeposition = self._active_emulator_supports_redeposition()
         supports_depth_deposition = self._active_emulator_supports_depth_deposition()
+        supports_inhibition = self._active_emulator_supports_inhibition()
         supports_lf_overhang = self._active_emulator_supports_lf_overhang()
         supports_closure_redepo = self._active_emulator_supports_closure_redepo()
 
@@ -4923,6 +5097,8 @@ class TrenchDepoWindow(QMainWindow):
             widget.setVisible(supports_redeposition)
         for widget in self._depth_deposition_widgets:
             widget.setVisible(supports_depth_deposition)
+        for widget in self._inhibition_widgets:
+            widget.setVisible(supports_inhibition)
         for widget in self._lf_overhang_widgets:
             widget.setVisible(supports_lf_overhang)
         for widget in self._closure_redepo_widgets:
@@ -4961,11 +5137,11 @@ class TrenchDepoWindow(QMainWindow):
             self.spin_redepo_distance_power.setRange(0.0, 4.0)
             self.spin_redepo_distance_power.setSingleStep(0.1)
         if number == 0:
-            self.depth_profile_group.setTitle("0 Integrated Depth/Inhibition Map")
+            self.depth_profile_group.setTitle("0 Integrated Depth Depletion Map")
         elif number == 5:
-            self.depth_profile_group.setTitle("5 Inhibition Base Depth Map")
+            self.depth_profile_group.setTitle("5 Inhibition Base Map")
         else:
-            self.depth_profile_group.setTitle("4 Depth Deposition Map")
+            self.depth_profile_group.setTitle("4 Depth Depletion Map")
 
         if supports_sputter:
             if changed:
@@ -4974,29 +5150,34 @@ class TrenchDepoWindow(QMainWindow):
                 self.chk_reflected_ion.setChecked(supports_reflected_ion)
                 self.chk_redepo.setChecked(supports_redeposition)
                 self.chk_depth_deposition.setChecked(supports_depth_deposition)
+                self.chk_inhibition_deposition.setChecked(False)
                 self.chk_lf_overhang.setChecked(supports_lf_overhang)
                 self.chk_closure_redepo.setChecked(supports_closure_redepo)
                 if number == 0:
                     self.cmb_depth_feature_type.setCurrentIndex(0)
             elif not supports_depth_deposition:
                 self.chk_depth_deposition.setChecked(False)
+            if not supports_inhibition:
+                self.chk_inhibition_deposition.setChecked(False)
             if number == 0:
-                self.chk_depth_deposition.setText("Depth/Inhibition deposition")
-                self.lbl_depth_depo_section.setText("0 Depth/Inhibition deposition")
+                self.chk_depth_deposition.setText("Depth depletion")
+                self.chk_inhibition_deposition.setText("Inhibition deposition")
+                self.lbl_depth_depo_section.setText("0 Depth depletion deposition")
+                self.lbl_inhibition_section.setText("0 Inhibition deposition")
                 self.lbl_depth_parameter_help.setText(
-                    "통합 모델: conformal deposition 위에 direct/ion etch, 6번 normal/specular lobe redepo, depth/inhibition deposition을 결합합니다. Reflected/LF/closure는 제외됩니다."
+                    "통합 모델: direct/ion etch와 6번 normal/specular lobe redepo 위에 Depth depletion 또는 Inhibition deposition을 선택해서 결합합니다. Reflected/LF/closure는 제외됩니다."
                 )
                 self.edit_request_note.setPlaceholderText("요청사항 / 통합모델 리데포/감쇠/인히비션 관찰 메모를 적으면 run 파일명과 요약에 같이 들어갑니다.")
             elif supports_ion_transmission:
-                self.chk_depth_deposition.setText("Depth-dependent deposition")
+                self.chk_depth_deposition.setText("Depth depletion deposition")
                 self.edit_request_note.setPlaceholderText("요청사항 / ion transmission, shadowing 메모를 적으면 run 파일명과 요약에 같이 들어갑니다.")
             elif number == 6:
-                self.chk_depth_deposition.setText("Depth-dependent deposition")
+                self.chk_depth_deposition.setText("Depth depletion deposition")
                 self.edit_request_note.setPlaceholderText("요청사항 / 반사 hit 기반 Gaussian+ballistic redepo 메모를 적으면 run 파일명과 요약에 같이 들어갑니다.")
             else:
-                self.chk_depth_deposition.setText("Depth-dependent deposition")
+                self.chk_depth_deposition.setText("Depth depletion deposition")
                 self.edit_request_note.setPlaceholderText("요청사항 / etch 물리 메모를 적으면 run 파일명과 요약에 같이 들어갑니다.")
-        elif supports_depth_deposition:
+        elif supports_depth_deposition or supports_inhibition:
             self.chk_sputter.setChecked(False)
             self.chk_ion_transmission.setChecked(False)
             self.chk_reflected_ion.setChecked(False)
@@ -5004,24 +5185,26 @@ class TrenchDepoWindow(QMainWindow):
             self.chk_lf_overhang.setChecked(False)
             self.chk_closure_redepo.setChecked(False)
             if changed:
-                self.chk_depth_deposition.setChecked(True)
+                self.chk_depth_deposition.setChecked(supports_depth_deposition)
+                self.chk_inhibition_deposition.setChecked(supports_inhibition)
                 self.cmb_depth_feature_type.setCurrentIndex(0)
             if number == 5:
-                self.chk_depth_deposition.setText("Inhibition deposition")
-                self.lbl_depth_depo_section.setText("5 Inhibition-weighted deposition")
+                self.chk_depth_deposition.setChecked(False)
+                self.chk_inhibition_deposition.setText("Inhibition deposition")
+                self.lbl_inhibition_section.setText("5 Inhibition-weighted deposition")
                 self.lbl_depth_parameter_help.setText(
-                    "Inhibition map: active structure fills the background."
+                    "Inhibition model: 상부/노출부 성장을 억제하고 깊은 쪽 상대 성장을 보강합니다. Depth depletion과 별도 모델입니다."
                 )
                 self.edit_request_note.setPlaceholderText("요청사항 / inhibition 메모를 적으면 run 파일명과 요약에 같이 들어갑니다.")
             else:
-                self.chk_depth_deposition.setText("Depth-dependent deposition")
-                self.lbl_depth_depo_section.setText("4 Depth-dependent deposition")
+                self.chk_depth_deposition.setText("Depth depletion deposition")
+                self.lbl_depth_depo_section.setText("4 Depth depletion deposition")
                 self.lbl_depth_parameter_help.setText(
-                    "Depth map: active structure fills the background."
+                    "Depth depletion: 깊이/등가 AR이 커질수록 deposition 양을 줄입니다."
                 )
                 self.edit_request_note.setPlaceholderText("요청사항 / depth fill 메모를 적으면 run 파일명과 요약에 같이 들어갑니다.")
         else:
-            self.chk_depth_deposition.setText("Depth-dependent deposition")
+            self.chk_depth_deposition.setText("Depth depletion deposition")
             self.chk_sputter.setChecked(False)
             self.chk_ion_transmission.setChecked(False)
             self.chk_reflected_ion.setChecked(False)
@@ -5029,6 +5212,7 @@ class TrenchDepoWindow(QMainWindow):
             self.chk_lf_overhang.setChecked(False)
             self.chk_closure_redepo.setChecked(False)
             self.chk_depth_deposition.setChecked(False)
+            self.chk_inhibition_deposition.setChecked(False)
             if number == 1:
                 self.edit_request_note.setPlaceholderText("요청사항 / conformal depo 메모를 적으면 run 파일명과 요약에 같이 들어갑니다.")
             else:
@@ -5245,7 +5429,22 @@ class TrenchDepoWindow(QMainWindow):
             and self.btn_depth_advanced.isChecked()
         )
         for widget in self._depth_advanced_widgets():
-            widget.setVisible(show_advanced)
+            widget.setVisible(False)
+        if not show_advanced:
+            return
+        feature_type = str(self.cmb_depth_feature_type.currentData() or "hole")
+        active_fill_widgets = (
+            (self.lbl_depth_post_fill_line, self.spin_depth_post_fill_line_pct)
+            if feature_type == "line"
+            else (self.lbl_depth_post_fill_hole, self.spin_depth_post_fill_hole_pct)
+        )
+        for widget in [
+            self.lbl_depth_closure_section,
+            self.lbl_depth_closure_threshold,
+            self.spin_depth_closure_threshold,
+            *active_fill_widgets,
+        ]:
+            widget.setVisible(True)
 
     def _sync_collapsible_section(
         self,
@@ -5273,9 +5472,24 @@ class TrenchDepoWindow(QMainWindow):
         supports_reflected_ion = self._active_emulator_supports_reflected_ion()
         supports_redeposition = self._active_emulator_supports_redeposition()
         supports_depth_deposition = self._active_emulator_supports_depth_deposition()
+        supports_inhibition = self._active_emulator_supports_inhibition()
         supports_lf_overhang = self._active_emulator_supports_lf_overhang()
         supports_closure_redepo = self._active_emulator_supports_closure_redepo()
         etch_enabled = bool(supports_sputter and self.chk_sputter.isChecked())
+        sender = self.sender()
+        if supports_depth_deposition and supports_inhibition:
+            if sender is self.chk_inhibition_deposition and self.chk_inhibition_deposition.isChecked():
+                self.chk_depth_deposition.blockSignals(True)
+                try:
+                    self.chk_depth_deposition.setChecked(False)
+                finally:
+                    self.chk_depth_deposition.blockSignals(False)
+            elif sender is self.chk_depth_deposition and self.chk_depth_deposition.isChecked():
+                self.chk_inhibition_deposition.blockSignals(True)
+                try:
+                    self.chk_inhibition_deposition.setChecked(False)
+                finally:
+                    self.chk_inhibition_deposition.blockSignals(False)
 
         direct_sputter_detail_widgets = [
             self.lbl_sputter_section,
@@ -5475,8 +5689,8 @@ class TrenchDepoWindow(QMainWindow):
 
         self.chk_depth_deposition.setEnabled(supports_depth_deposition)
         depth_enabled = bool(supports_depth_deposition and self.chk_depth_deposition.isChecked())
-        for widget in [
-            self.lbl_depth_depo_section,
+        depth_detail_widgets = [
+            self.lbl_depth_feature_section,
             self.lbl_depth_feature_type,
             self.cmb_depth_feature_type,
             self.lbl_depth_feature_width,
@@ -5485,12 +5699,14 @@ class TrenchDepoWindow(QMainWindow):
             self.spin_depth_feature_depth,
             self.lbl_depth_feature_length,
             self.spin_depth_feature_length,
+            self.lbl_depth_curve_section,
             self.lbl_depth_decay_k,
             self.spin_depth_decay_k,
             self.lbl_depth_decay_power,
             self.spin_depth_decay_power,
             self.lbl_depth_min_ratio,
             self.spin_depth_min_ratio_pct,
+            self.btn_depth_advanced,
             self.lbl_depth_closure_section,
             self.lbl_depth_closure_threshold,
             self.spin_depth_closure_threshold,
@@ -5505,42 +5721,13 @@ class TrenchDepoWindow(QMainWindow):
             self.depth_profile_group,
             self.lbl_depth_parameter_help,
             self.depth_deposition_editor,
-        ]:
+        ]
+        for widget in depth_detail_widgets:
             widget.setEnabled(depth_enabled)
         self._sync_collapsible_section(
             section_header=self.lbl_depth_depo_section,
             master_checkbox=self.chk_depth_deposition,
-            detail_widgets=[
-                self.lbl_depth_feature_type,
-                self.cmb_depth_feature_type,
-                self.lbl_depth_feature_width,
-                self.spin_depth_feature_width,
-                self.lbl_depth_feature_depth,
-                self.spin_depth_feature_depth,
-                self.lbl_depth_feature_length,
-                self.spin_depth_feature_length,
-                self.lbl_depth_decay_k,
-                self.spin_depth_decay_k,
-                self.lbl_depth_decay_power,
-                self.spin_depth_decay_power,
-                self.lbl_depth_min_ratio,
-                self.spin_depth_min_ratio_pct,
-                self.btn_depth_advanced,
-                self.lbl_depth_closure_section,
-                self.lbl_depth_closure_threshold,
-                self.spin_depth_closure_threshold,
-                self.lbl_depth_post_fill_hole,
-                self.spin_depth_post_fill_hole_pct,
-                self.lbl_depth_post_fill_line,
-                self.spin_depth_post_fill_line_pct,
-                self.lbl_depth_line_open_path,
-                self.spin_depth_line_open_path,
-                self.lbl_depth_residual_decay,
-                self.spin_depth_residual_decay,
-                self.depth_profile_group,
-                self.lbl_depth_parameter_help,
-                self.depth_deposition_editor,
-            ],
+            detail_widgets=depth_detail_widgets,
             supported=supports_depth_deposition,
             checkbox_enabled=True,
             expanded=depth_enabled,
@@ -5549,9 +5736,61 @@ class TrenchDepoWindow(QMainWindow):
         length_enabled = bool(
             depth_enabled and str(self.cmb_depth_feature_type.currentData() or "hole") == "line"
         )
+        self.lbl_depth_feature_length.setVisible(length_enabled)
+        self.spin_depth_feature_length.setVisible(length_enabled)
         self.lbl_depth_feature_length.setEnabled(length_enabled)
         self.spin_depth_feature_length.setEnabled(length_enabled)
         self._sync_depth_advanced_visibility()
+
+        self.chk_inhibition_deposition.setEnabled(supports_inhibition)
+        inhibition_enabled = bool(supports_inhibition and self.chk_inhibition_deposition.isChecked())
+        inhibition_detail_widgets = [
+            self.lbl_inhibition_strength,
+            self.spin_inhibition_strength,
+            self.lbl_inhibition_penetration,
+            self.spin_inhibition_penetration,
+            self.lbl_inhibition_decay_power,
+            self.spin_inhibition_decay_power,
+            self.lbl_inhibition_min_growth,
+            self.spin_inhibition_min_growth,
+            self.lbl_inhibition_bottom_boost,
+            self.spin_inhibition_bottom_boost,
+            self.lbl_inhibition_recombination,
+            self.spin_inhibition_recombination,
+            self.lbl_inhibition_smoothing,
+            self.spin_inhibition_smoothing,
+        ]
+        for widget in inhibition_detail_widgets:
+            widget.setEnabled(inhibition_enabled)
+        self._sync_collapsible_section(
+            section_header=self.lbl_inhibition_section,
+            master_checkbox=self.chk_inhibition_deposition,
+            detail_widgets=inhibition_detail_widgets,
+            supported=supports_inhibition,
+            checkbox_enabled=True,
+            expanded=inhibition_enabled,
+            detail_enabled=inhibition_enabled,
+        )
+        feature_geometry_visible = bool((supports_depth_deposition or supports_inhibition) and (depth_enabled or inhibition_enabled))
+        feature_geometry_widgets = [
+            self.lbl_depth_feature_section,
+            self.lbl_depth_feature_type,
+            self.cmb_depth_feature_type,
+            self.lbl_depth_feature_width,
+            self.spin_depth_feature_width,
+            self.lbl_depth_feature_depth,
+            self.spin_depth_feature_depth,
+        ]
+        for widget in feature_geometry_widgets:
+            widget.setVisible(feature_geometry_visible)
+            widget.setEnabled(feature_geometry_visible)
+        line_geometry_visible = bool(
+            feature_geometry_visible and str(self.cmb_depth_feature_type.currentData() or "hole") == "line"
+        )
+        self.lbl_depth_feature_length.setVisible(line_geometry_visible)
+        self.spin_depth_feature_length.setVisible(line_geometry_visible)
+        self.lbl_depth_feature_length.setEnabled(line_geometry_visible)
+        self.spin_depth_feature_length.setEnabled(line_geometry_visible)
 
     def reset_defaults(self) -> None:
         supports_sputter = self._active_emulator_supports_sputter()
@@ -5559,6 +5798,7 @@ class TrenchDepoWindow(QMainWindow):
         supports_reflected_ion = self._active_emulator_supports_reflected_ion()
         supports_redeposition = self._active_emulator_supports_redeposition()
         supports_depth_deposition = self._active_emulator_supports_depth_deposition()
+        supports_inhibition = self._active_emulator_supports_inhibition()
         supports_lf_overhang = self._active_emulator_supports_lf_overhang()
         supports_closure_redepo = self._active_emulator_supports_closure_redepo()
         self.spin_cycles.setValue(20)
@@ -5569,6 +5809,7 @@ class TrenchDepoWindow(QMainWindow):
         self.chk_reflected_ion.setChecked(supports_reflected_ion)
         self.chk_redepo.setChecked(supports_redeposition)
         self.chk_depth_deposition.setChecked(supports_depth_deposition)
+        self.chk_inhibition_deposition.setChecked(supports_inhibition and self.active_emulator_number() == 5)
         self.chk_lf_overhang.setChecked(supports_lf_overhang)
         self.chk_closure_redepo.setChecked(supports_closure_redepo)
         self.spin_ion_start_depth.setValue(0.0)
@@ -5625,6 +5866,13 @@ class TrenchDepoWindow(QMainWindow):
         self.spin_depth_post_fill_line_pct.setValue(20.0)
         self.spin_depth_line_open_path.setValue(1.0)
         self.spin_depth_residual_decay.setValue(1175.0)
+        self.spin_inhibition_strength.setValue(85.0)
+        self.spin_inhibition_penetration.setValue(1100.0)
+        self.spin_inhibition_decay_power.setValue(1.2)
+        self.spin_inhibition_min_growth.setValue(8.0)
+        self.spin_inhibition_bottom_boost.setValue(20.0)
+        self.spin_inhibition_recombination.setValue(35.0)
+        self.spin_inhibition_smoothing.setValue(45.0)
         self.spin_sputter_strength.setValue(4.0)
         self.spin_sputter_peak_pct.setValue(100.0)
         self.spin_sputter_peak.setValue(55.0)
@@ -5736,6 +5984,8 @@ class TrenchDepoWindow(QMainWindow):
             values = (50.0, 95.0, 15.0, 1, 0.0, 100.0)
         elif parameter == "inhibition_penetration_depth_a":
             values = (400.0, 1800.0, 350.0, 0, 1.0, 200000.0)
+        elif parameter == "inhibition_decay_power":
+            values = (0.8, 2.0, 0.4, 2, 0.05, 8.0)
         elif parameter == "inhibition_min_growth_ratio":
             values = (0.02, 0.20, 0.06, 2, 0.0, 1.0)
         elif parameter == "inhibition_bottom_boost_pct":
@@ -5766,6 +6016,7 @@ class TrenchDepoWindow(QMainWindow):
         supports_reflected_ion = self._active_emulator_supports_reflected_ion()
         supports_redeposition = self._active_emulator_supports_redeposition()
         supports_depth_deposition = self._active_emulator_supports_depth_deposition()
+        supports_inhibition = self._active_emulator_supports_inhibition()
         supports_lf_overhang = self._active_emulator_supports_lf_overhang()
         supports_closure_redepo = self._active_emulator_supports_closure_redepo()
         etch_enabled = bool(supports_sputter and self.chk_sputter.isChecked())
@@ -5870,18 +6121,16 @@ class TrenchDepoWindow(QMainWindow):
             deposition_residual_fill_distribution="exponential_from_closure",
             deposition_conserve_volume=True,
             inhibition_enabled=bool(
-                active_emulator in (0, 5)
-                and supports_depth_deposition
-                and self.chk_depth_deposition.isChecked()
+                supports_inhibition and self.chk_inhibition_deposition.isChecked()
             ),
             inhibition_process_model="hybrid",
-            inhibition_strength_pct=85.0,
-            inhibition_penetration_depth_a=max(80.0, float(self.spin_depth_feature_depth.value()) * 0.24),
-            inhibition_decay_power=float(self.spin_depth_decay_power.value()),
-            inhibition_min_growth_ratio=float(self.spin_depth_min_ratio_pct.value()) / 100.0,
-            inhibition_bottom_boost_pct=20.0,
-            inhibition_peald_recombination_pct=35.0,
-            inhibition_smoothing_a=45.0,
+            inhibition_strength_pct=float(self.spin_inhibition_strength.value()),
+            inhibition_penetration_depth_a=float(self.spin_inhibition_penetration.value()),
+            inhibition_decay_power=float(self.spin_inhibition_decay_power.value()),
+            inhibition_min_growth_ratio=float(self.spin_inhibition_min_growth.value()) / 100.0,
+            inhibition_bottom_boost_pct=float(self.spin_inhibition_bottom_boost.value()),
+            inhibition_peald_recombination_pct=float(self.spin_inhibition_recombination.value()),
+            inhibition_smoothing_a=float(self.spin_inhibition_smoothing.value()),
         )
 
     @staticmethod
@@ -5964,7 +6213,7 @@ class TrenchDepoWindow(QMainWindow):
             [
                 "",
                 "[Deposition modifiers]",
-                f"Depth deposition: {self._on_off(config.deposition_depth_enabled)}",
+                f"Depth depletion: {self._on_off(config.deposition_depth_enabled)}",
             ]
         )
         if config.deposition_depth_enabled:
@@ -5973,12 +6222,17 @@ class TrenchDepoWindow(QMainWindow):
                 if config.deposition_feature_length_a is None
                 else self._fmt_a(float(config.deposition_feature_length_a))
             )
+            post_fill = (
+                float(config.deposition_post_closure_fill_pct_line)
+                if str(config.deposition_feature_type) == "line"
+                else float(config.deposition_post_closure_fill_pct_hole)
+            )
             lines.extend(
                 [
-                    f"Feature: {config.deposition_feature_type} | W {self._fmt_a(config.deposition_feature_width_a)} | D {self._fmt_a(config.deposition_feature_depth_a)} | L {feature_length}",
+                    f"Feature geometry: {config.deposition_feature_type} | W {self._fmt_a(config.deposition_feature_width_a)} | Ref D {self._fmt_a(config.deposition_feature_depth_a)} | L {feature_length}",
                     f"Decay k/power/min: {float(config.deposition_depth_decay_k):.3f} / {float(config.deposition_depth_decay_power):.3f} / {float(config.deposition_min_ratio) * 100.0:.1f}%",
                     f"Closure threshold: {self._fmt_a(config.deposition_closure_threshold_a)}",
-                    f"Post closure hole/line: {float(config.deposition_post_closure_fill_pct_hole) * 100.0:.1f}% / {float(config.deposition_post_closure_fill_pct_line) * 100.0:.1f}%",
+                    f"After-close fill budget: {post_fill * 100.0:.1f}%",
                 ]
             )
 
@@ -6093,6 +6347,7 @@ class TrenchDepoWindow(QMainWindow):
         supports_reflected_ion = self._emulator_supports_reflected_ion(target)
         supports_redeposition = self._emulator_supports_redeposition(target)
         supports_depth_deposition = self._emulator_supports_depth_deposition(target)
+        supports_inhibition = self._emulator_supports_inhibition(target)
         supports_lf_overhang = self._emulator_supports_lf_overhang(target)
         supports_closure_redepo = self._emulator_supports_closure_redepo(target)
         etch_enabled = bool(supports_sputter and (force_model_enabled or self.chk_sputter.isChecked()))
@@ -6174,7 +6429,16 @@ class TrenchDepoWindow(QMainWindow):
             closure_redepo_survival_penalty=float(self.spin_closure_redepo_survival.value()),
             closure_redepo_smoothing_a=float(self.spin_closure_redepo_smoothing.value()),
             deposition_depth_enabled=depth_enabled,
-            inhibition_enabled=bool(target in (0, 5) and depth_enabled),
+            inhibition_enabled=bool(
+                supports_inhibition and (force_model_enabled or self.chk_inhibition_deposition.isChecked())
+            ),
+            inhibition_strength_pct=float(self.spin_inhibition_strength.value()),
+            inhibition_penetration_depth_a=float(self.spin_inhibition_penetration.value()),
+            inhibition_decay_power=float(self.spin_inhibition_decay_power.value()),
+            inhibition_min_growth_ratio=float(self.spin_inhibition_min_growth.value()) / 100.0,
+            inhibition_bottom_boost_pct=float(self.spin_inhibition_bottom_boost.value()),
+            inhibition_peald_recombination_pct=float(self.spin_inhibition_recombination.value()),
+            inhibition_smoothing_a=float(self.spin_inhibition_smoothing.value()),
         )
 
     def _set_run_dir_label(self, run_dir: Optional[Path]) -> None:
@@ -6945,6 +7209,12 @@ class TrenchDepoWindow(QMainWindow):
         self.chk_depth_deposition.setChecked(
             bool(self._active_emulator_supports_depth_deposition() and config.deposition_depth_enabled)
         )
+        self.chk_inhibition_deposition.setChecked(
+            bool(self._active_emulator_supports_inhibition() and config.inhibition_enabled)
+        )
+        if self._active_emulator_supports_depth_deposition() and self._active_emulator_supports_inhibition():
+            if self.chk_depth_deposition.isChecked() and self.chk_inhibition_deposition.isChecked():
+                self.chk_depth_deposition.setChecked(False)
         feature_index = self.cmb_depth_feature_type.findData(str(config.deposition_feature_type))
         self.cmb_depth_feature_type.setCurrentIndex(feature_index if feature_index >= 0 else 0)
         self.spin_depth_feature_width.setValue(float(config.deposition_feature_width_a))
@@ -6960,6 +7230,13 @@ class TrenchDepoWindow(QMainWindow):
         self.spin_depth_post_fill_line_pct.setValue(float(config.deposition_post_closure_fill_pct_line) * 100.0)
         self.spin_depth_line_open_path.setValue(float(config.deposition_line_open_path_factor))
         self.spin_depth_residual_decay.setValue(float(config.deposition_residual_fill_decay_length_a))
+        self.spin_inhibition_strength.setValue(float(config.inhibition_strength_pct))
+        self.spin_inhibition_penetration.setValue(float(config.inhibition_penetration_depth_a))
+        self.spin_inhibition_decay_power.setValue(float(config.inhibition_decay_power))
+        self.spin_inhibition_min_growth.setValue(float(config.inhibition_min_growth_ratio) * 100.0)
+        self.spin_inhibition_bottom_boost.setValue(float(config.inhibition_bottom_boost_pct))
+        self.spin_inhibition_recombination.setValue(float(config.inhibition_peald_recombination_pct))
+        self.spin_inhibition_smoothing.setValue(float(config.inhibition_smoothing_a))
         self.spin_sputter_strength.setValue(float(config.sputter_strength_a_per_cycle))
         self.spin_sputter_peak_pct.setValue(float(config.sputter_peak_pct))
         self.spin_sputter_peak.setValue(float(config.sputter_peak_angle_deg))
