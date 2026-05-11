@@ -4497,8 +4497,6 @@ class TrenchDepoWindow(QMainWindow):
         self.chk_inhibition_deposition.setChecked(
             bool(supports_inhibition and b("inhibition_enabled", self.chk_inhibition_deposition.isChecked()))
         )
-        if supports_depth and supports_inhibition and self.chk_depth_deposition.isChecked() and self.chk_inhibition_deposition.isChecked():
-            self.chk_depth_deposition.setChecked(False)
         self.chk_lf_overhang.setChecked(
             bool(supports_lf and b("lf_overhang_enabled", self.chk_lf_overhang.isChecked()))
         )
@@ -5549,7 +5547,7 @@ class TrenchDepoWindow(QMainWindow):
         return self.active_emulator_number() in (0, 6)
 
     def _active_emulator_supports_depth_deposition(self) -> bool:
-        return self.active_emulator_number() in (0, 4)
+        return self.active_emulator_number() in (0, 4, 5)
 
     def _active_emulator_supports_inhibition(self) -> bool:
         return self.active_emulator_number() in (0, 5)
@@ -5578,7 +5576,7 @@ class TrenchDepoWindow(QMainWindow):
 
     @staticmethod
     def _emulator_supports_depth_deposition(number: int) -> bool:
-        return int(number) in (0, 4)
+        return int(number) in (0, 4, 5)
 
     @staticmethod
     def _emulator_supports_inhibition(number: int) -> bool:
@@ -5783,8 +5781,6 @@ class TrenchDepoWindow(QMainWindow):
         self.chk_inhibition_deposition.setChecked(
             bool(supports_inhibition and settings.get("inhibition", self.active_emulator_number() == 5))
         )
-        if supports_depth and supports_inhibition and self.chk_depth_deposition.isChecked() and self.chk_inhibition_deposition.isChecked():
-            self.chk_depth_deposition.setChecked(False)
         self.chk_lf_overhang.setChecked(bool(supports_lf and settings.get("lf", supports_lf)))
         self.chk_closure_redepo.setChecked(bool(supports_closure and settings.get("closure", supports_closure)))
 
@@ -5968,7 +5964,7 @@ class TrenchDepoWindow(QMainWindow):
                 self.lbl_depth_depo_section.setText("Depth depletion deposition")
                 self.lbl_inhibition_section.setText("Inhibition deposition")
                 self.lbl_depth_parameter_help.setText(
-                    "통합 모델: direct/ion etch와 normal/specular lobe redepo 위에 Depth depletion 또는 Inhibition deposition을 선택해서 결합합니다. Reflected/LF/closure는 제외됩니다."
+                    "통합 모델: direct/ion etch와 normal/specular lobe redepo 위에 Depth depletion과 Inhibition deposition을 각각 또는 동시에 결합합니다. Reflected/LF/closure는 제외됩니다."
                 )
                 self.edit_request_note.setPlaceholderText("요청사항 / 통합모델 리데포/감쇠/인히비션 관찰 메모를 적으면 run 파일명과 요약에 같이 들어갑니다.")
             elif supports_ion_transmission:
@@ -5992,11 +5988,10 @@ class TrenchDepoWindow(QMainWindow):
                 self.chk_inhibition_deposition.setChecked(supports_inhibition)
                 self.cmb_depth_feature_type.setCurrentIndex(0)
             if number == 5:
-                self.chk_depth_deposition.setChecked(False)
                 self.chk_inhibition_deposition.setText("Inhibition deposition")
                 self.lbl_inhibition_section.setText("Inhibition-weighted deposition")
                 self.lbl_depth_parameter_help.setText(
-                    "Inhibition model: 상부/노출부 성장을 억제하고 깊은 쪽 상대 성장을 보강합니다. Depth depletion과 별도 모델입니다."
+                    "Inhibition model: 상부/노출부 성장 억제와 depth depletion을 각각 또는 동시에 켤 수 있습니다. 동시에 켜면 depth ratio와 inhibition growth ratio를 곱해 한 번만 성장시킵니다."
                 )
                 self.edit_request_note.setPlaceholderText("요청사항 / inhibition 메모를 적으면 run 파일명과 요약에 같이 들어갑니다.")
             else:
@@ -6328,20 +6323,6 @@ class TrenchDepoWindow(QMainWindow):
         supports_lf_overhang = self._active_emulator_supports_lf_overhang()
         supports_closure_redepo = self._active_emulator_supports_closure_redepo()
         etch_enabled = bool(supports_sputter and self.chk_sputter.isChecked())
-        sender = self.sender()
-        if supports_depth_deposition and supports_inhibition:
-            if sender is self.chk_inhibition_deposition and self.chk_inhibition_deposition.isChecked():
-                self.chk_depth_deposition.blockSignals(True)
-                try:
-                    self.chk_depth_deposition.setChecked(False)
-                finally:
-                    self.chk_depth_deposition.blockSignals(False)
-            elif sender is self.chk_depth_deposition and self.chk_depth_deposition.isChecked():
-                self.chk_inhibition_deposition.blockSignals(True)
-                try:
-                    self.chk_inhibition_deposition.setChecked(False)
-                finally:
-                    self.chk_inhibition_deposition.blockSignals(False)
 
         direct_sputter_detail_widgets = [
             self.lbl_sputter_section,
@@ -8071,9 +8052,6 @@ class TrenchDepoWindow(QMainWindow):
         self.chk_inhibition_deposition.setChecked(
             bool(self._active_emulator_supports_inhibition() and config.inhibition_enabled)
         )
-        if self._active_emulator_supports_depth_deposition() and self._active_emulator_supports_inhibition():
-            if self.chk_depth_deposition.isChecked() and self.chk_inhibition_deposition.isChecked():
-                self.chk_depth_deposition.setChecked(False)
         feature_index = self.cmb_depth_feature_type.findData(str(config.deposition_feature_type))
         self.cmb_depth_feature_type.setCurrentIndex(feature_index if feature_index >= 0 else 0)
         self.spin_depth_feature_width.setValue(float(config.deposition_feature_width_a))

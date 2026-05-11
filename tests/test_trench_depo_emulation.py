@@ -217,12 +217,12 @@ class TrenchDepoEmulationTest(unittest.TestCase):
         self.assertFalse(results[0]["lf_overhang_requested"])
         self.assertFalse(results[0]["closure_redepo_enabled"])
         self.assertFalse(results[0]["closure_redepo_requested"])
-        self.assertEqual(results[0]["growth_model"], "integrated_inhibition_depo_sputter_redepo")
+        self.assertEqual(results[0]["growth_model"], "integrated_depth_inhibition_depo_sputter_redepo")
         self.assertEqual(results[1]["growth_model"], "conformal_offset")
         self.assertEqual(results[2]["growth_model"], "direct_angle_sputter")
         self.assertEqual(results[3]["growth_model"], "ion_transmission_direct_sputter")
         self.assertEqual(results[4]["growth_model"], "depth_dependent_deposition")
-        self.assertEqual(results[5]["growth_model"], "inhibition_weighted_deposition")
+        self.assertEqual(results[5]["growth_model"], "depth_inhibition_weighted_deposition")
 
     @unittest.skipIf(pyclipper is None, "pyclipper is not installed")
     def test_model_six_reflection_redepo_records_gaussian_ballistic_fields(self) -> None:
@@ -1366,13 +1366,18 @@ class TrenchDepoEmulationTest(unittest.TestCase):
         )
         fields = result.meta["inhibition_debug_fields_last"]
         summary = result.meta["inhibition_debug_summary_last"]["growth_ratio"]
+        inhibition_summary = result.meta["inhibition_debug_summary_last"]["inhibition_ratio"]
 
         self.assertTrue(result.meta["inhibition_active"])
         self.assertFalse(result.meta["sputter_active"])
-        self.assertEqual(result.meta["growth_model"], "inhibition_weighted_deposition")
-        self.assertEqual(result.meta["propagation"], "vertex_normal_inhibition_depo_post_closure_fill")
+        self.assertTrue(result.meta["deposition_depth_active"])
+        self.assertEqual(result.meta["growth_model"], "depth_inhibition_weighted_deposition")
+        self.assertEqual(result.meta["propagation"], "vertex_normal_depth_inhibition_depo_post_closure_fill")
+        self.assertTrue(fields["depth_ratio_field"])
+        self.assertTrue(fields["inhibition_ratio_field"])
         self.assertTrue(fields["growth_ratio_field"])
-        self.assertLess(summary["top"], summary["bottom"])
+        self.assertLess(inhibition_summary["top"], inhibition_summary["bottom"])
+        self.assertLess(summary["bottom"], inhibition_summary["bottom"])
 
     @unittest.skipIf(pyclipper is None, "pyclipper is not installed")
     def test_depth_deposition_closure_fill_budget_separates_hole_and_line(self) -> None:

@@ -311,6 +311,9 @@ class SputterGaussianEditorTest(unittest.TestCase):
         try:
             window.set_active_emulator_number(5, run=False)
             self.assertFalse(window.inhibition_profile_group.isHidden())
+            self.assertFalse(window.depth_profile_group.isHidden())
+            self.assertTrue(window.chk_depth_deposition.isChecked())
+            self.assertTrue(window.chk_inhibition_deposition.isChecked())
 
             window.spin_inhibition_strength.setValue(64.0)
             self.assertAlmostEqual(window.inhibition_profile_editor.parameters()[0], 64.0, places=6)
@@ -325,6 +328,7 @@ class SputterGaussianEditorTest(unittest.TestCase):
 
             config = window.current_config()
             self.assertTrue(config.inhibition_enabled)
+            self.assertTrue(config.deposition_depth_enabled)
             self.assertAlmostEqual(config.inhibition_strength_pct, 42.0, places=6)
             self.assertAlmostEqual(config.inhibition_penetration_depth_a, 1800.0, places=6)
             self.assertAlmostEqual(config.inhibition_min_growth_ratio, 0.11, places=6)
@@ -332,6 +336,8 @@ class SputterGaussianEditorTest(unittest.TestCase):
             window.chk_inhibition_deposition.setChecked(False)
             window.sync_etch_control_availability()
             self.assertTrue(window.inhibition_profile_group.isHidden())
+            self.assertTrue(window.chk_depth_deposition.isChecked())
+            self.assertFalse(window.depth_profile_group.isHidden())
             window.chk_inhibition_deposition.setChecked(True)
             window.sync_etch_control_availability()
             self.assertFalse(window.inhibition_profile_group.isHidden())
@@ -1189,6 +1195,14 @@ class SputterGaussianEditorTest(unittest.TestCase):
             self.assertTrue(config.deposition_depth_enabled)
             self.assertFalse(config.inhibition_enabled)
             self.assertFalse(config.reflected_ion_enabled)
+
+            window.chk_inhibition_deposition.setChecked(True)
+            window.sync_etch_control_availability()
+            self.assertTrue(window.chk_depth_deposition.isChecked())
+            self.assertTrue(window.chk_inhibition_deposition.isChecked())
+            combined_config = window.current_config()
+            self.assertTrue(combined_config.deposition_depth_enabled)
+            self.assertTrue(combined_config.inhibition_enabled)
         finally:
             window.close()
 

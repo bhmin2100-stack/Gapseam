@@ -921,6 +921,7 @@ class _InhibitionDepositionFluxModel(FluxModel):
         inhibition_peald_recombination_pct: float,
         inhibition_smoothing_a: float,
         reparam_ds_a: float,
+        include_depth_depletion: bool = False,
     ) -> None:
         self.process_model = _inhibition_process_key(process_model)
         self.feature_type = _feature_type_key(feature_type)
@@ -939,6 +940,7 @@ class _InhibitionDepositionFluxModel(FluxModel):
         self.inhibition_peald_recombination_pct = max(0.0, min(100.0, float(inhibition_peald_recombination_pct)))
         self.inhibition_smoothing_a = max(0.0, float(inhibition_smoothing_a))
         self.reparam_ds_a = max(0.5, float(reparam_ds_a))
+        self.include_depth_depletion = bool(include_depth_depletion)
 
     def compute_flux(self, state: SimulationState) -> List[float]:
         pts = [(float(x), float(y)) for x, y in state.surface.points]
@@ -946,7 +948,7 @@ class _InhibitionDepositionFluxModel(FluxModel):
             return []
         surface_y = max(y for _x, y in pts)
         dr = max(0.0, float(state.meta.get("dr", 0.0) or 0.0))
-        ratios = compute_inhibition_deposition_factors(
+        inhibition_ratios = compute_inhibition_deposition_factors(
             pts,
             process_model=self.process_model,
             feature_type=self.feature_type,
@@ -966,15 +968,38 @@ class _InhibitionDepositionFluxModel(FluxModel):
             inhibition_smoothing_a=self.inhibition_smoothing_a,
             reparam_ds_a=self.reparam_ds_a,
         )
+        if self.include_depth_depletion:
+            depth_ratios = compute_depth_deposition_factors(
+                pts,
+                feature_type=self.feature_type,
+                feature_width_a=self.feature_width_a,
+                feature_length_a=self.feature_length_a,
+                attenuation_model=self.attenuation_model,
+                depth_decay_k=self.depth_decay_k,
+                depth_decay_power=self.depth_decay_power,
+                min_depo_ratio=self.min_depo_ratio,
+                use_equivalent_aspect_ratio=self.use_equivalent_aspect_ratio,
+            )
+            ratios = [
+                max(0.0, min(2.0, float(depth_ratio) * float(inhibition_ratio)))
+                for depth_ratio, inhibition_ratio in zip(depth_ratios, inhibition_ratios)
+            ]
+        else:
+            depth_ratios = [1.0 for _ in pts]
+            ratios = [float(value) for value in inhibition_ratios]
         depths = [max(0.0, surface_y - float(y)) for _x, y in pts]
         state.meta["inhibition_debug_fields_last"] = {
             "x": [round(float(x), 6) for x, _y in pts],
             "y": [round(float(y), 6) for _x, y in pts],
             "depth_field": [round(float(v), 6) for v in depths],
+            "depth_ratio_field": [round(float(v), 6) for v in depth_ratios],
+            "inhibition_ratio_field": [round(float(v), 6) for v in inhibition_ratios],
             "growth_ratio_field": [round(float(v), 6) for v in ratios],
             "depo_field": [round(float(dr) * float(v), 6) for v in ratios],
         }
         state.meta["inhibition_debug_summary_last"] = {
+            "depth_ratio": _field_summary_by_depth(pts, depth_ratios),
+            "inhibition_ratio": _field_summary_by_depth(pts, inhibition_ratios),
             "growth_ratio": _field_summary_by_depth(pts, ratios),
             "depo": _field_summary_by_depth(pts, [float(dr) * float(v) for v in ratios]),
         }
@@ -1270,6 +1295,7 @@ def _apply_inhibition_deposition_step(
     deposition_a: float,
     reparam_ds_a: float,
     cycle_index: int,
+    include_depth_depletion: bool = False,
 ) -> None:
     state.meta["dr"] = float(deposition_a)
     state.meta["reparam_ds"] = float(reparam_ds_a)
@@ -1291,6 +1317,7 @@ def _apply_inhibition_deposition_step(
         inhibition_peald_recombination_pct=cfg.inhibition_peald_recombination_pct,
         inhibition_smoothing_a=cfg.inhibition_smoothing_a,
         reparam_ds_a=reparam_ds_a,
+        include_depth_depletion=include_depth_depletion,
     )
     pts = normalize_surface_order(state.surface.points)
     if len(pts) < 2 or deposition_a <= 0.0:
@@ -4471,9 +4498,9 @@ def run_trench_depo(
     inhibition_active = bool(allowed_inhibition and cfg.inhibition_enabled) and angstrom_per_cycle > 0.0
     depth_deposition_active = (
         bool(allowed_depth_deposition and cfg.deposition_depth_enabled)
-        and not inhibition_active
         and angstrom_per_cycle > 0.0
     )
+    depth_inhibition_active = bool(depth_deposition_active and inhibition_active)
     initial_points = _coerce_points(cfg.points)
     depth_cfg = replace(
         cfg,
@@ -4583,6 +4610,8 @@ def run_trench_depo(
             cycle_transport_lines: List[TransportLineSample] = []
             if inhibition_active:
                 state.meta["inhibition_internal_substeps"] = int(substeps)
+                if depth_deposition_active:
+                    state.meta["depth_deposition_internal_substeps"] = int(substeps)
             elif depth_deposition_active:
                 state.meta["depth_deposition_internal_substeps"] = int(substeps)
             for substep_idx in range(substeps):
@@ -4596,6 +4625,7 @@ def run_trench_depo(
                         deposition_a=deposition_sub_a,
                         reparam_ds_a=reparam_ds_a,
                         cycle_index=int(step + 1),
+                        include_depth_depletion=depth_deposition_active,
                     )
                     sputter_deposition_sub_a = 0.0
                 elif depth_deposition_active:
@@ -4850,6 +4880,8 @@ def run_trench_depo(
             if inhibition_active:
                 substeps = _depth_depo_internal_substeps(angstrom_per_cycle, reparam_ds_a)
                 state.meta["inhibition_internal_substeps"] = int(substeps)
+                if depth_deposition_active:
+                    state.meta["depth_deposition_internal_substeps"] = int(substeps)
                 deposition_sub_a = angstrom_per_cycle / float(substeps)
                 for substep_idx in range(substeps):
                     if canceled():
@@ -4860,6 +4892,7 @@ def run_trench_depo(
                         deposition_a=deposition_sub_a,
                         reparam_ds_a=reparam_ds_a,
                         cycle_index=int(step + 1),
+                        include_depth_depletion=depth_deposition_active,
                     )
                     if detail_cb is not None:
                         detail_cb(
@@ -4970,25 +5003,33 @@ def run_trench_depo(
     )
     depth_closure_probe = dict(state.meta.get("depth_closure_probe_last", {}))
     growth_model = (
-        "integrated_inhibition_depo_sputter_closure_redepo"
+        "integrated_depth_inhibition_depo_sputter_closure_redepo"
+        if sputter_active and closure_redepo_requested and depth_inhibition_active
+        else "integrated_inhibition_depo_sputter_closure_redepo"
         if sputter_active and closure_redepo_requested and inhibition_active
         else "integrated_depth_depo_sputter_closure_redepo"
         if sputter_active and closure_redepo_requested and depth_deposition_active
         else "etch_redepo_closure"
         if sputter_active and closure_redepo_requested
         else
-        "integrated_inhibition_depo_sputter_redepo_lf_overhang"
+        "integrated_depth_inhibition_depo_sputter_redepo_lf_overhang"
+        if sputter_active and lf_overhang_requested and redepo_active and depth_inhibition_active
+        else "integrated_inhibition_depo_sputter_redepo_lf_overhang"
         if sputter_active and lf_overhang_requested and redepo_active and inhibition_active
         else "integrated_depth_depo_sputter_redepo_lf_overhang"
         if sputter_active and lf_overhang_requested and redepo_active and depth_deposition_active
         else "integrated_depo_sputter_redepo_lf_overhang"
         if sputter_active and lf_overhang_requested and redepo_active
+        else "integrated_depth_inhibition_depo_sputter_lf_overhang"
+        if sputter_active and lf_overhang_requested and depth_inhibition_active
         else "integrated_inhibition_depo_sputter_lf_overhang"
         if sputter_active and lf_overhang_requested and inhibition_active
         else "integrated_depth_depo_sputter_lf_overhang"
         if sputter_active and lf_overhang_requested and depth_deposition_active
         else "lf_bias_overhang_proxy"
         if sputter_active and lf_overhang_requested
+        else "integrated_depth_inhibition_depo_sputter_redepo"
+        if sputter_active and redepo_active and depth_inhibition_active
         else "integrated_inhibition_depo_sputter_redepo"
         if sputter_active and redepo_active and inhibition_active
         else "integrated_depth_depo_sputter_redepo"
@@ -4997,6 +5038,8 @@ def run_trench_depo(
         if sputter_active and redepo_active and not model6_redepo_active
         else "normal_specular_lobe_redepo"
         if sputter_active and model6_redepo_active
+        else "integrated_depth_inhibition_depo_sputter"
+        if sputter_active and depth_inhibition_active
         else "integrated_inhibition_depo_sputter"
         if sputter_active and inhibition_active
         else "integrated_depth_depo_sputter"
@@ -5005,6 +5048,8 @@ def run_trench_depo(
         if sputter_active and ion_transmission_enabled
         else "direct_angle_sputter"
         if sputter_active
+        else "depth_inhibition_weighted_deposition"
+        if depth_inhibition_active
         else "inhibition_weighted_deposition"
         if inhibition_active
         else "depth_dependent_deposition"
@@ -5012,31 +5057,41 @@ def run_trench_depo(
         else "conformal_offset"
     )
     propagation = (
-        "offset_boolean_plus_inhibition_depo_direct_angle_sputter_closure_redepo"
+        "offset_boolean_plus_depth_inhibition_depo_direct_angle_sputter_closure_redepo"
+        if sputter_active and closure_redepo_requested and depth_inhibition_active
+        else "offset_boolean_plus_inhibition_depo_direct_angle_sputter_closure_redepo"
         if sputter_active and closure_redepo_requested and inhibition_active
         else "offset_boolean_plus_depth_depo_direct_angle_sputter_closure_redepo"
         if sputter_active and closure_redepo_requested and depth_deposition_active
         else "offset_boolean_plus_direct_angle_sputter_closure_redepo"
         if sputter_active and closure_redepo_requested
         else
-        "offset_boolean_plus_inhibition_depo_direct_angle_sputter_redepo_lf_overhang"
+        "offset_boolean_plus_depth_inhibition_depo_direct_angle_sputter_redepo_lf_overhang"
+        if sputter_active and lf_overhang_requested and redepo_active and depth_inhibition_active
+        else "offset_boolean_plus_inhibition_depo_direct_angle_sputter_redepo_lf_overhang"
         if sputter_active and lf_overhang_requested and redepo_active and inhibition_active
         else "offset_boolean_plus_depth_depo_direct_angle_sputter_redepo_lf_overhang"
         if sputter_active and lf_overhang_requested and redepo_active and depth_deposition_active
         else "offset_boolean_plus_direct_angle_sputter_redepo_lf_overhang"
         if sputter_active and lf_overhang_requested and redepo_active
+        else "offset_boolean_plus_depth_inhibition_depo_direct_angle_sputter_lf_overhang"
+        if sputter_active and lf_overhang_requested and depth_inhibition_active
         else "offset_boolean_plus_inhibition_depo_direct_angle_sputter_lf_overhang"
         if sputter_active and lf_overhang_requested and inhibition_active
         else "offset_boolean_plus_depth_depo_direct_angle_sputter_lf_overhang"
         if sputter_active and lf_overhang_requested and depth_deposition_active
         else "offset_boolean_plus_direct_angle_sputter_lf_overhang"
         if sputter_active and lf_overhang_requested
+        else "offset_boolean_plus_depth_inhibition_depo_direct_angle_sputter_redepo"
+        if sputter_active and redepo_active and depth_inhibition_active
         else "offset_boolean_plus_inhibition_depo_direct_angle_sputter_redepo"
         if sputter_active and redepo_active and inhibition_active
         else "offset_boolean_plus_depth_depo_direct_angle_sputter_redepo"
         if sputter_active and redepo_active and depth_deposition_active and not model6_redepo_active
         else "offset_boolean_plus_direct_angle_sputter_normal_specular_lobe_redepo"
         if sputter_active and model6_redepo_active
+        else "offset_boolean_plus_depth_inhibition_depo_direct_angle_sputter"
+        if sputter_active and depth_inhibition_active
         else "offset_boolean_plus_inhibition_depo_direct_angle_sputter"
         if sputter_active and inhibition_active
         else "offset_boolean_plus_depth_depo_direct_angle_sputter"
@@ -5045,6 +5100,8 @@ def run_trench_depo(
         if redepo_active
         else "offset_boolean_plus_direct_angle_sputter"
         if sputter_active
+        else "vertex_normal_depth_inhibition_depo_post_closure_fill"
+        if depth_inhibition_active
         else "vertex_normal_inhibition_depo_post_closure_fill"
         if inhibition_active
         else "vertex_normal_depth_depo_post_closure_fill"
