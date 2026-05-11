@@ -27,6 +27,7 @@ from gapsim.emulation.trench_depo import (
 )
 from gapsim.emulation.trench_depo_ui import (
     DepthDepositionProfileEditor,
+    InhibitionProfileEditor,
     IonTransmissionEditor,
     RedepositionLobeEditor,
     SplitTestWindow,
@@ -219,6 +220,47 @@ class SputterGaussianEditorTest(unittest.TestCase):
 
         self.assertFalse(pixmap.isNull())
 
+    def test_inhibition_profile_editor_drags_growth_curve_handles(self) -> None:
+        editor = InhibitionProfileEditor()
+        editor.resize(460, 210)
+        editor.set_feature_depth(4000.0)
+        editor.set_parameters(80.0, 1000.0, 1.1, 5.0, 20.0, 30.0)
+        seen = []
+        editor.parametersChanged.connect(
+            lambda strength, penetration, power, floor, boost, recomb: seen.append(
+                (strength, penetration, power, floor, boost, recomb)
+            )
+        )
+
+        editor._apply_drag("strength", QPointF(editor._x_for_ratio(0.35), editor._y_for_depth_ratio(0.0)))
+        self.assertAlmostEqual(editor.parameters()[0], 65.0, places=6)
+
+        editor._apply_drag("penetration", QPointF(editor._x_for_ratio(0.70), editor._y_for_depth_ratio(0.50)))
+        self.assertAlmostEqual(editor.parameters()[1], 2000.0, places=6)
+
+        editor._apply_drag("floor", QPointF(editor._x_for_ratio(0.15), editor._y_for_depth_ratio(1.0)))
+        self.assertAlmostEqual(editor.parameters()[3], 15.0, places=6)
+
+        editor._apply_drag("boost", QPointF(editor._x_for_ratio(1.20), editor._y_for_depth_ratio(1.0)))
+        self.assertGreater(editor.parameters()[4], 0.0)
+
+        editor._apply_drag("recombination", QPointF(editor._x_for_ratio(0.72), editor._y_for_depth_ratio(0.72)))
+        self.assertGreaterEqual(editor.parameters()[5], 0.0)
+        self.assertLessEqual(editor.parameters()[5], 100.0)
+        self.assertTrue(seen)
+
+    def test_inhibition_profile_editor_renders_growth_ratio_curve(self) -> None:
+        editor = InhibitionProfileEditor()
+        editor.resize(460, 210)
+        editor.set_structure_points(BOWED_JAR_TRENCH_POINTS)
+        editor.set_feature_depth(4700.0)
+        editor.set_parameters(85.0, 1100.0, 1.2, 8.0, 20.0, 35.0)
+        pixmap = QPixmap(editor.size())
+
+        editor.render(pixmap)
+
+        self.assertFalse(pixmap.isNull())
+
     def test_window_keeps_spinboxes_and_curve_editor_in_sync(self) -> None:
         result = TrenchDepoResult(
             frame_steps=[0],
@@ -249,6 +291,51 @@ class SputterGaussianEditorTest(unittest.TestCase):
             self.assertAlmostEqual(window.sputter_curve_editor.parameters()[0], 75.0, places=6)
             self.assertAlmostEqual(window.current_config().sputter_strength_a_per_cycle, 9.5, places=6)
             self.assertAlmostEqual(window.current_config().sputter_peak_pct, 75.0, places=6)
+        finally:
+            window.close()
+
+    def test_window_keeps_inhibition_spinboxes_and_visual_editor_in_sync(self) -> None:
+        result = TrenchDepoResult(
+            frame_steps=[0],
+            frame_profiles=[[(0.0, 0.0), (1.0, 0.0)]],
+            frame_voids=[[]],
+            final_profile=[(0.0, 0.0), (1.0, 0.0)],
+            meta={"cycles": 0},
+        )
+        with (
+            mock.patch("gapsim.emulation.trench_depo_ui.run_trench_depo", return_value=result),
+            mock.patch("gapsim.emulation.trench_depo_ui.QTimer.singleShot"),
+        ):
+            window = TrenchDepoWindow()
+
+        try:
+            window.set_active_emulator_number(5, run=False)
+            self.assertFalse(window.inhibition_profile_group.isHidden())
+
+            window.spin_inhibition_strength.setValue(64.0)
+            self.assertAlmostEqual(window.inhibition_profile_editor.parameters()[0], 64.0, places=6)
+
+            window.apply_inhibition_profile_parameters(42.0, 1800.0, 1.8, 11.0, 33.0, 27.0)
+            self.assertAlmostEqual(window.spin_inhibition_strength.value(), 42.0, places=6)
+            self.assertAlmostEqual(window.spin_inhibition_penetration.value(), 1800.0, places=6)
+            self.assertAlmostEqual(window.spin_inhibition_decay_power.value(), 1.8, places=6)
+            self.assertAlmostEqual(window.spin_inhibition_min_growth.value(), 11.0, places=6)
+            self.assertAlmostEqual(window.spin_inhibition_bottom_boost.value(), 33.0, places=6)
+            self.assertAlmostEqual(window.spin_inhibition_recombination.value(), 27.0, places=6)
+
+            config = window.current_config()
+            self.assertTrue(config.inhibition_enabled)
+            self.assertAlmostEqual(config.inhibition_strength_pct, 42.0, places=6)
+            self.assertAlmostEqual(config.inhibition_penetration_depth_a, 1800.0, places=6)
+            self.assertAlmostEqual(config.inhibition_min_growth_ratio, 0.11, places=6)
+
+            window.chk_inhibition_deposition.setChecked(False)
+            window.sync_etch_control_availability()
+            self.assertTrue(window.inhibition_profile_group.isHidden())
+            window.chk_inhibition_deposition.setChecked(True)
+            window.sync_etch_control_availability()
+            self.assertFalse(window.inhibition_profile_group.isHidden())
+            self.assertAlmostEqual(window.spin_inhibition_strength.value(), 42.0, places=6)
         finally:
             window.close()
 
@@ -1637,6 +1724,7 @@ class SputterGaussianEditorTest(unittest.TestCase):
             self.assertEqual(tuple(window._smoothed_points), smoothed_points)
             self.assertEqual(tuple(window.current_config().points), smoothed_points)
             self.assertEqual(tuple(window.depth_deposition_editor._structure_points), smoothed_points)
+            self.assertEqual(tuple(window.inhibition_profile_editor._structure_points), smoothed_points)
             self.assertIn("입력 미리보기: smooth", window.lbl_status.text())
         finally:
             window.close()

@@ -1237,6 +1237,416 @@ class DepthDepositionProfileEditor(QWidget):
         painter.drawText(QPointF(rect.right() - 64.0, rect.bottom() + 18.0), "depo ratio")
 
 
+class InhibitionProfileEditor(QWidget):
+    parametersChanged = Signal(float, float, float, float, float, float)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._strength_pct = 85.0
+        self._penetration_depth_a = 1100.0
+        self._decay_power = 1.2
+        self._min_growth_pct = 8.0
+        self._bottom_boost_pct = 20.0
+        self._recombination_pct = 35.0
+        self._feature_depth_a = 4700.0
+        self._drag_handle: Optional[str] = None
+        self._structure_points: Tuple[Tuple[float, float], ...] = tuple(BOWED_JAR_TRENCH_POINTS)
+        self.setMinimumHeight(230)
+        self.setMaximumHeight(292)
+        self.setMouseTracking(True)
+        self.setToolTip(
+            "깊이별 growth ratio 곡선입니다. 점을 드래그해서 inhibition 강도, 침투 깊이, "
+            "바닥 회복, PEALD recombination을 조절합니다."
+        )
+
+    def parameters(self) -> Tuple[float, float, float, float, float, float]:
+        return (
+            float(self._strength_pct),
+            float(self._penetration_depth_a),
+            float(self._decay_power),
+            float(self._min_growth_pct),
+            float(self._bottom_boost_pct),
+            float(self._recombination_pct),
+        )
+
+    def set_structure_points(self, points: Sequence[Tuple[float, float]]) -> None:
+        pts = tuple((float(x), float(y)) for x, y in points)
+        if len(pts) < 2 or pts == self._structure_points:
+            return
+        self._structure_points = pts
+        self.update()
+
+    def set_feature_depth(self, feature_depth_a: float) -> None:
+        depth_f = self._clamp(float(feature_depth_a), 1.0, 200000.0)
+        if abs(depth_f - self._feature_depth_a) <= 1e-9:
+            return
+        self._feature_depth_a = depth_f
+        self.update()
+
+    def set_parameters(
+        self,
+        strength_pct: float,
+        penetration_depth_a: float,
+        decay_power: float,
+        min_growth_pct: float,
+        bottom_boost_pct: float,
+        recombination_pct: float,
+    ) -> None:
+        strength_f = self._clamp(float(strength_pct), 0.0, 100.0)
+        penetration_f = self._clamp(float(penetration_depth_a), 1.0, 200000.0)
+        power_f = self._clamp(float(decay_power), 0.05, 8.0)
+        min_f = self._clamp(float(min_growth_pct), 0.0, 100.0)
+        boost_f = self._clamp(float(bottom_boost_pct), 0.0, 100.0)
+        recomb_f = self._clamp(float(recombination_pct), 0.0, 100.0)
+        changed = (
+            abs(strength_f - self._strength_pct) > 1e-9
+            or abs(penetration_f - self._penetration_depth_a) > 1e-9
+            or abs(power_f - self._decay_power) > 1e-9
+            or abs(min_f - self._min_growth_pct) > 1e-9
+            or abs(boost_f - self._bottom_boost_pct) > 1e-9
+            or abs(recomb_f - self._recombination_pct) > 1e-9
+        )
+        self._strength_pct = strength_f
+        self._penetration_depth_a = penetration_f
+        self._decay_power = power_f
+        self._min_growth_pct = min_f
+        self._bottom_boost_pct = boost_f
+        self._recombination_pct = recomb_f
+        if changed:
+            self.update()
+
+    @staticmethod
+    def _clamp(value: float, low: float, high: float) -> float:
+        return max(float(low), min(float(high), float(value)))
+
+    def _plot_rect(self) -> QRectF:
+        return QRectF(44.0, 31.0, max(130.0, float(self.width()) - 80.0), max(82.0, float(self.height()) - 66.0))
+
+    def _ratio_max(self) -> float:
+        return max(1.15, min(2.0, 1.0 + (float(self._bottom_boost_pct) / 100.0) + 0.10))
+
+    def _x_for_ratio(self, ratio: float) -> float:
+        rect = self._plot_rect()
+        t = self._clamp(float(ratio) / self._ratio_max(), 0.0, 1.0)
+        return rect.left() + rect.width() * t
+
+    def _ratio_for_x(self, x: float) -> float:
+        rect = self._plot_rect()
+        if rect.width() <= 1e-9:
+            return 1.0
+        t = self._clamp((float(x) - rect.left()) / rect.width(), 0.0, 1.0)
+        return t * self._ratio_max()
+
+    def _y_for_depth_ratio(self, depth_ratio: float) -> float:
+        rect = self._plot_rect()
+        return rect.top() + rect.height() * self._clamp(float(depth_ratio), 0.0, 1.0)
+
+    def _depth_ratio_for_y(self, y: float) -> float:
+        rect = self._plot_rect()
+        if rect.height() <= 1e-9:
+            return 0.0
+        return self._clamp((float(y) - rect.top()) / rect.height(), 0.0, 1.0)
+
+    def _coverage_at_depth_ratio(self, depth_ratio: float, *, power: Optional[float] = None, recomb_pct: Optional[float] = None) -> float:
+        depth_t = self._clamp(float(depth_ratio), 0.0, 1.0)
+        depth_a = depth_t * max(1.0, float(self._feature_depth_a))
+        penetration = max(1e-9, float(self._penetration_depth_a))
+        power_f = float(self._decay_power if power is None else power)
+        exponent = self._clamp((depth_a / penetration) ** power_f, 0.0, 80.0)
+        depth_decay = math.exp(-exponent)
+        recomb_f = float(self._recombination_pct if recomb_pct is None else recomb_pct) / 100.0
+        recomb_loss = recomb_f * (depth_t ** 1.25) * 0.55
+        return self._clamp(depth_decay - recomb_loss, 0.0, 1.0)
+
+    def _growth_ratio_at_depth_ratio(
+        self,
+        depth_ratio: float,
+        *,
+        strength_pct: Optional[float] = None,
+        power: Optional[float] = None,
+        min_growth_pct: Optional[float] = None,
+        bottom_boost_pct: Optional[float] = None,
+        recomb_pct: Optional[float] = None,
+    ) -> float:
+        depth_t = self._clamp(float(depth_ratio), 0.0, 1.0)
+        strength_f = float(self._strength_pct if strength_pct is None else strength_pct) / 100.0
+        min_f = float(self._min_growth_pct if min_growth_pct is None else min_growth_pct) / 100.0
+        boost_f = float(self._bottom_boost_pct if bottom_boost_pct is None else bottom_boost_pct) / 100.0
+        coverage = self._coverage_at_depth_ratio(depth_t, power=power, recomb_pct=recomb_pct)
+        bottom_relief = boost_f * (depth_t ** 1.35)
+        ratio = 1.0 - (strength_f * coverage) + bottom_relief
+        return self._clamp(ratio, min_f, 1.0 + boost_f)
+
+    def _curve_points(self) -> List[Tuple[float, float]]:
+        return [(idx / 100.0, self._growth_ratio_at_depth_ratio(idx / 100.0)) for idx in range(101)]
+
+    def _decay_power_for_mid_ratio(self, target_ratio: float) -> float:
+        target = self._clamp(float(target_ratio), 0.0, self._ratio_max())
+        best_power = float(self._decay_power)
+        best_error = float("inf")
+        for idx in range(200):
+            power = 0.05 + (7.95 * idx / 199.0)
+            ratio = self._growth_ratio_at_depth_ratio(0.5, power=power)
+            error = abs(ratio - target)
+            if error < best_error:
+                best_power = power
+                best_error = error
+        return self._clamp(best_power, 0.05, 8.0)
+
+    def _bottom_boost_for_bottom_ratio(self, target_ratio: float) -> float:
+        base = self._growth_ratio_at_depth_ratio(1.0, bottom_boost_pct=0.0)
+        return self._clamp((float(target_ratio) - base) * 100.0, 0.0, 100.0)
+
+    def _recombination_for_deep_ratio(self, target_ratio: float) -> float:
+        target = self._clamp(float(target_ratio), 0.0, self._ratio_max())
+        best_recomb = float(self._recombination_pct)
+        best_error = float("inf")
+        for idx in range(201):
+            recomb = float(idx) * 0.5
+            ratio = self._growth_ratio_at_depth_ratio(0.72, recomb_pct=recomb)
+            error = abs(ratio - target)
+            if error < best_error:
+                best_recomb = recomb
+                best_error = error
+        return self._clamp(best_recomb, 0.0, 100.0)
+
+    def _handle_points(self) -> dict[str, QPointF]:
+        penetration_ratio = self._clamp(float(self._penetration_depth_a) / max(1.0, float(self._feature_depth_a)), 0.0, 1.0)
+        return {
+            "strength": QPointF(self._x_for_ratio(self._growth_ratio_at_depth_ratio(0.0)), self._y_for_depth_ratio(0.0)),
+            "penetration": QPointF(
+                self._x_for_ratio(self._growth_ratio_at_depth_ratio(penetration_ratio)),
+                self._y_for_depth_ratio(penetration_ratio),
+            ),
+            "power": QPointF(self._x_for_ratio(self._growth_ratio_at_depth_ratio(0.5)), self._y_for_depth_ratio(0.5)),
+            "floor": QPointF(self._x_for_ratio(float(self._min_growth_pct) / 100.0), self._y_for_depth_ratio(1.0) - 11.0),
+            "boost": QPointF(self._x_for_ratio(self._growth_ratio_at_depth_ratio(1.0)), self._y_for_depth_ratio(1.0)),
+            "recombination": QPointF(self._x_for_ratio(self._growth_ratio_at_depth_ratio(0.72)), self._y_for_depth_ratio(0.72)),
+        }
+
+    def _hit_handle(self, pos: QPointF) -> Optional[str]:
+        best_name: Optional[str] = None
+        best_dist_sq = 13.5 * 13.5
+        for name, hp in self._handle_points().items():
+            dx = float(pos.x() - hp.x())
+            dy = float(pos.y() - hp.y())
+            dist_sq = (dx * dx) + (dy * dy)
+            if dist_sq <= best_dist_sq:
+                best_name = name
+                best_dist_sq = dist_sq
+        return best_name
+
+    def _emit_parameters_changed(self) -> None:
+        self.parametersChanged.emit(
+            float(self._strength_pct),
+            float(self._penetration_depth_a),
+            float(self._decay_power),
+            float(self._min_growth_pct),
+            float(self._bottom_boost_pct),
+            float(self._recombination_pct),
+        )
+
+    def _apply_drag(self, handle: str, pos: QPointF) -> None:
+        target_ratio = self._ratio_for_x(pos.x())
+        if handle == "strength":
+            self._strength_pct = self._clamp((1.0 - target_ratio) * 100.0, 0.0, 100.0)
+        elif handle == "penetration":
+            self._penetration_depth_a = self._clamp(
+                self._depth_ratio_for_y(pos.y()) * max(1.0, float(self._feature_depth_a)),
+                1.0,
+                200000.0,
+            )
+        elif handle == "power":
+            self._decay_power = self._decay_power_for_mid_ratio(target_ratio)
+        elif handle == "floor":
+            self._min_growth_pct = self._clamp(target_ratio * 100.0, 0.0, 100.0)
+        elif handle == "boost":
+            self._bottom_boost_pct = self._bottom_boost_for_bottom_ratio(target_ratio)
+        elif handle == "recombination":
+            self._recombination_pct = self._recombination_for_deep_ratio(target_ratio)
+        else:
+            return
+        self.update()
+        self._emit_parameters_changed()
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if event.button() != Qt.MouseButton.LeftButton:
+            super().mousePressEvent(event)
+            return
+        pos = event.position()
+        handle = self._hit_handle(pos)
+        if handle is None and self._plot_rect().contains(pos):
+            depth_t = self._depth_ratio_for_y(pos.y())
+            if depth_t <= 0.18:
+                handle = "strength"
+            elif depth_t >= 0.86:
+                handle = "boost" if self._ratio_for_x(pos.x()) >= 0.75 else "floor"
+            elif depth_t >= 0.63:
+                handle = "recombination"
+            elif depth_t <= 0.38:
+                handle = "penetration"
+            else:
+                handle = "power"
+        if handle is None:
+            super().mousePressEvent(event)
+            return
+        self._drag_handle = handle
+        self._apply_drag(handle, pos)
+        event.accept()
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        pos = event.position()
+        if self._drag_handle is not None:
+            self._apply_drag(self._drag_handle, pos)
+            event.accept()
+            return
+        handle = self._hit_handle(pos)
+        if handle == "penetration":
+            self.setCursor(Qt.CursorShape.SizeVerCursor)
+        elif handle in {"strength", "power", "floor", "boost", "recombination"}:
+            self.setCursor(Qt.CursorShape.SizeAllCursor)
+        else:
+            self.unsetCursor()
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton and self._drag_handle is not None:
+            self._drag_handle = None
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802, ANN001
+        if self._drag_handle is None:
+            self.unsetCursor()
+        super().leaveEvent(event)
+
+    @staticmethod
+    def _draw_handle(painter: QPainter, point: QPointF, color: QColor, edge: QColor, radius: float = 6.0) -> None:
+        painter.setPen(QPen(edge, 1.7))
+        painter.setBrush(color)
+        painter.drawEllipse(point, radius, radius)
+
+    def paintEvent(self, event) -> None:  # noqa: N802, ANN001
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        rect = self._plot_rect()
+        painter.fillRect(self.rect(), QColor(255, 251, 235))
+        painter.setPen(QPen(QColor(253, 230, 138), 1.0))
+        painter.setBrush(QColor(255, 255, 255))
+        painter.drawRoundedRect(rect, 5.0, 5.0)
+        _draw_structure_background(
+            painter,
+            self._structure_points,
+            rect,
+            fill_color=QColor(254, 243, 199, 70),
+            line_color=QColor(120, 53, 15, 150),
+            line_width=1.8,
+        )
+
+        painter.setPen(QPen(QColor(254, 243, 199), 1.0))
+        for depth_ratio in (0.0, 0.25, 0.5, 0.75, 1.0):
+            y = self._y_for_depth_ratio(depth_ratio)
+            painter.drawLine(QPointF(rect.left(), y), QPointF(rect.right(), y))
+        for ratio in (0.0, 0.5, 1.0):
+            x = self._x_for_ratio(ratio)
+            painter.drawLine(QPointF(x, rect.top()), QPointF(x, rect.bottom()))
+
+        conformal_x = self._x_for_ratio(1.0)
+        curve_points = self._curve_points()
+        suppressed = QPainterPath()
+        boosted = QPainterPath()
+        for idx, (depth_ratio, ratio) in enumerate(curve_points):
+            y = self._y_for_depth_ratio(depth_ratio)
+            x = self._x_for_ratio(ratio)
+            if ratio <= 1.0:
+                if idx == 0:
+                    suppressed.moveTo(QPointF(conformal_x, y))
+                suppressed.lineTo(QPointF(conformal_x, y))
+                suppressed.lineTo(QPointF(x, y))
+            else:
+                if idx == 0:
+                    boosted.moveTo(QPointF(conformal_x, y))
+                boosted.lineTo(QPointF(conformal_x, y))
+                boosted.lineTo(QPointF(x, y))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.fillPath(suppressed, QColor(251, 146, 60, 58))
+        painter.fillPath(boosted, QColor(45, 212, 191, 54))
+
+        _draw_structure_background(
+            painter,
+            self._structure_points,
+            rect,
+            fill_color=QColor(0, 0, 0, 0),
+            line_color=QColor(120, 53, 15, 150),
+            line_width=1.8,
+        )
+
+        painter.setPen(QPen(QColor(37, 99, 235, 155), 1.5, Qt.PenStyle.DashLine))
+        painter.drawLine(QPointF(conformal_x, rect.top()), QPointF(conformal_x, rect.bottom()))
+        painter.setPen(QPen(QColor(30, 64, 175), 1.0))
+        painter.drawText(QPointF(max(rect.left(), conformal_x - 72.0), rect.top() - 8.0), "100%")
+
+        floor_x = self._x_for_ratio(float(self._min_growth_pct) / 100.0)
+        painter.setPen(QPen(QColor(22, 163, 74), 1.4, Qt.PenStyle.DashLine))
+        painter.drawLine(QPointF(floor_x, rect.top()), QPointF(floor_x, rect.bottom()))
+
+        pen_ratio = self._clamp(float(self._penetration_depth_a) / max(1.0, float(self._feature_depth_a)), 0.0, 1.0)
+        pen_y = self._y_for_depth_ratio(pen_ratio)
+        painter.setPen(QPen(QColor(59, 130, 246), 1.4, Qt.PenStyle.DotLine))
+        painter.drawLine(QPointF(rect.left(), pen_y), QPointF(rect.right(), pen_y))
+
+        for depth_ratio in (0.14, 0.32, 0.50, 0.68, 0.86):
+            y = self._y_for_depth_ratio(depth_ratio)
+            ratio = self._growth_ratio_at_depth_ratio(depth_ratio)
+            color = QColor(234, 88, 12, 145) if ratio <= 1.0 else QColor(13, 148, 136, 145)
+            DepthDepositionProfileEditor._draw_arrow(
+                painter,
+                QPointF(conformal_x, y),
+                QPointF(self._x_for_ratio(ratio), y),
+                color,
+                width=1.25,
+            )
+
+        curve = QPainterPath()
+        for idx, (depth_ratio, ratio) in enumerate(curve_points):
+            point = QPointF(self._x_for_ratio(ratio), self._y_for_depth_ratio(depth_ratio))
+            if idx == 0:
+                curve.moveTo(point)
+            else:
+                curve.lineTo(point)
+        painter.setPen(QPen(QColor(180, 83, 9), 2.8))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawPath(curve)
+
+        handles = self._handle_points()
+        self._draw_handle(painter, handles["strength"], QColor(251, 146, 60), QColor(154, 52, 18), 6.4)
+        self._draw_handle(painter, handles["penetration"], QColor(96, 165, 250), QColor(30, 64, 175), 5.9)
+        self._draw_handle(painter, handles["power"], QColor(196, 181, 253), QColor(91, 33, 182), 5.7)
+        self._draw_handle(painter, handles["floor"], QColor(134, 239, 172), QColor(22, 101, 52), 5.7)
+        self._draw_handle(painter, handles["boost"], QColor(45, 212, 191), QColor(15, 118, 110), 6.0)
+        self._draw_handle(painter, handles["recombination"], QColor(253, 164, 175), QColor(159, 18, 57), 5.7)
+
+        painter.setPen(QPen(QColor(15, 23, 42), 1.0))
+        painter.drawText(
+            QPointF(rect.left(), 18.0),
+            (
+                f"Inhibit {self._strength_pct:.1f}%    "
+                f"Pen {self._penetration_depth_a:.0f} A    "
+                f"P {self._decay_power:.2f}    "
+                f"Floor {self._min_growth_pct:.1f}%    "
+                f"Boost {self._bottom_boost_pct:.1f}%    "
+                f"Recomb {self._recombination_pct:.1f}%"
+            ),
+        )
+        painter.setPen(QPen(QColor(120, 113, 108), 1.0))
+        painter.drawText(QPointF(rect.left() - 28.0, rect.top() + 4.0), "0")
+        painter.drawText(QPointF(rect.left() - 34.0, rect.bottom() + 4.0), "100")
+        painter.drawText(QPointF(rect.right() - 76.0, rect.bottom() + 18.0), "growth ratio")
+
+
 class RedepositionLobeEditor(QWidget):
     parametersChanged = Signal(float, float, float)
 
@@ -2217,6 +2627,7 @@ class TrenchDepoWindow(QMainWindow):
         self._syncing_ion_curve = False
         self._syncing_redepo_lobe = False
         self._syncing_depth_curve = False
+        self._syncing_inhibition_curve = False
         self._active_emulator_number = 0
         self._emulator_numbers = load_created_emulator_numbers()
         self._emulator_buttons: dict[int, QPushButton] = {}
@@ -2567,6 +2978,16 @@ class TrenchDepoWindow(QMainWindow):
             float(self.spin_depth_decay_power.value()),
             float(self.spin_depth_min_ratio_pct.value()),
             float(self.spin_depth_closure_threshold.value()),
+        )
+        self.inhibition_profile_editor = InhibitionProfileEditor()
+        self.inhibition_profile_editor.set_feature_depth(float(self.spin_depth_feature_depth.value()))
+        self.inhibition_profile_editor.set_parameters(
+            float(self.spin_inhibition_strength.value()),
+            float(self.spin_inhibition_penetration.value()),
+            float(self.spin_inhibition_decay_power.value()),
+            float(self.spin_inhibition_min_growth.value()),
+            float(self.spin_inhibition_bottom_boost.value()),
+            float(self.spin_inhibition_recombination.value()),
         )
         self.spin_sputter_strength = QDoubleSpinBox()
         self.spin_sputter_strength.setRange(0.0, 100.0)
@@ -3336,6 +3757,12 @@ class TrenchDepoWindow(QMainWindow):
         depth_profile_layout.addWidget(self.depth_deposition_editor)
         depth_profile_group.setLayout(depth_profile_layout)
 
+        inhibition_profile_group = QGroupBox("Inhibition Visual Editor")
+        inhibition_profile_layout = QVBoxLayout()
+        inhibition_profile_layout.setContentsMargins(10, 10, 10, 10)
+        inhibition_profile_layout.addWidget(self.inhibition_profile_editor)
+        inhibition_profile_group.setLayout(inhibition_profile_layout)
+
         self.emulator_group = emulator_group
         self.parameter_preset_group = parameter_preset_group
         self.params_group = params_group
@@ -3345,6 +3772,7 @@ class TrenchDepoWindow(QMainWindow):
         self.note_group = note_group
         self.ion_map_group = ion_map_group
         self.depth_profile_group = depth_profile_group
+        self.inhibition_profile_group = inhibition_profile_group
         self.gaussian_group = gaussian_group
         self._sputter_widgets = [
             self.lbl_etch_section,
@@ -3462,6 +3890,8 @@ class TrenchDepoWindow(QMainWindow):
             self.spin_inhibition_recombination,
             self.lbl_inhibition_smoothing,
             self.spin_inhibition_smoothing,
+            self.inhibition_profile_group,
+            self.inhibition_profile_editor,
         ]
         self._lf_overhang_widgets = [
             self.lbl_lf_overhang_section,
@@ -3541,6 +3971,7 @@ class TrenchDepoWindow(QMainWindow):
         progress_panel_layout.addWidget(ion_map_group)
         progress_panel_layout.addWidget(self.redepo_lobe_group)
         progress_panel_layout.addWidget(depth_profile_group)
+        progress_panel_layout.addWidget(self.inhibition_profile_group)
         progress_panel_layout.addWidget(note_group)
         progress_panel_nav = QHBoxLayout()
         progress_panel_nav.setContentsMargins(0, 0, 0, 0)
@@ -3688,6 +4119,14 @@ class TrenchDepoWindow(QMainWindow):
         self.spin_depth_min_ratio_pct.valueChanged.connect(self.sync_depth_deposition_editor_from_spins)
         self.spin_depth_closure_threshold.valueChanged.connect(self.sync_depth_deposition_editor_from_spins)
         self.depth_deposition_editor.parametersChanged.connect(self.apply_depth_deposition_editor_parameters)
+        self.spin_depth_feature_depth.valueChanged.connect(self.sync_inhibition_profile_from_spins)
+        self.spin_inhibition_strength.valueChanged.connect(self.sync_inhibition_profile_from_spins)
+        self.spin_inhibition_penetration.valueChanged.connect(self.sync_inhibition_profile_from_spins)
+        self.spin_inhibition_decay_power.valueChanged.connect(self.sync_inhibition_profile_from_spins)
+        self.spin_inhibition_min_growth.valueChanged.connect(self.sync_inhibition_profile_from_spins)
+        self.spin_inhibition_bottom_boost.valueChanged.connect(self.sync_inhibition_profile_from_spins)
+        self.spin_inhibition_recombination.valueChanged.connect(self.sync_inhibition_profile_from_spins)
+        self.inhibition_profile_editor.parametersChanged.connect(self.apply_inhibition_profile_parameters)
         self.slider_ion_aperture_shadow.valueChanged.connect(self.sync_ion_shadow_slider_labels)
         self.slider_ion_lateral_shadow.valueChanged.connect(self.sync_ion_shadow_slider_labels)
         self.slider_ion_edge_shadow.valueChanged.connect(self.sync_ion_shadow_slider_labels)
@@ -3723,6 +4162,7 @@ class TrenchDepoWindow(QMainWindow):
         self.apply_emulator_mode(run=False)
         self._reset_geometry_to_default()
         self.sync_depth_deposition_editor_from_spins()
+        self.sync_inhibition_profile_from_spins()
         self._sync_field_overlay_toggles()
         self._set_workflow_step("structure")
 
@@ -4166,6 +4606,7 @@ class TrenchDepoWindow(QMainWindow):
         self.sync_ion_transmission_editor_from_spins()
         self.sync_redepo_lobe_from_spins()
         self.sync_depth_deposition_editor_from_spins()
+        self.sync_inhibition_profile_from_spins()
         self.sync_etch_control_availability()
         self._populate_split_parameters()
         self._invalidate_result_for_input_change()
@@ -4570,11 +5011,16 @@ class TrenchDepoWindow(QMainWindow):
         self._show_result_input_preview(fit=fit)
 
     def _sync_structure_map_editors(self) -> None:
-        if not hasattr(self, "ion_transmission_editor") or not hasattr(self, "depth_deposition_editor"):
+        if (
+            not hasattr(self, "ion_transmission_editor")
+            or not hasattr(self, "depth_deposition_editor")
+            or not hasattr(self, "inhibition_profile_editor")
+        ):
             return
         points = self._current_geometry_points()
         self.ion_transmission_editor.set_structure_points(points)
         self.depth_deposition_editor.set_structure_points(points)
+        self.inhibition_profile_editor.set_structure_points(points)
 
     def _sync_progress_geometry_view(self, *, fit: bool = False) -> None:
         if not hasattr(self, "progress_geometry_view"):
@@ -5399,6 +5845,7 @@ class TrenchDepoWindow(QMainWindow):
         self.sync_ion_transmission_editor_from_spins()
         self.sync_redepo_lobe_from_spins()
         self.sync_depth_deposition_editor_from_spins()
+        self.sync_inhibition_profile_from_spins()
         self.sync_etch_control_availability()
 
     def apply_emulator_mode(
@@ -5491,10 +5938,13 @@ class TrenchDepoWindow(QMainWindow):
             self.spin_redepo_distance_power.setSingleStep(0.1)
         if number == 0:
             self.depth_profile_group.setTitle("Integrated Depth Depletion Map")
+            self.inhibition_profile_group.setTitle("Integrated Inhibition Visual Editor")
         elif number == 5:
             self.depth_profile_group.setTitle("Inhibition Base Map")
+            self.inhibition_profile_group.setTitle("Inhibition Visual Editor")
         else:
             self.depth_profile_group.setTitle("Depth Depletion Map")
+            self.inhibition_profile_group.setTitle("Inhibition Visual Editor")
 
         if supports_sputter:
             if changed:
@@ -5574,6 +6024,7 @@ class TrenchDepoWindow(QMainWindow):
         self._populate_emulator_default_presets()
 
         self.sync_depth_deposition_editor_from_spins()
+        self.sync_inhibition_profile_from_spins()
         self._populate_split_parameters()
         self.sync_etch_control_availability()
         self._sync_field_overlay_toggles()
@@ -5753,6 +6204,54 @@ class TrenchDepoWindow(QMainWindow):
             )
         finally:
             self._syncing_depth_curve = False
+
+    def sync_inhibition_profile_from_spins(self, _value: object = 0.0) -> None:
+        if self._syncing_inhibition_curve:
+            return
+        self._syncing_inhibition_curve = True
+        try:
+            self.inhibition_profile_editor.set_feature_depth(float(self.spin_depth_feature_depth.value()))
+            self.inhibition_profile_editor.set_parameters(
+                float(self.spin_inhibition_strength.value()),
+                float(self.spin_inhibition_penetration.value()),
+                float(self.spin_inhibition_decay_power.value()),
+                float(self.spin_inhibition_min_growth.value()),
+                float(self.spin_inhibition_bottom_boost.value()),
+                float(self.spin_inhibition_recombination.value()),
+            )
+        finally:
+            self._syncing_inhibition_curve = False
+
+    def apply_inhibition_profile_parameters(
+        self,
+        strength_pct: float,
+        penetration_depth_a: float,
+        decay_power: float,
+        min_growth_pct: float,
+        bottom_boost_pct: float,
+        recombination_pct: float,
+    ) -> None:
+        if self._syncing_inhibition_curve:
+            return
+        self._syncing_inhibition_curve = True
+        try:
+            self.spin_inhibition_strength.setValue(float(strength_pct))
+            self.spin_inhibition_penetration.setValue(float(penetration_depth_a))
+            self.spin_inhibition_decay_power.setValue(float(decay_power))
+            self.spin_inhibition_min_growth.setValue(float(min_growth_pct))
+            self.spin_inhibition_bottom_boost.setValue(float(bottom_boost_pct))
+            self.spin_inhibition_recombination.setValue(float(recombination_pct))
+            self.inhibition_profile_editor.set_feature_depth(float(self.spin_depth_feature_depth.value()))
+            self.inhibition_profile_editor.set_parameters(
+                float(self.spin_inhibition_strength.value()),
+                float(self.spin_inhibition_penetration.value()),
+                float(self.spin_inhibition_decay_power.value()),
+                float(self.spin_inhibition_min_growth.value()),
+                float(self.spin_inhibition_bottom_boost.value()),
+                float(self.spin_inhibition_recombination.value()),
+            )
+        finally:
+            self._syncing_inhibition_curve = False
 
     def sync_ion_shadow_slider_labels(self, _value: int = 0) -> None:
         self.lbl_ion_aperture_shadow_value.setText(f"{int(self.slider_ion_aperture_shadow.value())}%")
@@ -6114,6 +6613,8 @@ class TrenchDepoWindow(QMainWindow):
             self.spin_inhibition_recombination,
             self.lbl_inhibition_smoothing,
             self.spin_inhibition_smoothing,
+            self.inhibition_profile_group,
+            self.inhibition_profile_editor,
         ]
         for widget in inhibition_detail_widgets:
             widget.setEnabled(inhibition_enabled)
@@ -6234,6 +6735,7 @@ class TrenchDepoWindow(QMainWindow):
         self.spin_sputter_width.setValue(14.0)
         self.spin_sputter_smoothing.setValue(40.0)
         self._populate_split_parameters()
+        self.sync_inhibition_profile_from_spins()
         self.sync_etch_control_availability()
         if self.active_emulator_number() == 0:
             self.edit_request_note.setPlainText("통합모델: conformal + direct/ion etch + normal/specular lobe redepo + depth/inhibition deposition. reflected/LF/closure 제외")
@@ -7599,6 +8101,7 @@ class TrenchDepoWindow(QMainWindow):
         self.spin_sputter_peak.setValue(float(config.sputter_peak_angle_deg))
         self.spin_sputter_width.setValue(float(config.sputter_width_deg))
         self.spin_sputter_smoothing.setValue(float(config.sputter_smoothing_a))
+        self.sync_inhibition_profile_from_spins()
         self.sync_etch_control_availability()
         self.edit_request_note.setPlainText(note)
         self._result = result
