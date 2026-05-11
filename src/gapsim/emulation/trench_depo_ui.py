@@ -10,8 +10,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from PySide6.QtCore import QObject, QEvent, QPointF, QRectF, Qt, QThread, QTimer, QUrl, Signal, Slot
-from PySide6.QtGui import QColor, QBrush, QDesktopServices, QFont, QMouseEvent, QPainter, QPainterPath, QPen
+from PySide6.QtCore import QObject, QEvent, QMimeData, QPointF, QRectF, Qt, QThread, QTimer, QUrl, Signal, Slot
+from PySide6.QtGui import QColor, QBrush, QDesktopServices, QDrag, QFont, QMouseEvent, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -107,6 +107,17 @@ QUALITY_MODE_PRESETS: Tuple[Tuple[str, Optional[float]], ...] = (
     ("정밀 (5 A)", 5.0),
     ("최정밀 (2.5 A)", 2.5),
     ("사용자", None),
+)
+MODEL_SECTION_MIME = "application/x-gapsim-emulation-model-section"
+DEFAULT_MODEL_PARAMETER_SECTION_ORDER: Tuple[str, ...] = (
+    "direct",
+    "ion",
+    "reflected",
+    "redepo",
+    "depth",
+    "inhibition",
+    "lf",
+    "closure",
 )
 
 
@@ -216,7 +227,7 @@ def _emulator_mode_title(number: int) -> str:
 
 
 def _emulator_mode_label(number: int) -> str:
-    return f"{int(number):02d} - {_emulator_mode_title(int(number))}"
+    return _emulator_mode_title(int(number))
 
 
 EMULATOR_PROCESS_PRESETS: dict[int, list[tuple[str, dict[str, object]]]] = {
@@ -1234,21 +1245,43 @@ class RedepositionLobeEditor(QWidget):
         self._efficiency_pct = 25.0
         self._emit_power = 1.0
         self._distance_power = 1.0
+        self._mode = "transport"
         self._drag_handle: Optional[str] = None
-        self.setMinimumHeight(142)
-        self.setMaximumHeight(172)
+        self.setMinimumHeight(172)
+        self.setMaximumHeight(210)
         self.setMouseTracking(True)
-        self.setToolTip(
-            "Drag the density handle for redeposition amount, cone edge handles for emit, and axis handle for distance fade."
-        )
+        self._update_tooltip()
 
     def parameters(self) -> Tuple[float, float, float]:
         return (float(self._efficiency_pct), float(self._emit_power), float(self._distance_power))
 
+    def set_mode(self, mode: str) -> None:
+        normalized = "reflection" if str(mode).lower() == "reflection" else "transport"
+        if normalized == self._mode:
+            return
+        self._mode = normalized
+        self._update_tooltip()
+        self.set_parameters(self._efficiency_pct, self._emit_power, self._distance_power)
+        self.update()
+
+    def _update_tooltip(self) -> None:
+        if self._mode == "reflection":
+            self.setToolTip(
+                "리데포 양은 왼쪽 바, 각도 spread는 cone edge, specular bias는 중심축 핸들을 드래그해서 조절합니다."
+            )
+        else:
+            self.setToolTip(
+                "Drag the density handle for redeposition amount, cone edge handles for emit, and axis handle for distance fade."
+            )
+
     def set_parameters(self, efficiency_pct: float, emit_power: float, distance_power: float) -> None:
         eff_f = self._clamp(float(efficiency_pct), 0.0, 100.0)
-        emit_f = self._clamp(float(emit_power), 0.0, 8.0)
-        dist_f = self._clamp(float(distance_power), 0.0, 4.0)
+        if self._mode == "reflection":
+            emit_f = self._clamp(float(emit_power), 1.0, 80.0)
+            dist_f = self._clamp(float(distance_power), -100.0, 100.0)
+        else:
+            emit_f = self._clamp(float(emit_power), 0.0, 8.0)
+            dist_f = self._clamp(float(distance_power), 0.0, 4.0)
         changed = (
             abs(eff_f - self._efficiency_pct) > 1e-9
             or abs(emit_f - self._emit_power) > 1e-9
@@ -1275,7 +1308,17 @@ class RedepositionLobeEditor(QWidget):
         rect = self._canvas_rect()
         return QPointF(rect.left() + 48.0, rect.center().y() + 10.0)
 
+    def _normal_axis_angle_deg(self) -> float:
+        return 12.0
+
+    def _specular_axis_angle_deg(self) -> float:
+        return 44.0
+
     def _axis_angle_deg(self) -> float:
+        if self._mode == "reflection":
+            span = self._specular_axis_angle_deg() - self._normal_axis_angle_deg()
+            bias = self._clamp(float(self._distance_power), -100.0, 100.0) / 100.0
+            return self._normal_axis_angle_deg() + (span * bias)
         return 17.0
 
     def _axis_vec(self) -> Tuple[float, float]:
@@ -1283,9 +1326,13 @@ class RedepositionLobeEditor(QWidget):
         return (math.cos(angle), math.sin(angle))
 
     def _emit_to_half_angle(self, emit_power: float) -> float:
+        if self._mode == "reflection":
+            return self._clamp(float(emit_power), 1.0, 80.0)
         return 10.0 + (52.0 / (1.0 + (0.9 * self._clamp(float(emit_power), 0.0, 8.0))))
 
     def _half_angle_to_emit(self, half_angle_deg: float) -> float:
+        if self._mode == "reflection":
+            return self._clamp(float(half_angle_deg), 1.0, 80.0)
         half = self._clamp(float(half_angle_deg), 12.0, 62.0)
         return self._clamp(((52.0 / max(0.1, half - 10.0)) - 1.0) / 0.9, 0.0, 8.0)
 
@@ -1294,6 +1341,13 @@ class RedepositionLobeEditor(QWidget):
 
     def _distance_from_t(self, t: float) -> float:
         return self._clamp((0.90 - self._clamp(float(t), 0.22, 0.90)) * 4.0 / 0.68, 0.0, 4.0)
+
+    def _bias_from_axis_angle(self, angle_deg: float) -> float:
+        span = self._specular_axis_angle_deg() - self._normal_axis_angle_deg()
+        if abs(span) <= 1e-9:
+            return 0.0
+        delta = self._angle_delta_deg(float(angle_deg), self._normal_axis_angle_deg())
+        return self._clamp(100.0 * delta / span, -100.0, 100.0)
 
     def _radius_limit_for_angle(self, angle_deg: float) -> float:
         rect = self._canvas_rect()
@@ -1358,6 +1412,8 @@ class RedepositionLobeEditor(QWidget):
         axis_dx, axis_dy = self._axis_vec()
         source = self._source_point()
         distance_radius = self._max_radius(half) * self._distance_handle_t()
+        if self._mode == "reflection":
+            distance_radius = self._max_radius(half) * 0.58
         return {
             "efficiency": QPointF(self._amount_bar_rect().center().x(), self._y_for_efficiency_pct(self._efficiency_pct)),
             "emit_left": self._point_from_polar(axis - half, radius),
@@ -1390,10 +1446,14 @@ class RedepositionLobeEditor(QWidget):
             self._emit_power = self._half_angle_to_emit(half)
         elif handle == "distance":
             source = self._source_point()
-            axis_dx, axis_dy = self._axis_vec()
-            projection = ((float(pos.x() - source.x()) * axis_dx) + (float(pos.y() - source.y()) * axis_dy))
-            t = projection / max(1.0, self._max_radius())
-            self._distance_power = self._distance_from_t(t)
+            if self._mode == "reflection":
+                angle = math.degrees(math.atan2(float(pos.y() - source.y()), float(pos.x() - source.x())))
+                self._distance_power = self._bias_from_axis_angle(angle)
+            else:
+                axis_dx, axis_dy = self._axis_vec()
+                projection = ((float(pos.x() - source.x()) * axis_dx) + (float(pos.y() - source.y()) * axis_dy))
+                t = projection / max(1.0, self._max_radius())
+                self._distance_power = self._distance_from_t(t)
         else:
             return
         self.update()
@@ -1479,7 +1539,10 @@ class RedepositionLobeEditor(QWidget):
             r0 = radius * (idx - 1) / float(segments)
             r1 = radius * idx / float(segments)
             t = (idx - 0.5) / float(segments)
-            fade = max(0.035, (1.0 - t) ** (0.45 + (self._distance_power * 1.1)))
+            if self._mode == "reflection":
+                fade = max(0.045, (1.0 - t) ** 0.72)
+            else:
+                fade = max(0.035, (1.0 - t) ** (0.45 + (self._distance_power * 1.1)))
             alpha = max(4, min(230, int(base_alpha * fade)))
             p0 = self._point_from_polar(axis - half, r0)
             p1 = self._point_from_polar(axis - half, r1)
@@ -1504,6 +1567,11 @@ class RedepositionLobeEditor(QWidget):
 
         painter.setPen(QPen(QColor(124, 45, 18, 95), 1.2, Qt.PenStyle.DashLine))
         painter.drawLine(source, self._point_from_polar(axis, radius))
+        if self._mode == "reflection":
+            painter.setPen(QPen(QColor(37, 99, 235, 120), 1.1, Qt.PenStyle.DashLine))
+            painter.drawLine(source, self._point_from_polar(self._normal_axis_angle_deg(), radius * 0.82))
+            painter.setPen(QPen(QColor(190, 24, 93, 125), 1.1, Qt.PenStyle.DashLine))
+            painter.drawLine(source, self._point_from_polar(self._specular_axis_angle_deg(), radius * 0.82))
         painter.setPen(QPen(QColor(124, 45, 18, 130), 1.4))
         painter.drawLine(source, self._point_from_polar(axis - half, radius * 0.92))
         painter.drawLine(source, self._point_from_polar(axis + half, radius * 0.92))
@@ -1520,9 +1588,21 @@ class RedepositionLobeEditor(QWidget):
         painter.drawEllipse(handles["efficiency"], 5.8, 5.8)
 
         painter.setPen(QPen(QColor(15, 23, 42), 1.0))
+        if self._mode == "reflection":
+            label = (
+                f"Redepo {self._efficiency_pct:.1f}%    "
+                f"Spread {self._emit_power:.1f} deg    "
+                f"Specular bias {self._distance_power:.1f}%"
+            )
+        else:
+            label = (
+                f"Redepo {self._efficiency_pct:.1f}%    "
+                f"Cone {2.0 * half:.0f} deg    "
+                f"Dist {self._distance_power:.2f}"
+            )
         painter.drawText(
             QPointF(rect.left(), 17.0),
-            f"Redepo {self._efficiency_pct:.1f}%    Cone {2.0 * half:.0f} deg    Dist {self._distance_power:.2f}",
+            label,
         )
 
 
@@ -2013,6 +2093,72 @@ class _EmulationRunWorker(QObject):
         self.progress.emit(done, total, f"실행 {cycle_label} sub {sub_label} {suffix}")
 
 
+class DraggableParameterSectionLabel(QLabel):
+    sectionMoved = Signal(str, str)
+
+    def __init__(self, text: str, section_key: str) -> None:
+        super().__init__(text)
+        self.section_key = str(section_key)
+        self._drag_start_pos: Optional[QPointF] = None
+        self.setAcceptDrops(True)
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_start_pos = event.position()
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if self._drag_start_pos is None or not (event.buttons() & Qt.MouseButton.LeftButton):
+            super().mouseMoveEvent(event)
+            return
+        delta = event.position() - self._drag_start_pos
+        if math.hypot(float(delta.x()), float(delta.y())) < QApplication.startDragDistance():
+            super().mouseMoveEvent(event)
+            return
+        drag = QDrag(self)
+        mime = QMimeData()
+        mime.setData(MODEL_SECTION_MIME, self.section_key.encode("utf-8"))
+        drag.setMimeData(mime)
+        drag.setPixmap(self.grab())
+        drag.setHotSpot(event.position().toPoint())
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
+        drag.exec(Qt.DropAction.MoveAction)
+        self._drag_start_pos = None
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_start_pos = None
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
+        super().mouseReleaseEvent(event)
+
+    def dragEnterEvent(self, event) -> None:  # noqa: N802
+        source_key = self._source_key(event)
+        if source_key and source_key != self.section_key:
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event) -> None:  # noqa: N802
+        self.dragEnterEvent(event)
+
+    def dropEvent(self, event) -> None:  # noqa: N802
+        source_key = self._source_key(event)
+        if source_key and source_key != self.section_key:
+            self.sectionMoved.emit(source_key, self.section_key)
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    @staticmethod
+    def _source_key(event) -> str:
+        mime = event.mimeData()
+        if not mime or not mime.hasFormat(MODEL_SECTION_MIME):
+            return ""
+        return bytes(mime.data(MODEL_SECTION_MIME)).decode("utf-8", errors="ignore")
+
+
 class TrenchDepoWindow(QMainWindow):
     def _make_parameter_section(
         self,
@@ -2021,8 +2167,14 @@ class TrenchDepoWindow(QMainWindow):
         color: str = "#334155",
         background: str = "#f8fafc",
         border: str = "#cbd5e1",
+        section_key: Optional[str] = None,
     ) -> QLabel:
-        label = QLabel(text)
+        if section_key:
+            label = DraggableParameterSectionLabel(text, section_key)
+            label.sectionMoved.connect(self._move_model_parameter_section)
+            label.setToolTip("모델 제목을 드래그해서 파라미터 섹션 순서를 바꿉니다.")
+        else:
+            label = QLabel(text)
         label.setStyleSheet(
             "QLabel {"
             "font-weight: 700;"
@@ -2068,6 +2220,8 @@ class TrenchDepoWindow(QMainWindow):
         self._active_emulator_number = 0
         self._emulator_numbers = load_created_emulator_numbers()
         self._emulator_buttons: dict[int, QPushButton] = {}
+        self._model_parameter_section_order: List[str] = list(DEFAULT_MODEL_PARAMETER_SECTION_ORDER)
+        self._model_parameter_section_rows: Dict[str, List[Tuple[QWidget, int, int]]] = {}
         self._preview_result_cache: dict[tuple[object, ...], TrenchDepoResult] = {}
         self._emulation_thread: Optional[QThread] = None
         self._emulation_worker: Optional[_EmulationRunWorker] = None
@@ -2157,7 +2311,7 @@ class TrenchDepoWindow(QMainWindow):
         self.chk_sputter = QCheckBox("Etch enabled")
         self.chk_sputter.setToolTip("Master switch for the direct sputter etch stack.")
         self.chk_sputter.setChecked(True)
-        self.chk_ion_transmission = QCheckBox("2 Ion transmission modifier")
+        self.chk_ion_transmission = QCheckBox("Ion transmission modifier")
         self.chk_ion_transmission.setToolTip(
             "Multiplier on the existing direct sputter output. Deposition is not attenuated."
         )
@@ -2223,7 +2377,7 @@ class TrenchDepoWindow(QMainWindow):
         self.cmb_redepo_source_model = QComboBox()
         self.cmb_redepo_source_model.addItem("Model2 ion source", "model2")
         self.cmb_redepo_source_model.setCurrentIndex(0)
-        self.cmb_redepo_source_model.setToolTip("4번 redeposition source는 Model2 ion transmission 경로로 고정됩니다.")
+        self.cmb_redepo_source_model.setToolTip("Redeposition source는 ion transmission 경로로 고정됩니다.")
         self.spin_redepo_efficiency = QDoubleSpinBox()
         self.spin_redepo_efficiency.setRange(0.0, 100.0)
         self.spin_redepo_efficiency.setDecimals(1)
@@ -2246,7 +2400,7 @@ class TrenchDepoWindow(QMainWindow):
         self.spin_redepo_soft_los.setToolTip("0=fast hard LOS, 1=soft shadow edge, 2=stronger/slow quality.")
         self.chk_lf_overhang = QCheckBox("LF overhang proxy")
         self.chk_lf_overhang.setChecked(False)
-        self.chk_lf_overhang.setToolTip("7번: upper/facet sputter source를 shadow-boundary toe에 빠른 Gaussian proxy로 재분배합니다.")
+        self.chk_lf_overhang.setToolTip("upper/facet sputter source를 shadow-boundary toe에 빠른 Gaussian proxy로 재분배합니다.")
         self.spin_lf_overhang_dose = QDoubleSpinBox()
         self.spin_lf_overhang_dose.setRange(0.0, 10.0)
         self.spin_lf_overhang_dose.setDecimals(2)
@@ -2274,7 +2428,7 @@ class TrenchDepoWindow(QMainWindow):
         self.spin_lf_overhang_width.setValue(180.0)
         self.chk_closure_redepo = QCheckBox("Etch+Redepo closure")
         self.chk_closure_redepo.setChecked(False)
-        self.chk_closure_redepo.setToolTip("8번: 모든 positive etch source를 LOS redeposition source로 쓰고, shadow/neck capture로 upper closure를 검증합니다.")
+        self.chk_closure_redepo.setToolTip("모든 positive etch source를 LOS redeposition source로 쓰고, shadow/neck capture로 upper closure를 검증합니다.")
         self.spin_closure_redepo_efficiency = QDoubleSpinBox()
         self.spin_closure_redepo_efficiency.setRange(0.0, 100.0)
         self.spin_closure_redepo_efficiency.setDecimals(1)
@@ -2768,25 +2922,27 @@ class TrenchDepoWindow(QMainWindow):
         params_grid.setVerticalSpacing(8)
         self.lbl_deposition_section = self._make_parameter_section("Deposition base")
         self.lbl_etch_section = self._make_parameter_section(
-            "Etch switch",
+            "Direct angle sputter etch",
             color="#0f766e",
             background="#f0fdfa",
             border="#99f6e4",
+            section_key="direct",
         )
         self.lbl_sputter_section = self._make_parameter_section(
-            "1번 Direct sputter kernel",
+            "Angle response kernel",
             color="#1d4ed8",
             background="#eff6ff",
             border="#bfdbfe",
         )
         self.lbl_ion_depth_section = self._make_parameter_section(
-            "2번 Ion transmission - depth curve",
+            "Ion transmission - depth curve",
             color="#0e7490",
             background="#ecfeff",
             border="#a5f3fc",
+            section_key="ion",
         )
         self.lbl_ion_geometry_section = self._make_parameter_section(
-            "2번 Geometry shadowing 보정",
+            "Geometry shadowing 보정",
             color="#155e75",
             background="#f0f9ff",
             border="#bae6fd",
@@ -2856,10 +3012,11 @@ class TrenchDepoWindow(QMainWindow):
         params_grid.addWidget(self.lbl_ion_edge_shadow, 21, 0)
         params_grid.addWidget(self.ion_edge_shadow_row, 21, 1)
         self.lbl_reflected_section = self._make_parameter_section(
-            "3번 신규 Reflected ion",
+            "Reflected ion",
             color="#b45309",
             background="#fff7ed",
             border="#fed7aa",
+            section_key="reflected",
         )
         params_grid.addWidget(self.lbl_reflected_section, 22, 0, 1, 2)
         params_grid.addWidget(self.chk_reflected_ion, 23, 0, 1, 2)
@@ -2876,10 +3033,11 @@ class TrenchDepoWindow(QMainWindow):
         params_grid.addWidget(self.lbl_reflected_range, 27, 0)
         params_grid.addWidget(self.spin_reflected_range, 27, 1)
         self.lbl_redepo_section = self._make_parameter_section(
-            "4번 Sputter redeposition",
+            "Sputter redeposition",
             color="#7c2d12",
             background="#fff7ed",
             border="#fdba74",
+            section_key="redepo",
         )
         params_grid.addWidget(self.lbl_redepo_section, 28, 0, 1, 2)
         params_grid.addWidget(self.chk_redepo, 29, 0, 1, 2)
@@ -2899,10 +3057,11 @@ class TrenchDepoWindow(QMainWindow):
         params_grid.addWidget(self.lbl_redepo_soft_los, 34, 0)
         params_grid.addWidget(self.spin_redepo_soft_los, 34, 1)
         self.lbl_depth_depo_section = self._make_parameter_section(
-            "4번 Depth depletion deposition",
+            "Depth depletion deposition",
             color="#166534",
             background="#f0fdf4",
             border="#bbf7d0",
+            section_key="depth",
         )
         params_grid.addWidget(self.lbl_depth_depo_section, 35, 0, 1, 2)
         params_grid.addWidget(self.chk_depth_deposition, 36, 0, 1, 2)
@@ -2939,10 +3098,11 @@ class TrenchDepoWindow(QMainWindow):
         self.btn_depth_advanced = QPushButton("고급 fill 옵션")
         self.btn_depth_advanced.setCheckable(True)
         self.lbl_inhibition_section = self._make_parameter_section(
-            "5번 Inhibition deposition",
+            "Inhibition deposition",
             color="#854d0e",
             background="#fffbeb",
             border="#fde68a",
+            section_key="inhibition",
         )
         self.lbl_inhibition_strength = QLabel("억제 강도 %")
         self.lbl_inhibition_penetration = QLabel("침투 깊이 A")
@@ -3045,10 +3205,11 @@ class TrenchDepoWindow(QMainWindow):
         params_grid.addWidget(self.lbl_inhibition_smoothing, 61, 0)
         params_grid.addWidget(self.spin_inhibition_smoothing, 61, 1)
         self.lbl_lf_overhang_section = self._make_parameter_section(
-            "7번 LF overhang proxy",
+            "LF overhang proxy",
             color="#7c3aed",
             background="#f5f3ff",
             border="#ddd6fe",
+            section_key="lf",
         )
         params_grid.addWidget(self.lbl_lf_overhang_section, 62, 0, 1, 2)
         params_grid.addWidget(self.chk_lf_overhang, 63, 0, 1, 2)
@@ -3068,10 +3229,11 @@ class TrenchDepoWindow(QMainWindow):
         params_grid.addWidget(self.lbl_lf_overhang_width, 68, 0)
         params_grid.addWidget(self.spin_lf_overhang_width, 68, 1)
         self.lbl_closure_redepo_section = self._make_parameter_section(
-            "8번 Etch+Redepo closure",
+            "Etch+Redepo closure",
             color="#b91c1c",
             background="#fff1f2",
             border="#fecdd3",
+            section_key="closure",
         )
         params_grid.addWidget(self.lbl_closure_redepo_section, 69, 0, 1, 2)
         params_grid.addWidget(self.chk_closure_redepo, 70, 0, 1, 2)
@@ -3090,9 +3252,11 @@ class TrenchDepoWindow(QMainWindow):
         params_grid.addWidget(self.spin_closure_redepo_survival, 74, 1)
         params_grid.addWidget(self.lbl_closure_redepo_smoothing, 75, 0)
         params_grid.addWidget(self.spin_closure_redepo_smoothing, 75, 1)
+        self.params_grid = params_grid
         params_group.setLayout(params_grid)
+        self._register_model_parameter_sections()
 
-        self.redepo_lobe_group = QGroupBox("4 Redeposition Lobe")
+        self.redepo_lobe_group = QGroupBox("Redeposition Lobe")
         redepo_lobe_layout = QVBoxLayout()
         redepo_lobe_layout.setContentsMargins(8, 8, 8, 8)
         redepo_lobe_layout.addWidget(self.redepo_lobe_editor)
@@ -3164,7 +3328,7 @@ class TrenchDepoWindow(QMainWindow):
         ion_map_layout.addWidget(self.ion_transmission_editor)
         ion_map_group.setLayout(ion_map_layout)
 
-        depth_profile_group = QGroupBox("5 Depth Deposition Map")
+        depth_profile_group = QGroupBox("Depth Deposition Map")
         depth_profile_layout = QVBoxLayout()
         depth_profile_layout.setContentsMargins(10, 10, 10, 10)
         depth_profile_layout.setSpacing(8)
@@ -4652,6 +4816,193 @@ class TrenchDepoWindow(QMainWindow):
         index = self.view_tabs.currentIndex() if workflow_index is None else int(workflow_index)
         self.result_controls_widget.setVisible(index == 3)
 
+    @staticmethod
+    def _grid_row(widget: QWidget, column: int = 0, column_span: int = 1) -> Tuple[QWidget, int, int]:
+        return (widget, int(column), int(column_span))
+
+    def _register_model_parameter_sections(self) -> None:
+        row = self._grid_row
+        self._model_parameter_section_rows = {
+            "direct": [
+                row(self.lbl_etch_section, 0, 2),
+                row(self.chk_sputter, 0, 2),
+                row(self.lbl_sputter_section, 0, 2),
+                row(self.lbl_sputter_strength),
+                row(self.spin_sputter_strength, 1),
+                row(self.lbl_sputter_peak_pct),
+                row(self.spin_sputter_peak_pct, 1),
+                row(self.lbl_sputter_peak),
+                row(self.spin_sputter_peak, 1),
+                row(self.lbl_sputter_width),
+                row(self.spin_sputter_width, 1),
+                row(self.lbl_sputter_smoothing),
+                row(self.spin_sputter_smoothing, 1),
+            ],
+            "ion": [
+                row(self.lbl_ion_depth_section, 0, 2),
+                row(self.chk_ion_transmission, 0, 2),
+                row(self.lbl_ion_start_depth),
+                row(self.spin_ion_start_depth, 1),
+                row(self.lbl_ion_end_depth),
+                row(self.spin_ion_end_depth, 1),
+                row(self.lbl_ion_decay_strength),
+                row(self.spin_ion_decay_strength, 1),
+                row(self.lbl_ion_floor),
+                row(self.spin_ion_floor, 1),
+                row(self.lbl_ion_curve_power),
+                row(self.spin_ion_curve_power, 1),
+                row(self.lbl_ion_geometry_section, 0, 2),
+                row(self.lbl_ion_aperture_shadow),
+                row(self.ion_aperture_shadow_row, 1),
+                row(self.lbl_ion_lateral_shadow),
+                row(self.ion_lateral_shadow_row, 1),
+                row(self.lbl_ion_edge_shadow),
+                row(self.ion_edge_shadow_row, 1),
+            ],
+            "reflected": [
+                row(self.lbl_reflected_section, 0, 2),
+                row(self.chk_reflected_ion, 0, 2),
+                row(self.lbl_reflected_strength),
+                row(self.spin_reflected_strength, 1),
+                row(self.lbl_reflected_bowing),
+                row(self.spin_reflected_bowing, 1),
+                row(self.lbl_reflected_microtrench),
+                row(self.spin_reflected_microtrench, 1),
+                row(self.lbl_reflected_range),
+                row(self.spin_reflected_range, 1),
+            ],
+            "redepo": [
+                row(self.lbl_redepo_section, 0, 2),
+                row(self.chk_redepo, 0, 2),
+                row(self.lbl_redepo_source),
+                row(self.cmb_redepo_source_model, 1),
+                row(self.lbl_redepo_efficiency),
+                row(self.spin_redepo_efficiency, 1),
+                row(self.lbl_redepo_emit_power),
+                row(self.spin_redepo_emit_power, 1),
+                row(self.lbl_redepo_distance_power),
+                row(self.spin_redepo_distance_power, 1),
+                row(self.lbl_redepo_soft_los),
+                row(self.spin_redepo_soft_los, 1),
+            ],
+            "depth": [
+                row(self.lbl_depth_depo_section, 0, 2),
+                row(self.chk_depth_deposition, 0, 2),
+                row(self.lbl_depth_feature_section, 0, 2),
+                row(self.lbl_depth_feature_type),
+                row(self.cmb_depth_feature_type, 1),
+                row(self.lbl_depth_feature_width),
+                row(self.spin_depth_feature_width, 1),
+                row(self.lbl_depth_feature_depth),
+                row(self.spin_depth_feature_depth, 1),
+                row(self.lbl_depth_feature_length),
+                row(self.spin_depth_feature_length, 1),
+                row(self.lbl_depth_curve_section, 0, 2),
+                row(self.lbl_depth_decay_k),
+                row(self.spin_depth_decay_k, 1),
+                row(self.lbl_depth_decay_power),
+                row(self.spin_depth_decay_power, 1),
+                row(self.lbl_depth_min_ratio),
+                row(self.spin_depth_min_ratio_pct, 1),
+                row(self.btn_depth_advanced, 0, 2),
+                row(self.lbl_depth_closure_section, 0, 2),
+                row(self.lbl_depth_closure_threshold),
+                row(self.spin_depth_closure_threshold, 1),
+                row(self.lbl_depth_post_fill_hole),
+                row(self.spin_depth_post_fill_hole_pct, 1),
+                row(self.lbl_depth_post_fill_line),
+                row(self.spin_depth_post_fill_line_pct, 1),
+                row(self.lbl_depth_line_open_path),
+                row(self.spin_depth_line_open_path, 1),
+                row(self.lbl_depth_residual_decay),
+                row(self.spin_depth_residual_decay, 1),
+            ],
+            "inhibition": [
+                row(self.lbl_inhibition_section, 0, 2),
+                row(self.chk_inhibition_deposition, 0, 2),
+                row(self.lbl_inhibition_strength),
+                row(self.spin_inhibition_strength, 1),
+                row(self.lbl_inhibition_penetration),
+                row(self.spin_inhibition_penetration, 1),
+                row(self.lbl_inhibition_decay_power),
+                row(self.spin_inhibition_decay_power, 1),
+                row(self.lbl_inhibition_min_growth),
+                row(self.spin_inhibition_min_growth, 1),
+                row(self.lbl_inhibition_bottom_boost),
+                row(self.spin_inhibition_bottom_boost, 1),
+                row(self.lbl_inhibition_recombination),
+                row(self.spin_inhibition_recombination, 1),
+                row(self.lbl_inhibition_smoothing),
+                row(self.spin_inhibition_smoothing, 1),
+            ],
+            "lf": [
+                row(self.lbl_lf_overhang_section, 0, 2),
+                row(self.chk_lf_overhang, 0, 2),
+                row(self.lbl_lf_overhang_dose),
+                row(self.spin_lf_overhang_dose, 1),
+                row(self.lbl_lf_overhang_sputter_gain),
+                row(self.spin_lf_overhang_sputter_gain, 1),
+                row(self.lbl_lf_overhang_redepo_fraction),
+                row(self.spin_lf_overhang_redepo_fraction, 1),
+                row(self.lbl_lf_overhang_survival),
+                row(self.spin_lf_overhang_survival, 1),
+                row(self.lbl_lf_overhang_width),
+                row(self.spin_lf_overhang_width, 1),
+            ],
+            "closure": [
+                row(self.lbl_closure_redepo_section, 0, 2),
+                row(self.chk_closure_redepo, 0, 2),
+                row(self.lbl_closure_redepo_efficiency),
+                row(self.spin_closure_redepo_efficiency, 1),
+                row(self.lbl_closure_redepo_shadow_gain),
+                row(self.spin_closure_redepo_shadow_gain, 1),
+                row(self.lbl_closure_redepo_width),
+                row(self.spin_closure_redepo_width, 1),
+                row(self.lbl_closure_redepo_survival),
+                row(self.spin_closure_redepo_survival, 1),
+                row(self.lbl_closure_redepo_smoothing),
+                row(self.spin_closure_redepo_smoothing, 1),
+            ],
+        }
+        self._apply_model_parameter_section_order()
+
+    def _apply_model_parameter_section_order(self) -> None:
+        grid = getattr(self, "params_grid", None)
+        if grid is None:
+            return
+        all_rows = [
+            row
+            for key in DEFAULT_MODEL_PARAMETER_SECTION_ORDER
+            for row in self._model_parameter_section_rows.get(key, [])
+        ]
+        for widget, _column, _column_span in all_rows:
+            grid.removeWidget(widget)
+        valid_order = [key for key in self._model_parameter_section_order if key in self._model_parameter_section_rows]
+        for key in DEFAULT_MODEL_PARAMETER_SECTION_ORDER:
+            if key not in valid_order:
+                valid_order.append(key)
+        self._model_parameter_section_order = valid_order
+        layout_row = 3
+        for key in valid_order:
+            for widget, column, column_span in self._model_parameter_section_rows.get(key, []):
+                grid.addWidget(widget, layout_row, column, 1, column_span)
+                if column_span > 1 or column > 0:
+                    layout_row += 1
+        grid.invalidate()
+
+    def _move_model_parameter_section(self, source_key: str, target_key: str) -> None:
+        if source_key == target_key:
+            return
+        order = [key for key in self._model_parameter_section_order if key in self._model_parameter_section_rows]
+        if source_key not in order or target_key not in order:
+            return
+        order.remove(source_key)
+        order.insert(order.index(target_key), source_key)
+        self._model_parameter_section_order = order
+        self._apply_model_parameter_section_order()
+        self.sync_etch_control_availability()
+        self.statusBar().showMessage("모델 파라미터 섹션 순서를 변경했습니다.", 1800)
+
     def _on_view_workflow_tab_changed(self, index: int) -> None:
         self._set_workflow_index(index)
 
@@ -4820,7 +5171,7 @@ class TrenchDepoWindow(QMainWindow):
             target = int(number)
             if target == active:
                 continue
-            self.cmb_compare_target.addItem(f"Emulator {target:02d} - {_emulator_mode_title(target)}", target)
+            self.cmb_compare_target.addItem(_emulator_mode_title(target), target)
         if self._emulator_supports_sputter(active):
             self.cmb_compare_target.addItem("GapSim angle-only legacy", "legacy_gapsim_angle")
 
@@ -5069,23 +5420,23 @@ class TrenchDepoWindow(QMainWindow):
         supports_lf_overhang = self._active_emulator_supports_lf_overhang()
         supports_closure_redepo = self._active_emulator_supports_closure_redepo()
 
-        self.setWindowTitle(f"트렌치 Depo 에뮬레이션 - Emulator {number:02d}")
+        self.setWindowTitle(f"트렌치 Depo 에뮬레이션 - {_emulator_mode_title(number)}")
         if changed and not preserve_geometry:
             self._reset_geometry_to_default()
 
         if supports_sputter:
             if number == 0:
-                self.lbl_etch_section.setText("Etch switch (0 통합: direct + ion depth)")
-                self.lbl_sputter_section.setText("2 Direct sputter kernel")
+                self.lbl_etch_section.setText("Direct angle sputter etch (통합 source)")
+                self.lbl_sputter_section.setText("Angle response kernel")
             elif number == 3:
-                self.lbl_etch_section.setText("Etch switch (3 ion transmission depth)")
-                self.lbl_sputter_section.setText("2 Direct sputter kernel")
+                self.lbl_etch_section.setText("Direct angle sputter etch (ion transmission source)")
+                self.lbl_sputter_section.setText("Angle response kernel")
             elif number == 6:
-                self.lbl_etch_section.setText("Etch switch (6 reflection redepo source)")
-                self.lbl_sputter_section.setText("2 Direct sputter kernel")
+                self.lbl_etch_section.setText("Direct angle sputter etch (reflection redepo source)")
+                self.lbl_sputter_section.setText("Angle response kernel")
             else:
-                self.lbl_etch_section.setText("Etch switch (2 direct angle etch)")
-                self.lbl_sputter_section.setText("2 Direct sputter kernel")
+                self.lbl_etch_section.setText("Direct angle sputter etch")
+                self.lbl_sputter_section.setText("Angle response kernel")
 
         for widget in self._sputter_widgets:
             widget.setVisible(supports_sputter)
@@ -5105,13 +5456,13 @@ class TrenchDepoWindow(QMainWindow):
             widget.setVisible(supports_closure_redepo)
         self.gaussian_group.setVisible(supports_sputter)
         self._populate_compare_targets()
-        self.ion_map_group.setTitle("2 Ion Transmission Depth Map")
-        self.gaussian_group.setTitle("1 Direct Sputter Gaussian")
+        self.ion_map_group.setTitle("Ion Transmission Depth Map")
+        self.gaussian_group.setTitle("Direct Sputter Gaussian")
         if number in (0, 6):
+            self.redepo_lobe_editor.set_mode("reflection")
+            self.redepo_lobe_group.setTitle("Reflection Redeposition Visual Editor")
             self.chk_redepo.setText("Reflection redepo enabled")
-            self.lbl_redepo_section.setText(
-                "0/6 Normal/specular Reflection lobe redepo" if number == 0 else "6 Normal/specular Reflection lobe redepo"
-            )
+            self.lbl_redepo_section.setText("Normal/specular reflection lobe redepo")
             self.lbl_redepo_efficiency.setText("Redepo efficiency %")
             self.lbl_redepo_emit_power.setText("Angular spread deg")
             self.lbl_redepo_distance_power.setText("Specular bias %")
@@ -5125,8 +5476,10 @@ class TrenchDepoWindow(QMainWindow):
                 self.spin_redepo_emit_power.setValue(22.0)
                 self.spin_redepo_distance_power.setValue(25.0)
         else:
+            self.redepo_lobe_editor.set_mode("transport")
+            self.redepo_lobe_group.setTitle("Redeposition Visual Editor")
             self.chk_redepo.setText("Redeposition")
-            self.lbl_redepo_section.setText("4 Redeposition")
+            self.lbl_redepo_section.setText("Redeposition")
             self.lbl_redepo_efficiency.setText("Efficiency %")
             self.lbl_redepo_emit_power.setText("Emit power")
             self.lbl_redepo_distance_power.setText("Dist power")
@@ -5137,11 +5490,11 @@ class TrenchDepoWindow(QMainWindow):
             self.spin_redepo_distance_power.setRange(0.0, 4.0)
             self.spin_redepo_distance_power.setSingleStep(0.1)
         if number == 0:
-            self.depth_profile_group.setTitle("0 Integrated Depth Depletion Map")
+            self.depth_profile_group.setTitle("Integrated Depth Depletion Map")
         elif number == 5:
-            self.depth_profile_group.setTitle("5 Inhibition Base Map")
+            self.depth_profile_group.setTitle("Inhibition Base Map")
         else:
-            self.depth_profile_group.setTitle("4 Depth Depletion Map")
+            self.depth_profile_group.setTitle("Depth Depletion Map")
 
         if supports_sputter:
             if changed:
@@ -5162,10 +5515,10 @@ class TrenchDepoWindow(QMainWindow):
             if number == 0:
                 self.chk_depth_deposition.setText("Depth depletion")
                 self.chk_inhibition_deposition.setText("Inhibition deposition")
-                self.lbl_depth_depo_section.setText("0 Depth depletion deposition")
-                self.lbl_inhibition_section.setText("0 Inhibition deposition")
+                self.lbl_depth_depo_section.setText("Depth depletion deposition")
+                self.lbl_inhibition_section.setText("Inhibition deposition")
                 self.lbl_depth_parameter_help.setText(
-                    "통합 모델: direct/ion etch와 6번 normal/specular lobe redepo 위에 Depth depletion 또는 Inhibition deposition을 선택해서 결합합니다. Reflected/LF/closure는 제외됩니다."
+                    "통합 모델: direct/ion etch와 normal/specular lobe redepo 위에 Depth depletion 또는 Inhibition deposition을 선택해서 결합합니다. Reflected/LF/closure는 제외됩니다."
                 )
                 self.edit_request_note.setPlaceholderText("요청사항 / 통합모델 리데포/감쇠/인히비션 관찰 메모를 적으면 run 파일명과 요약에 같이 들어갑니다.")
             elif supports_ion_transmission:
@@ -5191,14 +5544,14 @@ class TrenchDepoWindow(QMainWindow):
             if number == 5:
                 self.chk_depth_deposition.setChecked(False)
                 self.chk_inhibition_deposition.setText("Inhibition deposition")
-                self.lbl_inhibition_section.setText("5 Inhibition-weighted deposition")
+                self.lbl_inhibition_section.setText("Inhibition-weighted deposition")
                 self.lbl_depth_parameter_help.setText(
                     "Inhibition model: 상부/노출부 성장을 억제하고 깊은 쪽 상대 성장을 보강합니다. Depth depletion과 별도 모델입니다."
                 )
                 self.edit_request_note.setPlaceholderText("요청사항 / inhibition 메모를 적으면 run 파일명과 요약에 같이 들어갑니다.")
             else:
                 self.chk_depth_deposition.setText("Depth depletion deposition")
-                self.lbl_depth_depo_section.setText("4 Depth depletion deposition")
+                self.lbl_depth_depo_section.setText("Depth depletion deposition")
                 self.lbl_depth_parameter_help.setText(
                     "Depth depletion: 깊이/등가 AR이 커질수록 deposition 양을 줄입니다."
                 )
@@ -5607,19 +5960,21 @@ class TrenchDepoWindow(QMainWindow):
             self.lbl_redepo_distance_power,
             self.spin_redepo_distance_power,
         ]
+        redepo_visual_widgets = [
+            self.redepo_lobe_group,
+        ]
         redepo_advanced_widgets = [
             self.lbl_redepo_source,
             self.cmb_redepo_source_model,
             self.lbl_redepo_soft_los,
             self.spin_redepo_soft_los,
-            self.redepo_lobe_group,
         ]
-        for widget in [*redepo_source_widgets, *redepo_advanced_widgets]:
+        for widget in [*redepo_source_widgets, *redepo_visual_widgets, *redepo_advanced_widgets]:
             widget.setEnabled(redepo_enabled)
         if self.active_emulator_number() in (0, 6):
-            redepo_detail_widgets = redepo_source_widgets
+            redepo_detail_widgets = [*redepo_source_widgets, *redepo_visual_widgets]
         else:
-            redepo_detail_widgets = [*redepo_source_widgets, *redepo_advanced_widgets]
+            redepo_detail_widgets = [*redepo_source_widgets, *redepo_visual_widgets, *redepo_advanced_widgets]
         self._sync_collapsible_section(
             section_header=self.lbl_redepo_section,
             master_checkbox=self.chk_redepo,
@@ -5881,7 +6236,7 @@ class TrenchDepoWindow(QMainWindow):
         self._populate_split_parameters()
         self.sync_etch_control_availability()
         if self.active_emulator_number() == 0:
-            self.edit_request_note.setPlainText("통합모델: conformal + direct/ion etch + 6번 normal/specular lobe redepo + depth/inhibition deposition. reflected/LF/closure 제외")
+            self.edit_request_note.setPlainText("통합모델: conformal + direct/ion etch + normal/specular lobe redepo + depth/inhibition deposition. reflected/LF/closure 제외")
         elif self.active_emulator_number() == 5:
             self.edit_request_note.setPlainText("PECVD/PEALD inhibition-weighted deposition: top/opening growth suppression with smooth trench fill")
         elif self.active_emulator_number() == 4:
@@ -6158,7 +6513,7 @@ class TrenchDepoWindow(QMainWindow):
         final_points = len(result.final_profile) if result is not None else 0
 
         lines = [
-            f"에뮬레이터: {number:02d} - {title}",
+            f"에뮬레이터: {title}",
             f"상태: {'실행 결과' if result is not None else '입력 미리보기'}",
             f"구조 입력: {geometry_source} | {len(config.points)}점",
             "",
@@ -6860,9 +7215,11 @@ class TrenchDepoWindow(QMainWindow):
             return
         self.btn_run_compare.setEnabled(False)
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        self.statusBar().showMessage(f"Emulator {active_number:02d}/{target:02d} 비교 계산 중...")
+        active_title = _emulator_mode_title(active_number)
+        target_title = _emulator_mode_title(target)
+        self.statusBar().showMessage(f"{active_title} / {target_title} 비교 계산 중...")
         success = False
-        self._start_run_progress(f"Emulator {active_number:02d} 실행 중")
+        self._start_run_progress(f"{active_title} 실행 중")
         try:
             current_cfg = self._config_for_emulator_number(active_number, force_model_enabled=True)
             target_cfg = self._config_for_emulator_number(target, force_model_enabled=True)
@@ -6872,32 +7229,32 @@ class TrenchDepoWindow(QMainWindow):
                 progress_cb=lambda step, total: self._update_run_progress(
                     step,
                     total,
-                    label=f"Emulator {active_number:02d}",
+                    label=active_title,
                 ),
             )
             current_elapsed = time.perf_counter() - t0
             t1 = time.perf_counter()
-            self._start_run_progress(f"Emulator {target:02d} 실행 중")
+            self._start_run_progress(f"{target_title} 실행 중")
             target_result = run_trench_depo(
                 target_cfg,
                 progress_cb=lambda step, total: self._update_run_progress(
                     step,
                     total,
-                    label=f"Emulator {target:02d}",
+                    label=target_title,
                 ),
             )
             target_elapsed = time.perf_counter() - t1
             cases = [
                 TrenchSweepResult(
                     parameter="emulator_compare",
-                    label=f"Current Emulator {active_number:02d} - {_emulator_mode_title(active_number)} ({current_elapsed:.2f}s)",
+                    label=f"Current {active_title} ({current_elapsed:.2f}s)",
                     value=float(active_number),
                     config=current_cfg,
                     result=current_result,
                 ),
                 TrenchSweepResult(
                     parameter="emulator_compare",
-                    label=f"Compare Emulator {target:02d} - {_emulator_mode_title(target)} ({target_elapsed:.2f}s)",
+                    label=f"Compare {target_title} ({target_elapsed:.2f}s)",
                     value=float(target),
                     config=target_cfg,
                     result=target_result,
@@ -6908,7 +7265,7 @@ class TrenchDepoWindow(QMainWindow):
             QMessageBox.critical(
                 self,
                 "Emulator Compare",
-                f"Emulator {active_number:02d}/{target:02d} 비교 실패:\n{exc}",
+                f"{active_title} / {target_title} 비교 실패:\n{exc}",
             )
             return
         finally:
@@ -6922,7 +7279,7 @@ class TrenchDepoWindow(QMainWindow):
         window.show()
         window.raise_()
         window.activateWindow()
-        self.statusBar().showMessage(f"Emulator {active_number:02d}/{target:02d} 비교 완료", 5000)
+        self.statusBar().showMessage(f"{active_title} / {target_title} 비교 완료", 5000)
 
     def run_gapsim_angle_compare(self, _checked: bool = False) -> None:
         if not self._active_emulator_supports_sputter():
@@ -6965,7 +7322,7 @@ class TrenchDepoWindow(QMainWindow):
             cases = [
                 TrenchSweepResult(
                     parameter="model_compare",
-                    label=f"Current Emulator {self.active_emulator_number():02d} ({mini_elapsed:.2f}s)",
+                    label=f"Current {_emulator_mode_title(self.active_emulator_number())} ({mini_elapsed:.2f}s)",
                     value=0.0,
                     config=config,
                     result=mini_result,
@@ -7004,7 +7361,7 @@ class TrenchDepoWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "Model Compare",
-                "GapSim redeposition comparison is available in Emulator 04.",
+                "GapSim redeposition comparison is available in the redeposition model.",
             )
             return
         self.btn_run_compare.setEnabled(False)
@@ -7038,7 +7395,7 @@ class TrenchDepoWindow(QMainWindow):
             cases = [
                 TrenchSweepResult(
                     parameter="model_compare",
-                    label=f"Mini Emulator 04 redepo ({mini_elapsed:.2f}s)",
+                    label=f"Mini {_emulator_mode_title(self.active_emulator_number())} redepo ({mini_elapsed:.2f}s)",
                     value=0.0,
                     config=config,
                     result=mini_result,

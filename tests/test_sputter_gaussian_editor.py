@@ -161,6 +161,26 @@ class SputterGaussianEditorTest(unittest.TestCase):
 
         self.assertFalse(pixmap.isNull())
 
+    def test_redeposition_lobe_editor_reflection_mode_controls_spread_and_bias(self) -> None:
+        editor = RedepositionLobeEditor()
+        editor.resize(440, 180)
+        seen = []
+        editor.parametersChanged.connect(lambda eff, spread, bias: seen.append((eff, spread, bias)))
+        editor.set_mode("reflection")
+        editor.set_parameters(35.0, 22.0, -40.0)
+
+        self.assertEqual(editor.parameters(), (35.0, 22.0, -40.0))
+
+        source = editor._source_point()
+        spread_point = editor._point_from_polar(editor._axis_angle_deg() + 42.0, editor._max_radius() * 0.85)
+        editor._apply_drag("emit_right", spread_point)
+        self.assertAlmostEqual(editor.parameters()[1], 42.0, places=6)
+
+        bias_point = editor._point_from_polar(editor._specular_axis_angle_deg(), editor._max_radius() * 0.58)
+        editor._apply_drag("distance", bias_point)
+        self.assertAlmostEqual(editor.parameters()[2], 100.0, places=6)
+        self.assertTrue(seen)
+
     def test_depth_deposition_editor_drags_decay_floor_and_closure(self) -> None:
         editor = DepthDepositionProfileEditor()
         editor.resize(420, 170)
@@ -429,7 +449,7 @@ class SputterGaussianEditorTest(unittest.TestCase):
             self.assertTrue(window._active_emulator_supports_ion_transmission())
             self.assertFalse(window._active_emulator_supports_reflected_ion())
             self.assertEqual(window.chk_sputter.text(), "Etch enabled")
-            self.assertEqual(window.lbl_etch_section.text(), "Etch switch (3 ion transmission depth)")
+            self.assertEqual(window.lbl_etch_section.text(), "Direct angle sputter etch (ion transmission source)")
             self.assertFalse(window.ion_map_group.isHidden())
             self.assertTrue(all(not widget.isHidden() for widget in window._ion_transmission_widgets))
             self.assertEqual(tuple(window.ion_transmission_editor._points), tuple(window._current_geometry_points()))
@@ -783,7 +803,7 @@ class SputterGaussianEditorTest(unittest.TestCase):
 
                 self.assertIs(captured["config"], window._result_config)
                 params_text = window.edit_result_parameters.toPlainText()
-                self.assertIn("에뮬레이터: 02", params_text)
+                self.assertIn("에뮬레이터: Direct angle sputter etch", params_text)
                 self.assertIn("Cycles: 2", params_text)
                 self.assertIn("Depo: 12.500 A/CYC", params_text)
                 self.assertIn("Direct sputter: ON", params_text)
@@ -1030,7 +1050,7 @@ class SputterGaussianEditorTest(unittest.TestCase):
             self.assertFalse(window.chk_redepo.isHidden())
             self.assertFalse(window.lbl_redepo_efficiency.isHidden())
             self.assertTrue(window.cmb_redepo_source_model.isHidden())
-            self.assertTrue(window.redepo_lobe_group.isHidden())
+            self.assertFalse(window.redepo_lobe_group.isHidden())
             self.assertTrue(all(widget.isHidden() for widget in window._lf_overhang_widgets))
             self.assertTrue(all(not widget.isHidden() for widget in [
                 window.lbl_depth_depo_section,
@@ -1085,6 +1105,45 @@ class SputterGaussianEditorTest(unittest.TestCase):
         finally:
             window.close()
 
+    def test_model_parameter_sections_can_reorder_by_title(self) -> None:
+        result = TrenchDepoResult(
+            frame_steps=[0],
+            frame_profiles=[[(0.0, 0.0), (1.0, 0.0)]],
+            frame_voids=[[]],
+            final_profile=[(0.0, 0.0), (1.0, 0.0)],
+            meta={"cycles": 0},
+        )
+        with (
+            mock.patch("gapsim.emulation.trench_depo_ui.run_trench_depo", return_value=result),
+            mock.patch("gapsim.emulation.trench_depo_ui.QTimer.singleShot"),
+        ):
+            window = TrenchDepoWindow()
+
+        def grid_row(widget):
+            index = window.params_grid.indexOf(widget)
+            self.assertGreaterEqual(index, 0)
+            row, _column, _row_span, _column_span = window.params_grid.getItemPosition(index)
+            return row
+
+        try:
+            top_titles = [
+                window.lbl_etch_section.text(),
+                window.lbl_ion_depth_section.text(),
+                window.lbl_redepo_section.text(),
+                window.lbl_depth_depo_section.text(),
+                window.lbl_inhibition_section.text(),
+            ]
+            self.assertTrue(all("번" not in title for title in top_titles))
+            self.assertLess(grid_row(window.lbl_etch_section), grid_row(window.lbl_depth_depo_section))
+
+            window._move_model_parameter_section("depth", "direct")
+
+            self.assertEqual(window._model_parameter_section_order[0], "depth")
+            self.assertLess(grid_row(window.lbl_depth_depo_section), grid_row(window.lbl_etch_section))
+            self.assertLess(grid_row(window.lbl_etch_section), grid_row(window.lbl_ion_depth_section))
+        finally:
+            window.close()
+
     def test_emulator_six_exposes_reflection_gaussian_redepo_controls(self) -> None:
         result = TrenchDepoResult(
             frame_steps=[0],
@@ -1108,7 +1167,7 @@ class SputterGaussianEditorTest(unittest.TestCase):
             self.assertFalse(window._active_emulator_supports_depth_deposition())
             self.assertEqual(window.cmb_compare_target.currentData(), 2)
             self.assertIn("reflection", window.lbl_etch_section.text().lower())
-            self.assertIn("Reflection", window.lbl_redepo_section.text())
+            self.assertIn("reflection", window.lbl_redepo_section.text())
             self.assertEqual(window.lbl_redepo_emit_power.text(), "Angular spread deg")
             self.assertEqual(window.lbl_redepo_distance_power.text(), "Specular bias %")
             self.assertGreaterEqual(window.spin_redepo_emit_power.maximum(), 80.0)
@@ -1116,7 +1175,9 @@ class SputterGaussianEditorTest(unittest.TestCase):
             self.assertGreaterEqual(window.spin_redepo_distance_power.maximum(), 100.0)
             self.assertFalse(window.lbl_redepo_efficiency.isHidden())
             self.assertTrue(window.cmb_redepo_source_model.isHidden())
-            self.assertTrue(window.redepo_lobe_group.isHidden())
+            self.assertFalse(window.redepo_lobe_group.isHidden())
+            self.assertTrue(window.redepo_lobe_group.isEnabled())
+            self.assertEqual(window.redepo_lobe_editor.parameters(), (25.0, 22.0, 25.0))
             self.assertFalse(window.chk_show_redepo_overlay.isHidden())
             self.assertFalse(window.chk_show_redepo_overlay.isEnabled())
 
