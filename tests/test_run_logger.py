@@ -16,7 +16,7 @@ class RunLoggerTest(unittest.TestCase):
             engine_version="1.2.3",
         )
 
-        self.assertEqual(meta["app_name"], "GFS")
+        self.assertEqual(meta["app_name"], "GFE")
         self.assertEqual(meta["engine_version"], "1.2.3")
         self.assertIn("created_at_local", meta)
         self.assertIsInstance(meta["python"], str)

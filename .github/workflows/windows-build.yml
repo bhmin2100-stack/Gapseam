@@ -1,15 +1,16 @@
-name: Build Windows Portable EXE
+name: Build GFE Windows Portable EXE
 
 on:
   workflow_dispatch:
   push:
     branches:
       - main
+      - GFE
       - "codex/**"
 
 jobs:
   build-windows:
-    name: Build portable Windows package
+    name: Build portable GFE Windows package
     runs-on: windows-latest
     timeout-minutes: 45
 
@@ -33,23 +34,20 @@ jobs:
           QT_QPA_PLATFORM: offscreen
         run: .\.venv\Scripts\python.exe -m pytest
 
-      - name: Build portable Windows package
-        run: .\build_gfs_portable.bat
+      - name: Build portable GFE Windows package
+        run: .\build_gfe_portable.bat
 
       - name: Verify executables
         shell: pwsh
         run: |
-          if (!(Test-Path "dist/GFS/GFS.exe")) {
-            throw "dist/GFS/GFS.exe was not created"
-          }
-          if (!(Test-Path "dist/GFS/GFS_Emulator.exe")) {
-            throw "dist/GFS/GFS_Emulator.exe was not created"
+          if (!(Test-Path "dist/GFE/GFE.exe")) {
+            throw "dist/GFE/GFE.exe was not created"
           }
           Get-ChildItem "dist" | Format-Table Name, Length
 
       - name: Upload portable package
         uses: actions/upload-artifact@v4
         with:
-          name: GFS-windows-portable
-          path: dist/GFS_portable_*.zip
+          name: GFE-windows-portable
+          path: dist/GFE_portable_*.zip
           if-no-files-found: error

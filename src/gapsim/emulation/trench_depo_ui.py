@@ -2617,7 +2617,7 @@ class TrenchDepoWindow(QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("트렌치 Depo 에뮬레이션")
+        self.setWindowTitle("GFE - 트렌치 Depo 에뮬레이터")
         self.resize(1280, 820)
 
         self._result: Optional[TrenchDepoResult] = None
@@ -5863,7 +5863,7 @@ class TrenchDepoWindow(QMainWindow):
         supports_lf_overhang = self._active_emulator_supports_lf_overhang()
         supports_closure_redepo = self._active_emulator_supports_closure_redepo()
 
-        self.setWindowTitle(f"트렌치 Depo 에뮬레이션 - {_emulator_mode_title(number)}")
+        self.setWindowTitle(f"GFE - {_emulator_mode_title(number)}")
         if changed and not preserve_geometry:
             self._reset_geometry_to_default()
 

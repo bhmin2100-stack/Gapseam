@@ -3,7 +3,8 @@ setlocal EnableExtensions DisableDelayedExpansion
 
 cd /d "%~dp0"
 
-call "%~dp0run_simulator.bat"
+rem Legacy alias: GFE now starts the mini emulator by default.
+call "%~dp0run_gfe.bat"
 set "EXIT_CODE=%errorlevel%"
 
 endlocal

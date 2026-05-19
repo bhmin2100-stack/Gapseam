@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import platform
@@ -10,7 +10,7 @@ from typing import Any, Dict
 def create_run_dir(runs_root: Path, case_name: str) -> Path:
     runs_root.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    safe = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in (case_name or "gfs"))
+    safe = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in (case_name or "gfe"))
     base_name = f"{ts}_{safe}"
     for i in range(0, 1000):
         suffix = "" if i == 0 else f"_{i:03d}"
@@ -41,7 +41,7 @@ def _runtime_info() -> Dict[str, str]:
 def make_meta(recipe: Dict[str, Any], engine_version: str = "0.0.0") -> Dict[str, Any]:
     runtime = _runtime_info()
     return {
-        "app_name": "GFS",
+        "app_name": "GFE",
         "engine_version": engine_version,
         "created_at_local": datetime.now().isoformat(timespec="seconds"),
         "python": runtime["python"],

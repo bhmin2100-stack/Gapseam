@@ -4,8 +4,8 @@ from typing import Dict
 
 TEXT: Dict[str, Dict[str, str]] = {
     "app.title": {
-        "ko": "GFS",
-        "en": "GFS"
+        "ko": "GFE",
+        "en": "GFE"
     },
     "toolbar.top": {
         "ko": "\uc0c1\ub2e8 \ubcf4\uae30",
@@ -876,12 +876,12 @@ TEXT: Dict[str, Dict[str, str]] = {
         "en": "{idx}/{total}  draw failed"
     },
     "dialog.open.title": {
-        "ko": "Open GFS JSON",
-        "en": "Open GFS JSON"
+        "ko": "Open GFE JSON",
+        "en": "Open GFE JSON"
     },
     "dialog.save.title": {
-        "ko": "Save GFS JSON",
-        "en": "Save GFS JSON"
+        "ko": "Save GFE JSON",
+        "en": "Save GFE JSON"
     },
     "dialog.file_filter": {
         "ko": "JSON (*.json);;All Files (*)",
