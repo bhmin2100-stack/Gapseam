@@ -1,5 +1,8 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+# Legacy name kept for history/compatibility.
+# GFE.spec is the canonical PyInstaller spec for current packaging.
+
 from pathlib import Path
 
 ROOT = Path(SPECPATH).resolve()

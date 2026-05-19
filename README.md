@@ -5,6 +5,25 @@ GFE(Gap Fill Emulator)는 Gap Fill 공정 아이디어를 빠르게 실험하기
 
 내부 Python 패키지 경로는 호환성을 위해 아직 `gapsim`을 유지합니다.
 
+## Repository Status
+
+- **현재 메인 제품/실행 대상:** GFE 미니 에뮬레이터 (`gfe`, `run_gfe.*`, `GFE.spec`)
+- **공식 패키징 대상:** `dist/GFE` / `GFE_portable_*.zip` / `GFE.app`
+- **레거시 GapSim 풀 UI:** `src/gapsim/ui_qt/main_window.py`, `launcher_window.py` 등은 과거 구현 이력 조회와 호환 검증용으로 보존합니다.
+- **레거시 alias:** `run_gapsim.*`, `run_simulator.bat`, `run_emulator.*`, `build_gfs_*`는 기존 사용자를 위해 남겨둔 alias이며 내부적으로 GFE를 실행/빌드합니다.
+
+새 기능과 배포 스크립트는 GFE 기준으로 추가하고, 예전 GapSim 흐름은 필요한 경우에만 이력 확인용으로 참고합니다. 자세한 구분은 [`LEGACY_GAPSIM.md`](LEGACY_GAPSIM.md)를 봅니다.
+
+## 연속 Depo 실행
+
+결과 탭의 **다음 Depo** 버튼은 마지막 stage뿐 아니라 선택한 stage 완료 시점에서도 이어달리기를 시작할 수 있습니다.
+
+- 1차 실행 후 `다음 Depo: 2차`
+- 2차 결과에서 다시 `다음 Depo: 3차`
+- 같은 방식으로 4차, 5차 이상 계속 진행 가능
+
+각 run의 `profiles.json`에는 이전 stage 이력이 함께 저장되어, 나중에 3차/4차 run 폴더만 다시 열어도 앞선 Depo 이력을 복원할 수 있습니다.
+
 ## Build / Packaging Entry Point (SSOT)
 
 이 저장소의 **공식 빌드 진입점은 루트 `pyproject.toml`** 입니다.

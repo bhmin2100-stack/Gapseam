@@ -36,6 +36,7 @@ from gapsim.emulation.trench_depo_export import export_trench_depo_run
 from gapsim.emulation.trench_depo_export import export_trench_depo_sweep_runs
 from gapsim.emulation.trench_depo_export import load_trench_depo_run
 from gapsim.emulation.trench_depo_export import load_trench_depo_split_group
+from gapsim.emulation.trench_depo_ui import merge_continued_trench_result
 
 try:
     import pyclipper  # noqa: F401
@@ -128,6 +129,51 @@ class TrenchDepoEmulationTest(unittest.TestCase):
         self.assertEqual(config.redepo_transport_model, "gapsim_binned_lobe_los")
         self.assertFalse(config.lf_overhang_enabled)
         self.assertAlmostEqual(config.lf_overhang_dose, 1.0, places=9)
+
+    def test_gfe_continued_depo_merge_keeps_history_self_contained(self) -> None:
+        a = [(-10.0, 0.0), (10.0, 0.0)]
+        b = [(-9.0, 0.0), (9.0, 0.0)]
+        c = [(-8.0, 0.0), (8.0, 0.0)]
+        base = TrenchDepoResult(
+            frame_steps=[0, 1],
+            frame_profiles=[a, b],
+            frame_voids=[[], []],
+            final_profile=b,
+            meta={
+                "cycles": 1,
+                "stage_index": 1,
+                "frame_etch_overlays": [[], []],
+                "frame_redepo_overlays": [[], []],
+                "frame_transport_lines": [[], []],
+            },
+        )
+        second = TrenchDepoResult(
+            frame_steps=[0, 1],
+            frame_profiles=[b, c],
+            frame_voids=[[], []],
+            final_profile=c,
+            meta={
+                "cycles": 1,
+                "frame_etch_overlays": [[], []],
+                "frame_redepo_overlays": [[], []],
+                "frame_transport_lines": [[], []],
+            },
+        )
+
+        merged = merge_continued_trench_result(
+            base,
+            second,
+            stage_index=2,
+            continued_from_run=Path("runs/first"),
+        )
+
+        self.assertEqual(merged.frame_profiles, [a, b, c])
+        self.assertEqual(merged.frame_steps, [0, 1, 2])
+        self.assertEqual(merged.final_profile, c)
+        self.assertTrue(merged.meta["history_self_contained"])
+        self.assertEqual(merged.meta["stage_index"], 2)
+        self.assertEqual(merged.meta["cycles"], 2)
+        self.assertEqual([item["stage"] for item in merged.meta["stage_history"]], [1, 2])
 
     @unittest.skipIf(pyclipper is None, "pyclipper is not installed")
     def test_rebuilt_active_emulators_enable_redepo_only_for_integrated_and_model_six(self) -> None:

@@ -224,6 +224,129 @@ class MainWindowProjectResultsTest(unittest.TestCase):
         finally:
             win.close()
 
+    def test_load_result_payload_recursively_restores_multi_stage_depo_history(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            stage1 = root / "20260519_210001_caseA"
+            stage2 = root / "20260519_210002_caseA_p2"
+            stage3 = root / "20260519_210003_caseA_p3"
+            for run_dir in (stage1, stage2, stage3):
+                run_dir.mkdir(parents=True, exist_ok=True)
+                (run_dir / "recipe.json").write_text(
+                    json.dumps({"run": {"case_name": run_dir.name, "cycles": 1}}),
+                    encoding="utf-8",
+                )
+                (run_dir / "meta.json").write_text(json.dumps({}), encoding="utf-8")
+
+            a = [(-10.0, 0.0), (10.0, 0.0)]
+            b = [(-9.0, 0.0), (9.0, 0.0)]
+            c = [(-8.0, 0.0), (8.0, 0.0)]
+            d = [(-7.0, 0.0), (7.0, 0.0)]
+            (stage1 / "profiles.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "stage": {"index": 1, "continued_from": None},
+                        "frame_steps": [0, 1],
+                        "frame_profiles": [a, b],
+                        "frame_voids": [[], []],
+                        "frame_voids_mode": "current",
+                        "frame_stage_ids": [1, 1],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (stage2 / "profiles.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "stage": {"index": 2, "continued_from": str(stage1)},
+                        "frame_steps": [0, 1],
+                        "frame_profiles": [b, c],
+                        "frame_voids": [[], []],
+                        "frame_voids_mode": "current",
+                        "frame_stage_ids": [2, 2],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (stage3 / "profiles.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "stage": {"index": 3, "continued_from": str(stage2)},
+                        "frame_steps": [0, 1],
+                        "frame_profiles": [c, d],
+                        "frame_voids": [[], []],
+                        "frame_voids_mode": "current",
+                        "frame_stage_ids": [3, 3],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            payload = main_window_module.load_result_payload_from_run_dir(stage3)
+
+            self.assertTrue(payload["history_complete"])
+            self.assertEqual(payload["frames"], [a, b, c, d])
+            self.assertEqual(payload["steps"], [0, 1, 2, 3])
+            self.assertEqual(payload["stage_ids"], [1, 1, 2, 3])
+            self.assertEqual(payload["stage_info"]["index"], 3)
+
+    def test_continuation_merge_persists_self_contained_history_for_reopen(self) -> None:
+        win = MainWindow()
+        try:
+            with TemporaryDirectory() as tmpdir:
+                run_dir = Path(tmpdir) / "20260519_210002_caseA_p2"
+                run_dir.mkdir(parents=True, exist_ok=True)
+                b = [(-9.0, 0.0), (9.0, 0.0)]
+                c = [(-8.0, 0.0), (8.0, 0.0)]
+                (run_dir / "profiles.json").write_text(
+                    json.dumps(
+                        {
+                            "version": 1,
+                            "stage": {"index": 2, "continued_from": None},
+                            "frame_steps": [0, 1],
+                            "frame_profiles": [b, c],
+                            "frame_voids": [[], []],
+                            "frame_voids_mode": "current",
+                            "frame_stage_ids": [2, 2],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+                a = [(-10.0, 0.0), (10.0, 0.0)]
+                win._last_run_dir = run_dir
+                win._continuation_base_frames = [a, b]
+                win._continuation_base_voids = [[], []]
+                win._continuation_base_steps = [0, 1]
+                win._continuation_base_stage_ids = [1, 1]
+                win._continuation_base_void_mode = "current"
+                win._continuation_base_run_dir = Path(tmpdir) / "20260519_210001_caseA"
+                win._continuation_stage_index = 2
+                win._result_frames = [b, c]
+                win._result_voids = [[], []]
+                win._result_steps = [0, 1]
+                win._result_stage_ids = [2, 2]
+                win._result_void_mode = "current"
+
+                win._merge_stages_with_continuation_base()
+
+                saved = json.loads((run_dir / "profiles.json").read_text(encoding="utf-8"))
+                self.assertTrue(saved["history_self_contained"])
+                self.assertEqual(
+                    saved["frame_profiles"],
+                    [
+                        [[float(x), float(y)] for x, y in frame]
+                        for frame in [a, b, c]
+                    ],
+                )
+                self.assertEqual(saved["frame_stage_ids"], [1, 1, 2])
+                self.assertEqual(saved["frame_steps"], [0, 1, 2])
+        finally:
+            win.close()
+
     def test_sputter_only_turns_off_conformal_and_serializes_reference_mode(self) -> None:
         win = MainWindow()
         try:

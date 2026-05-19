@@ -92,7 +92,16 @@ REPARAM_PRESET_LIMITS_A: Dict[str, Tuple[float, float]] = {
 }
 
 
-def load_result_payload_from_run_dir(run_dir: Path) -> Dict[str, Any]:
+def _profiles_same_points(a: List[Point], b: List[Point], tol: float = 1e-6) -> bool:
+    if len(a) != len(b):
+        return False
+    for (ax, ay), (bx, by) in zip(a, b):
+        if abs(float(ax) - float(bx)) > tol or abs(float(ay) - float(by)) > tol:
+            return False
+    return True
+
+
+def _load_result_payload_single(run_dir: Path) -> Dict[str, Any]:
     run_dir = Path(run_dir)
     profiles_path = run_dir / "profiles.json"
     recipe_path = run_dir / "recipe.json"
@@ -107,9 +116,11 @@ def load_result_payload_from_run_dir(run_dir: Path) -> Dict[str, Any]:
     void_mode = "legacy_cumulative"
     recipe: Dict[str, Any] = {}
     meta: Dict[str, Any] = {}
+    history_self_contained = False
 
     if profiles_path.exists():
         data = json.loads(profiles_path.read_text(encoding="utf-8"))
+        history_self_contained = bool(data.get("history_self_contained", False))
         raw_frames = data.get("frame_profiles") or []
         raw_voids = data.get("frame_voids") or []
         raw_steps = data.get("frame_steps") or []
@@ -201,7 +212,208 @@ def load_result_payload_from_run_dir(run_dir: Path) -> Dict[str, Any]:
         "void_mode": void_mode,
         "recipe": recipe,
         "meta": meta,
+        "run_dir": str(run_dir.resolve()),
+        "history_self_contained": history_self_contained,
+        "history_complete": False,
     }
+
+
+def _payload_stage_index(payload: Dict[str, Any]) -> int:
+    stage_info = payload.get("stage_info")
+    if not isinstance(stage_info, dict):
+        return 1
+    try:
+        return max(1, int(stage_info.get("index", 1)))
+    except Exception:
+        return 1
+
+
+def _payload_has_prior_stage_history(payload: Dict[str, Any]) -> bool:
+    stage_idx = _payload_stage_index(payload)
+    if stage_idx <= 1:
+        return True
+    if bool(payload.get("history_self_contained", False)):
+        return True
+    stage_ids = payload.get("stage_ids")
+    present: set[int] = set()
+    if isinstance(stage_ids, list):
+        for sid in stage_ids:
+            try:
+                present.add(max(1, int(sid)))
+            except Exception:
+                continue
+    return all(sid in present for sid in range(1, stage_idx))
+
+
+def _resolve_continuation_run_dir(continued_from: Any, current_run_dir: Path) -> Optional[Path]:
+    text = str(continued_from or "").strip()
+    if not text:
+        return None
+    raw = Path(text).expanduser()
+    current_run_dir = Path(current_run_dir)
+    candidates: List[Path] = []
+    if raw.is_absolute():
+        candidates.append(raw)
+        if raw.name:
+            candidates.append(current_run_dir.parent / raw.name)
+    else:
+        candidates.extend(
+            [
+                current_run_dir / raw,
+                current_run_dir.parent / raw,
+                current_run_dir.parent.parent / raw,
+            ]
+        )
+        if raw.name:
+            candidates.append(current_run_dir.parent / raw.name)
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except Exception:
+            resolved = candidate
+        key = str(resolved)
+        if key in seen:
+            continue
+        seen.add(key)
+        if (resolved / "profiles.json").exists():
+            return resolved
+    return None
+
+
+def _merged_x_window(
+    base_payload: Dict[str, Any],
+    current_payload: Dict[str, Any],
+    merged_frames: List[List[Point]],
+) -> Optional[Tuple[float, float]]:
+    windows: List[Tuple[float, float]] = []
+    for payload in (base_payload, current_payload):
+        raw = payload.get("x_window")
+        if isinstance(raw, (list, tuple)) and len(raw) == 2:
+            try:
+                windows.append((float(raw[0]), float(raw[1])))
+            except Exception:
+                pass
+    if windows:
+        return (min(w[0] for w in windows), max(w[1] for w in windows))
+
+    xs = [float(x) for frame in merged_frames for x, _y in frame]
+    if not xs:
+        return None
+    return (min(xs), max(xs))
+
+
+def _merge_result_payload_history(
+    base_payload: Dict[str, Any],
+    current_payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    base_frames = base_payload.get("frames") if isinstance(base_payload.get("frames"), list) else []
+    current_frames = current_payload.get("frames") if isinstance(current_payload.get("frames"), list) else []
+    if not base_frames or not current_frames:
+        out = dict(current_payload)
+        out["history_complete"] = bool(current_payload.get("history_complete", False))
+        return out
+
+    base_voids = base_payload.get("voids") if isinstance(base_payload.get("voids"), list) else []
+    current_voids = current_payload.get("voids") if isinstance(current_payload.get("voids"), list) else []
+    base_steps = base_payload.get("steps") if isinstance(base_payload.get("steps"), list) else []
+    current_steps = current_payload.get("steps") if isinstance(current_payload.get("steps"), list) else []
+    base_stage_ids = base_payload.get("stage_ids") if isinstance(base_payload.get("stage_ids"), list) else []
+    current_stage_ids = current_payload.get("stage_ids") if isinstance(current_payload.get("stage_ids"), list) else []
+    stage_index = _payload_stage_index(current_payload)
+
+    drop_head = 0
+    if _profiles_same_points(base_frames[-1], current_frames[0]):
+        drop_head = 1
+
+    used_frames = list(current_frames[drop_head:])
+    if len(current_voids) == len(current_frames):
+        used_voids = list(current_voids[drop_head:])
+    else:
+        used_voids = [[] for _ in used_frames]
+    if len(current_stage_ids) == len(current_frames):
+        used_stage_ids = [max(1, int(sid)) for sid in current_stage_ids[drop_head:]]
+    else:
+        used_stage_ids = [stage_index for _ in used_frames]
+
+    merged_frames = list(base_frames) + used_frames
+    merged_voids = list(base_voids if len(base_voids) == len(base_frames) else [[] for _ in base_frames]) + used_voids
+
+    merged_steps = [int(s) for s in base_steps] if len(base_steps) == len(base_frames) else list(range(len(base_frames)))
+    step_counter = (merged_steps[-1] + 1) if merged_steps else 0
+    for _ in (current_steps[drop_head:] if len(current_steps) == len(current_frames) else used_frames):
+        merged_steps.append(step_counter)
+        step_counter += 1
+
+    merged_stage_ids = (
+        [max(1, int(sid)) for sid in base_stage_ids]
+        if len(base_stage_ids) == len(base_frames)
+        else [1 for _ in base_frames]
+    )
+    merged_stage_ids.extend(used_stage_ids)
+
+    base_void_mode = "current" if str(base_payload.get("void_mode", "")).lower() == "current" else "legacy_cumulative"
+    current_void_mode = "current" if str(current_payload.get("void_mode", "")).lower() == "current" else "legacy_cumulative"
+    merged_void_mode = "current" if base_void_mode == "current" and current_void_mode == "current" else "legacy_cumulative"
+
+    out = dict(current_payload)
+    out.update(
+        {
+            "frames": merged_frames,
+            "voids": merged_voids if len(merged_voids) == len(merged_frames) else [[] for _ in merged_frames],
+            "steps": merged_steps if len(merged_steps) == len(merged_frames) else list(range(len(merged_frames))),
+            "stage_ids": (
+                merged_stage_ids
+                if len(merged_stage_ids) == len(merged_frames)
+                else [stage_index for _ in merged_frames]
+            ),
+            "x_window": _merged_x_window(base_payload, current_payload, merged_frames),
+            "void_mode": merged_void_mode,
+            "history_self_contained": True,
+            "history_complete": True,
+        }
+    )
+    return out
+
+
+def load_result_payload_from_run_dir(
+    run_dir: Path,
+    *,
+    include_history: bool = True,
+    _seen: Optional[set[str]] = None,
+) -> Dict[str, Any]:
+    run_dir = Path(run_dir)
+    payload = _load_result_payload_single(run_dir)
+    if not include_history:
+        return payload
+
+    seen = set(_seen or set())
+    try:
+        run_key = str(run_dir.resolve())
+    except Exception:
+        run_key = str(run_dir)
+    if run_key in seen:
+        payload["history_complete"] = False
+        return payload
+    seen.add(run_key)
+
+    stage_info = payload.get("stage_info")
+    continued_from = stage_info.get("continued_from") if isinstance(stage_info, dict) else None
+    if not continued_from or _payload_has_prior_stage_history(payload):
+        payload["history_complete"] = True
+        return payload
+
+    base_dir = _resolve_continuation_run_dir(continued_from, run_dir)
+    if base_dir is None:
+        payload["history_complete"] = False
+        return payload
+
+    base_payload = load_result_payload_from_run_dir(base_dir, include_history=True, _seen=seen)
+    if not base_payload.get("frames"):
+        payload["history_complete"] = bool(base_payload.get("history_complete", False))
+        return payload
+    return _merge_result_payload_history(base_payload, payload)
 
 
 class _NoWheelEventFilter(QObject):
@@ -215,15 +427,16 @@ class ResultLoadWorker(QObject):
     loaded = Signal(int, object)
     error = Signal(int, str)
 
-    def __init__(self, *, seq: int, run_dir: Path) -> None:
+    def __init__(self, *, seq: int, run_dir: Path, include_history: bool = True) -> None:
         super().__init__()
         self.seq = int(seq)
         self.run_dir = Path(run_dir)
+        self.include_history = bool(include_history)
 
     @Slot()
     def run(self) -> None:
         try:
-            payload = load_result_payload_from_run_dir(self.run_dir)
+            payload = load_result_payload_from_run_dir(self.run_dir, include_history=self.include_history)
         except Exception as exc:
             self.error.emit(self.seq, str(exc))
             return
@@ -3845,8 +4058,9 @@ class MainWindow(QMainWindow):
         self._update_result_parameter_view()
         self._clear_result_view_state(message_key="results.loading")
 
+        include_history = not (self._continuation_merge_pending and self._continuation_base_frames)
         th = QThread()
-        worker = ResultLoadWorker(seq=seq, run_dir=run_dir)
+        worker = ResultLoadWorker(seq=seq, run_dir=run_dir, include_history=include_history)
         worker.moveToThread(th)
         th.started.connect(worker.run)
         worker.loaded.connect(self._on_result_load_loaded)
@@ -3871,7 +4085,7 @@ class MainWindow(QMainWindow):
 
         if self._continuation_merge_pending and self._continuation_base_frames:
             self._merge_stages_with_continuation_base()
-        else:
+        elif not bool(payload.get("history_complete", False)):
             stage_idx = 1
             try:
                 stage_idx = max(1, int(self._result_stage_info.get("index", 1)))
@@ -3955,8 +4169,69 @@ class MainWindow(QMainWindow):
             "index": stage_index,
             "continued_from": str(self._continuation_base_run_dir) if self._continuation_base_run_dir else None,
         }
+        inferred_window = self._infer_result_x_window_from_frames(self._result_frames)
+        if self._result_x_window is None:
+            self._result_x_window = inferred_window
+        elif inferred_window is not None:
+            self._result_x_window = (
+                min(float(self._result_x_window[0]), float(inferred_window[0])),
+                max(float(self._result_x_window[1]), float(inferred_window[1])),
+            )
 
+        self._persist_current_result_history_to_run_dir(self._last_run_dir)
         self._clear_continuation_context(clear_base=True)
+
+    def _infer_result_x_window_from_frames(self, frames: List[List[Point]]) -> Optional[Tuple[float, float]]:
+        xs = [float(x) for frame in frames for x, _y in frame]
+        if not xs:
+            return None
+        return (min(xs), max(xs))
+
+    def _persist_current_result_history_to_run_dir(self, run_dir: Optional[Path]) -> None:
+        if run_dir is None or not self._result_frames:
+            return
+        run_dir = Path(run_dir)
+        profiles_path = run_dir / "profiles.json"
+        existing: Dict[str, Any] = {}
+        try:
+            if profiles_path.exists():
+                loaded = json.loads(profiles_path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    existing = loaded
+        except Exception:
+            existing = {}
+
+        x_window = self._result_x_window or self._infer_result_x_window_from_frames(self._result_frames)
+        payload = dict(existing)
+        payload.update(
+            {
+                "version": int(existing.get("version", 1) or 1),
+                "stage": dict(self._result_stage_info or {"index": 1}),
+                "frame_steps": [int(v) for v in self._result_steps],
+                "frame_profiles": [
+                    [[float(x), float(y)] for x, y in frame]
+                    for frame in self._result_frames
+                ],
+                "frame_voids": [
+                    [
+                        [[float(x), float(y)] for x, y in poly]
+                        for poly in frame_voids
+                    ]
+                    for frame_voids in self._result_voids
+                ],
+                "frame_voids_mode": (
+                    "current" if str(self._result_void_mode).lower() == "current" else "legacy_cumulative"
+                ),
+                "frame_stage_ids": [max(1, int(v)) for v in self._result_stage_ids],
+                "x_window": list(x_window) if x_window is not None else None,
+                "history_self_contained": True,
+                "history_saved_at_local": datetime.now().isoformat(timespec="seconds"),
+            }
+        )
+        try:
+            profiles_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as exc:
+            self.statusBar().showMessage(f"History save skipped: {exc}", 3000)
 
     def _on_result_load_error(self, seq: int, message: str) -> None:
         if int(seq) != self._result_load_seq:

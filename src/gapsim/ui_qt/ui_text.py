@@ -796,12 +796,12 @@ TEXT: Dict[str, Dict[str, str]] = {
         "en": "Fit"
     },
     "results.second_depo": {
-        "ko": "2\ucc28 Depo (\ud30c\ub77c \ubcc0\uacbd)",
-        "en": "Stage-2 Depo (Change Params)"
+        "ko": "\ub2e4\uc74c Depo: 2\ucc28 (\ud30c\ub77c \ubcc0\uacbd)",
+        "en": "Next Depo: Stage 2 (Change Params)"
     },
     "results.next_depo": {
-        "ko": "{stage}\ucc28 Depo (\ud30c\ub77c \ubcc0\uacbd)",
-        "en": "Stage-{stage} Depo (Change Params)"
+        "ko": "\ub2e4\uc74c Depo: {stage}\ucc28 (\ud30c\ub77c \ubcc0\uacbd)",
+        "en": "Next Depo: Stage {stage} (Change Params)"
     },
     "results.next_depo_from": {
         "ko": "\uc2dc\uc791 \uc2dc\uc810",
@@ -1000,12 +1000,12 @@ TEXT: Dict[str, Dict[str, str]] = {
         "en": "Overlay move mode OFF"
     },
     "status.second_depo_ready": {
-        "ko": "2\ucc28 Depo \uc900\ube44 \uc644\ub8cc: \uc2e4\ud589 \ud0ed\uc5d0\uc11c \ud30c\ub77c\ubbf8\ud130\ub97c \uc870\uc815\ud55c \ub4a4 \uc2dc\uc791\ud558\uc138\uc694.",
-        "en": "Stage-2 Depo ready: tune parameters in Run and start."
+        "ko": "\ub2e4\uc74c Depo 2\ucc28 \uc900\ube44 \uc644\ub8cc: \uc2e4\ud589 \ud0ed\uc5d0\uc11c \ud30c\ub77c\ubbf8\ud130\ub97c \uc870\uc815\ud55c \ub4a4 \uc2dc\uc791\ud558\uc138\uc694.",
+        "en": "Next Depo stage 2 ready: tune parameters in Run and start."
     },
     "status.next_depo_ready": {
-        "ko": "{stage}\ucc28 Depo \uc900\ube44 \uc644\ub8cc: \uc2e4\ud589 \ud0ed\uc5d0\uc11c \ud30c\ub77c\ubbf8\ud130\ub97c \uc870\uc815\ud55c \ub4a4 \uc2dc\uc791\ud558\uc138\uc694.",
-        "en": "Stage-{stage} Depo ready: tune parameters in Run and start."
+        "ko": "\ub2e4\uc74c Depo {stage}\ucc28 \uc900\ube44 \uc644\ub8cc: \uc2e4\ud589 \ud0ed\uc5d0\uc11c \ud30c\ub77c\ubbf8\ud130\ub97c \uc870\uc815\ud55c \ub4a4 \uc2dc\uc791\ud558\uc138\uc694.",
+        "en": "Next Depo stage {stage} ready: tune parameters in Run and start."
     },
     "status.export_done": {
         "ko": "Export complete: {path}",

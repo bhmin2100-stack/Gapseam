@@ -164,6 +164,123 @@ def _elide_middle(text: str, max_chars: int) -> str:
     return f"{raw[:left]}...{raw[-right:]}"
 
 
+def _profiles_same_points(
+    a: Sequence[Tuple[float, float]],
+    b: Sequence[Tuple[float, float]],
+    *,
+    tol: float = 1e-6,
+) -> bool:
+    if len(a) != len(b):
+        return False
+    for (ax, ay), (bx, by) in zip(a, b):
+        if abs(float(ax) - float(bx)) > tol or abs(float(ay) - float(by)) > tol:
+            return False
+    return True
+
+
+def _result_frame_series(
+    result: TrenchDepoResult,
+    key: str,
+) -> List[Any]:
+    raw = result.meta.get(key)
+    if isinstance(raw, list) and len(raw) == len(result.frame_profiles):
+        return list(raw)
+    return [[] for _ in result.frame_profiles]
+
+
+def merge_continued_trench_result(
+    base_result: TrenchDepoResult,
+    next_result: TrenchDepoResult,
+    *,
+    stage_index: int,
+    continued_from_run: Optional[Path],
+) -> TrenchDepoResult:
+    """Return a self-contained result that includes all previous Depo stages."""
+
+    if not base_result.frame_profiles or not next_result.frame_profiles:
+        return next_result
+
+    stage_i = max(2, int(stage_index))
+    drop_head = 1 if _profiles_same_points(base_result.frame_profiles[-1], next_result.frame_profiles[0]) else 0
+    used_frames = list(next_result.frame_profiles[drop_head:])
+    used_voids = (
+        list(next_result.frame_voids[drop_head:])
+        if len(next_result.frame_voids) == len(next_result.frame_profiles)
+        else [[] for _ in used_frames]
+    )
+
+    base_steps = (
+        [int(v) for v in base_result.frame_steps]
+        if len(base_result.frame_steps) == len(base_result.frame_profiles)
+        else list(range(len(base_result.frame_profiles)))
+    )
+    merged_steps = list(base_steps)
+    step_counter = (merged_steps[-1] + 1) if merged_steps else 0
+    for _ in used_frames:
+        merged_steps.append(step_counter)
+        step_counter += 1
+
+    base_voids = (
+        list(base_result.frame_voids)
+        if len(base_result.frame_voids) == len(base_result.frame_profiles)
+        else [[] for _ in base_result.frame_profiles]
+    )
+    merged_frames = list(base_result.frame_profiles) + used_frames
+    merged_voids = base_voids + used_voids
+
+    meta = dict(next_result.meta)
+    base_meta = dict(base_result.meta)
+    for key in ("frame_redepo_overlays", "frame_etch_overlays", "frame_transport_lines"):
+        meta[key] = _result_frame_series(base_result, key) + _result_frame_series(next_result, key)[drop_head:]
+
+    previous_history = base_meta.get("stage_history")
+    if isinstance(previous_history, list) and previous_history:
+        stage_history = [dict(item) for item in previous_history if isinstance(item, Mapping)]
+    else:
+        base_stage = int(base_meta.get("stage_index", base_meta.get("stage_count", 1)) or 1)
+        stage_history = [
+            {
+                "stage": max(1, base_stage),
+                "start_step": int(base_steps[0]) if base_steps else 0,
+                "end_step": int(base_steps[-1]) if base_steps else 0,
+                "frames": len(base_result.frame_profiles),
+            }
+        ]
+
+    if used_frames:
+        stage_history.append(
+            {
+                "stage": stage_i,
+                "start_step": int(merged_steps[len(base_result.frame_profiles)]),
+                "end_step": int(merged_steps[-1]),
+                "frames": len(used_frames),
+                "continued_from_run": "" if continued_from_run is None else str(Path(continued_from_run)),
+            }
+        )
+
+    meta.update(
+        {
+            "cycles": int(merged_steps[-1]) if merged_steps else int(meta.get("cycles", 0) or 0),
+            "stage_cycles": int(next_result.meta.get("cycles", max(0, len(next_result.frame_profiles) - 1)) or 0),
+            "stage_index": stage_i,
+            "stage_count": max(stage_i, int(base_meta.get("stage_count", 1) or 1)),
+            "continued_from_run": "" if continued_from_run is None else str(Path(continued_from_run)),
+            "history_self_contained": True,
+            "stage_history": stage_history,
+            "initial_points": len(merged_frames[0]) if merged_frames else int(meta.get("initial_points", 0) or 0),
+            "final_points": len(next_result.final_profile),
+        }
+    )
+
+    return TrenchDepoResult(
+        frame_steps=merged_steps,
+        frame_profiles=merged_frames,
+        frame_voids=merged_voids if len(merged_voids) == len(merged_frames) else [[] for _ in merged_frames],
+        final_profile=list(next_result.final_profile),
+        meta=meta,
+    )
+
+
 _DEFAULT_STRUCTURE_PRESET_NAMES = {
     "em00_integrated_depo_etch_depth": "통합 트렌치",
     "em01_conformal": "기본 트렌치",
@@ -2622,6 +2739,9 @@ class TrenchDepoWindow(QMainWindow):
 
         self._result: Optional[TrenchDepoResult] = None
         self._last_run_dir: Optional[Path] = None
+        self._continuation_base_result: Optional[TrenchDepoResult] = None
+        self._continuation_base_run_dir: Optional[Path] = None
+        self._continuation_stage_index = 1
         self._split_windows: List[SplitTestWindow] = []
         self._syncing_sputter_curve = False
         self._syncing_ion_curve = False
@@ -3055,6 +3175,9 @@ class TrenchDepoWindow(QMainWindow):
         self.slider_frame.setEnabled(False)
         self.btn_result_play = QPushButton("반복재생")
         self.btn_result_play.setEnabled(False)
+        self.btn_next_depo = QPushButton("다음 Depo: 2차")
+        self.btn_next_depo.setEnabled(False)
+        self.btn_next_depo.setToolTip("현재 결과의 마지막 profile에서 다음 Depo 차수를 이어서 시작합니다.")
         self.chk_show_etch_overlay = QCheckBox("에치 파랑")
         self.chk_show_etch_overlay.setChecked(True)
         self.chk_show_etch_overlay.setToolTip("실제 에치가 강한 위치를 파란색으로 표시합니다.")
@@ -3119,6 +3242,7 @@ class TrenchDepoWindow(QMainWindow):
         controls.addWidget(self.chk_show_etch_overlay)
         controls.addWidget(self.chk_show_redepo_overlay)
         controls.addWidget(self.btn_result_play)
+        controls.addWidget(self.btn_next_depo)
 
         run_row = QHBoxLayout()
         run_row.setContentsMargins(0, 0, 0, 0)
@@ -4074,6 +4198,7 @@ class TrenchDepoWindow(QMainWindow):
         self.btn_progress_panel_next.clicked.connect(lambda: self._set_workflow_step("results"))
         self.btn_results_panel_back.clicked.connect(lambda: self._set_workflow_step("progress"))
         self.btn_result_play.clicked.connect(self.toggle_result_playback)
+        self.btn_next_depo.clicked.connect(self.start_next_depo_stage)
         self.cmb_quality_mode.currentIndexChanged.connect(self._on_quality_mode_changed)
         self.spin_reparam_ds.valueChanged.connect(self._on_reparam_ds_changed)
         self.btn_load_overlay.clicked.connect(self._load_overlay_image)
@@ -4308,6 +4433,7 @@ class TrenchDepoWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "구조 라이브러리", f"구조 '{sheet_name}' 불러오기 실패:\n{exc}")
             return
+        self._clear_continuation_context()
         self._active_structure_sheet_name = sheet_name
         self.edit_structure_name.setText(_structure_preset_display_name(sheet_name))
         self._set_structure_points(points, fit=True, preserve_on_emulator_switch=True)
@@ -4811,6 +4937,7 @@ class TrenchDepoWindow(QMainWindow):
         self._set_structure_points(points, fit=True, preserve_on_emulator_switch=True)
 
     def _reset_geometry_to_default(self, _checked: bool = False) -> None:
+        self._clear_continuation_context()
         default_sheet = self._structure_library_sheet_for_emulator(self.active_emulator_number())
         if default_sheet and self._structure_library_path.exists():
             try:
@@ -4832,6 +4959,7 @@ class TrenchDepoWindow(QMainWindow):
             self.progress_geometry_view.fit_points()
 
     def _mark_structure_edited(self) -> None:
+        self._clear_continuation_context()
         self._sync_structure_table_from_points()
         self._preserve_geometry_on_emulator_switch = True
         self._smoothed_points = []
@@ -4959,6 +5087,75 @@ class TrenchDepoWindow(QMainWindow):
     def _result_has_run_frames(self) -> bool:
         return self._result is not None and bool(self._result.frame_profiles)
 
+    def _result_stage_index(self, result: Optional[TrenchDepoResult] = None) -> int:
+        res = result or self._result
+        if res is None:
+            return 1
+        meta = dict(res.meta)
+        for key in ("stage_index", "stage_count"):
+            try:
+                return max(1, int(meta.get(key, 1)))
+            except Exception:
+                continue
+        return 1
+
+    def _next_depo_stage_index(self) -> int:
+        return self._result_stage_index(self._result) + 1
+
+    def _set_next_depo_button_state(self) -> None:
+        if not hasattr(self, "btn_next_depo"):
+            return
+        has_result = bool(self._result is not None and self._result.final_profile and self._result.frame_profiles)
+        next_stage = self._next_depo_stage_index() if has_result else max(2, int(self._continuation_stage_index or 2))
+        self.btn_next_depo.setText(f"다음 Depo: {next_stage}차")
+        self.btn_next_depo.setEnabled(has_result)
+
+    def _clear_continuation_context(self) -> None:
+        self._continuation_base_result = None
+        self._continuation_base_run_dir = None
+        self._continuation_stage_index = 1
+        self._set_next_depo_button_state()
+
+    def start_next_depo_stage(self, _checked: bool = False) -> None:
+        if self._result is None or not self._result.final_profile:
+            QMessageBox.warning(self, "트렌치 Depo 에뮬레이션", "이어갈 결과가 없습니다. 먼저 실행하거나 Run을 불러오세요.")
+            return
+
+        next_stage = self._next_depo_stage_index()
+        seed = [(float(x), float(y)) for x, y in self._result.final_profile]
+        if len(seed) < 2:
+            QMessageBox.warning(self, "트렌치 Depo 에뮬레이션", "이어갈 final profile 점이 부족합니다.")
+            return
+
+        base_result = self._result
+        base_run_dir = self._last_run_dir
+        self._continuation_base_result = base_result
+        self._continuation_base_run_dir = base_run_dir
+        self._continuation_stage_index = next_stage
+
+        self._set_structure_points(seed, clear_smoothing=True, fit=True, preserve_on_emulator_switch=True)
+        self._continuation_base_result = base_result
+        self._continuation_base_run_dir = base_run_dir
+        self._continuation_stage_index = next_stage
+        self._set_next_depo_button_state()
+        self._sync_progress_geometry_view(fit=True)
+        self._set_workflow_step("progress")
+        self.statusBar().showMessage(
+            f"다음 Depo {next_stage}차 준비 완료: 파라미터 조정 후 실행하세요.",
+            4000,
+        )
+
+    def _merge_result_if_continuation(self, result: TrenchDepoResult) -> TrenchDepoResult:
+        base_result = self._continuation_base_result
+        if base_result is None:
+            return result
+        return merge_continued_trench_result(
+            base_result,
+            result,
+            stage_index=max(2, int(self._continuation_stage_index)),
+            continued_from_run=self._continuation_base_run_dir,
+        )
+
     def _result_meta_has_overlay_samples(self, key: str) -> bool:
         if self._result is None:
             return False
@@ -4995,6 +5192,7 @@ class TrenchDepoWindow(QMainWindow):
         finally:
             self.slider_frame.blockSignals(False)
         self._set_result_playback_available(False)
+        self._set_next_depo_button_state()
         self._sync_field_overlay_toggles()
         if hasattr(self, "edit_result_parameters"):
             self.edit_result_parameters.setPlainText("입력이 바뀌어서 기존 결과가 무효화됐습니다. 다시 실행하면 최신 파라미터가 여기에 표시됩니다.")
@@ -5080,6 +5278,7 @@ class TrenchDepoWindow(QMainWindow):
         if hasattr(self, "edit_result_parameters"):
             self._update_result_parameter_summary(self.current_config(), None)
         self._set_result_playback_available(False)
+        self._set_next_depo_button_state()
         self._sync_field_overlay_toggles()
 
     def _update_geometry_labels(self) -> None:
@@ -6630,6 +6829,7 @@ class TrenchDepoWindow(QMainWindow):
         self.spin_depth_feature_length.setEnabled(line_geometry_visible)
 
     def reset_defaults(self) -> None:
+        self._clear_continuation_context()
         supports_sputter = self._active_emulator_supports_sputter()
         supports_ion_transmission = self._active_emulator_supports_ion_transmission()
         supports_reflected_ion = self._active_emulator_supports_reflected_ion()
@@ -6994,6 +7194,8 @@ class TrenchDepoWindow(QMainWindow):
         geometry_source = self._current_geometry_source_name()
         frames = len(result.frame_profiles) if result is not None else 0
         final_points = len(result.final_profile) if result is not None else 0
+        stage_index = int(meta.get("stage_index", 1) or 1)
+        stage_cycles = int(meta.get("stage_cycles", config.cycles) or config.cycles)
 
         lines = [
             f"에뮬레이터: {title}",
@@ -7001,7 +7203,9 @@ class TrenchDepoWindow(QMainWindow):
             f"구조 입력: {geometry_source} | {len(config.points)}점",
             "",
             "[기본 공정]",
-            f"Cycles: {int(config.cycles)}",
+            f"차수: {stage_index}차" if result is not None and stage_index > 1 else "차수: 1차",
+            f"현재 stage cycles: {stage_cycles}",
+            f"표시 누적 cycles: {int(meta.get('cycles', config.cycles) or config.cycles) if result is not None else int(config.cycles)}",
             f"Depo: {float(config.angstrom_per_cycle):.3f} A/CYC",
             f"Reparam ds: {float(config.reparam_ds_a):.3f} A",
         ]
@@ -7475,6 +7679,7 @@ class TrenchDepoWindow(QMainWindow):
         self.slider_frame.setEnabled(max_idx > 0)
         self.slider_frame.blockSignals(False)
         self._set_result_playback_available(max_idx > 0)
+        self._set_next_depo_button_state()
         self._update_result_parameter_summary(config, result)
         self.show_frame(max_idx)
         if not use_preview_cache:
@@ -7500,6 +7705,7 @@ class TrenchDepoWindow(QMainWindow):
         request_note: str,
     ) -> None:
         run_dir: Optional[Path] = None
+        result = self._merge_result_if_continuation(result)
         if bool(save_artifacts):
             try:
                 self._start_run_progress("run 저장 중")
@@ -7528,6 +7734,7 @@ class TrenchDepoWindow(QMainWindow):
             run_dir,
             use_preview_cache=bool(use_preview_cache),
         )
+        self._clear_continuation_context()
 
     def _on_emulation_worker_failed(self, message: str) -> None:
         self.btn_run.setEnabled(True)
@@ -7614,12 +7821,17 @@ class TrenchDepoWindow(QMainWindow):
                 self.btn_run.setEnabled(True)
                 self._finish_run_progress(success=success)
 
+        if success:
+            result = self._merge_result_if_continuation(result)
+            self._preview_result_cache[cache_key] = result
         self._apply_emulation_result(
             config,
             result,
             run_dir,
             use_preview_cache=use_preview_cache,
         )
+        if success:
+            self._clear_continuation_context()
 
     def run_split_test(self, _checked: bool = False) -> None:
         self.btn_run_split.setEnabled(False)
@@ -7984,6 +8196,7 @@ class TrenchDepoWindow(QMainWindow):
 
     def load_replay_json(self, path: Path | str) -> None:
         self._stop_result_playback()
+        self._clear_continuation_context()
         replay_path = Path(path).resolve()
         config, result, note = load_trench_depo_run(replay_path)
         if bool(config.sputter_enabled) and bool(config.ion_transmission_enabled) and (
@@ -8104,6 +8317,7 @@ class TrenchDepoWindow(QMainWindow):
         self.slider_frame.setEnabled(max_idx > 0)
         self.slider_frame.blockSignals(False)
         self._set_result_playback_available(max_idx > 0)
+        self._set_next_depo_button_state()
         self._update_result_parameter_summary(config, result)
         self.show_frame(max_idx)
         self._set_workflow_step("results")
