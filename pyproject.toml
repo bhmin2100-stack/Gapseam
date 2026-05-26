@@ -16,8 +16,6 @@ dependencies = [
 
 [project.scripts]
 gfe = "gapsim.emulation.trench_depo_ui:main"
-gapsim = "gapsim.emulation.trench_depo_ui:main"
-gapsim-emulator = "gapsim.emulation.trench_depo_ui:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

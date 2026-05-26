@@ -12,8 +12,6 @@ run_python() {
 find_python() {
   if [ -x ".venv/bin/python" ]; then
     printf '%s\n' ".venv/bin/python"
-  elif [ -x "gapsim/.venv/bin/python" ]; then
-    printf '%s\n' "gapsim/.venv/bin/python"
   elif [ -x "venv/bin/python" ]; then
     printf '%s\n' "venv/bin/python"
   elif command -v python3 >/dev/null 2>&1; then

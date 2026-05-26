@@ -5,8 +5,6 @@ on:
   push:
     branches:
       - main
-      - GFE
-      - "codex/**"
 
 jobs:
   build-windows:

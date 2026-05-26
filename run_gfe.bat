@@ -65,6 +65,6 @@ exit /b 0
 :FAIL
 echo.
 echo %APP_NAME% failed to start.
-if "%GAPSIM_NO_PAUSE%"=="" pause
+if "%GFE_NO_PAUSE%"=="" pause
 endlocal
 exit /b 1
