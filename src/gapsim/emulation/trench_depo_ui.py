@@ -85,11 +85,13 @@ from gapsim.emulation.trench_depo import (
     run_trench_depo_sweep,
 )
 from gapsim.emulation.trench_depo_export import (
+    DEFAULT_RESULTS_ROOT,
     DEFAULT_RUNS_ROOT,
     export_trench_depo_run,
     export_trench_depo_sweep_runs,
     load_trench_depo_run,
     load_trench_depo_split_group,
+    save_trench_depo_result_json,
 )
 from gapsim.ui_qt.calibrate_dialog import CalibrateDialog
 from gapsim.ui_qt.controllers.smoothing_ctrl import SmoothingController
@@ -3329,6 +3331,11 @@ class TrenchDepoWindow(QMainWindow):
         self.lbl_run_dir.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.btn_open_run_dir = QPushButton("폴더 열기")
         self.btn_open_run_dir.setEnabled(False)
+        self.btn_save_result_json = QPushButton("결과 JSON 저장")
+        self.btn_save_result_json.setEnabled(False)
+        self.btn_save_result_json.setToolTip(
+            "현재 결과의 구조, 진행/공정 파라미터, 전체 결과 frame을 날짜별 JSON 파일로 저장합니다."
+        )
 
         self.cmb_emulator_default_preset = QComboBox()
         self.cmb_emulator_default_preset.setToolTip("선택한 에뮬레이터의 기본 공정값을 불러옵니다.")
@@ -4281,6 +4288,11 @@ class TrenchDepoWindow(QMainWindow):
         result_summary_layout.addWidget(self.lbl_result_summary)
         result_summary_layout.addWidget(self.lbl_result_hint)
         result_summary_layout.addWidget(self.edit_result_parameters, 1)
+        result_save_row = QHBoxLayout()
+        result_save_row.setContentsMargins(0, 0, 0, 0)
+        result_save_row.addWidget(self.btn_save_result_json)
+        result_save_row.addStretch(1)
+        result_summary_layout.addLayout(result_save_row)
         self.result_summary_group.setLayout(result_summary_layout)
         result_panel_layout.addWidget(self.result_summary_group)
         result_panel_nav = QHBoxLayout()
@@ -4342,6 +4354,7 @@ class TrenchDepoWindow(QMainWindow):
         self.btn_reset.clicked.connect(self.reset_defaults)
         self.btn_open_json.clicked.connect(self.open_replay_json_dialog)
         self.btn_open_run_dir.clicked.connect(self.open_last_run_dir)
+        self.btn_save_result_json.clicked.connect(self.save_current_result_json)
         self.btn_run_split.clicked.connect(self.run_split_test)
         self.btn_run_compare.clicked.connect(self.run_compare_for_active_emulator)
         self.btn_split_options.toggled.connect(self._on_split_options_toggled)
@@ -5371,6 +5384,8 @@ class TrenchDepoWindow(QMainWindow):
         self._set_result_playback_available(False)
         self._set_next_depo_button_state()
         self._sync_field_overlay_toggles()
+        if hasattr(self, "btn_save_result_json"):
+            self.btn_save_result_json.setEnabled(False)
         if hasattr(self, "edit_result_parameters"):
             self.edit_result_parameters.setPlainText("입력이 바뀌어서 기존 결과가 무효화됐습니다. 다시 실행하면 최신 파라미터가 여기에 표시됩니다.")
         if hasattr(self, "view_tabs") and self.view_tabs.currentIndex() == 3:
@@ -7923,6 +7938,7 @@ class TrenchDepoWindow(QMainWindow):
         self.slider_frame.blockSignals(False)
         self._set_result_playback_available(max_idx > 0)
         self._set_next_depo_button_state()
+        self.btn_save_result_json.setEnabled(True)
         self._update_result_parameter_summary(config, result)
         self.show_frame(max_idx)
         if not use_preview_cache:
@@ -8561,6 +8577,7 @@ class TrenchDepoWindow(QMainWindow):
         self.slider_frame.blockSignals(False)
         self._set_result_playback_available(max_idx > 0)
         self._set_next_depo_button_state()
+        self.btn_save_result_json.setEnabled(True)
         self._update_result_parameter_summary(config, result)
         self.show_frame(max_idx)
         self._set_workflow_step("results")
@@ -8569,6 +8586,28 @@ class TrenchDepoWindow(QMainWindow):
         self.btn_open_run_dir.setEnabled(True)
         self.statusBar().showMessage(f"Run 불러오기 완료: {replay_path}", 5000)
         self._open_split_group_for_replay(replay_path)
+
+    def save_current_result_json(self, _checked: bool = False) -> None:
+        if self._result is None or self._result_config is None:
+            QMessageBox.information(self, "결과 JSON 저장", "저장할 실행 결과가 없습니다. 먼저 실행을 완료하세요.")
+            self.btn_save_result_json.setEnabled(False)
+            return
+        try:
+            result_path = save_trench_depo_result_json(
+                self._result_config,
+                self._result,
+                request_note=self.edit_request_note.toPlainText(),
+                results_root=DEFAULT_RESULTS_ROOT,
+            )
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "결과 JSON 저장", f"결과 저장 실패:\n{exc}")
+            return
+
+        self._last_run_dir = result_path.parent.resolve()
+        self.lbl_run_dir.setText(f"결과 저장: {_elide_middle(result_path.name, 34)}")
+        self.lbl_run_dir.setToolTip(str(result_path.resolve()))
+        self.btn_open_run_dir.setEnabled(True)
+        self.statusBar().showMessage(f"결과 JSON 저장 완료: {result_path}", 5000)
 
     def open_replay_json_dialog(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -8589,7 +8628,7 @@ class TrenchDepoWindow(QMainWindow):
             return
         run_dir = self._last_run_dir.resolve()
         if not run_dir.exists():
-            QMessageBox.warning(self, "트렌치 Depo 에뮬레이션", f"Run 폴더를 찾을 수 없습니다:\n{run_dir}")
+            QMessageBox.warning(self, "트렌치 Depo 에뮬레이션", f"저장 폴더를 찾을 수 없습니다:\n{run_dir}")
             self.btn_open_run_dir.setEnabled(False)
             return
 
@@ -8602,7 +8641,7 @@ class TrenchDepoWindow(QMainWindow):
 
         ok = QDesktopServices.openUrl(QUrl.fromLocalFile(str(run_dir)))
         if not ok:
-            QMessageBox.warning(self, "트렌치 Depo 에뮬레이션", f"Run 폴더 열기 실패:\n{run_dir}")
+            QMessageBox.warning(self, "트렌치 Depo 에뮬레이션", f"저장 폴더 열기 실패:\n{run_dir}")
 
     def closeEvent(self, event) -> None:  # noqa: N802, ANN001
         if self._emulation_thread is not None and self._emulation_thread.isRunning():

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import unittest
@@ -931,6 +932,8 @@ class SputterGaussianEditorTest(unittest.TestCase):
         with (
             mock.patch("gapsim.emulation.trench_depo_ui.run_trench_depo", side_effect=fake_run),
             mock.patch("gapsim.emulation.trench_depo_ui.QTimer.singleShot"),
+            tempfile.TemporaryDirectory() as tmp_results,
+            mock.patch("gapsim.emulation.trench_depo_ui.DEFAULT_RESULTS_ROOT", tmp_results),
         ):
             window = TrenchDepoWindow()
             try:
@@ -964,6 +967,18 @@ class SputterGaussianEditorTest(unittest.TestCase):
                 self.assertEqual(window.slider_frame.value(), 2)
                 window._advance_result_playback()
                 self.assertEqual(window.slider_frame.value(), 0)
+
+                self.assertTrue(window.btn_save_result_json.isEnabled())
+                window.btn_save_result_json.click()
+                saved_files = list(Path(tmp_results).glob("*/트렌치결과_*.json"))
+                self.assertEqual(len(saved_files), 1)
+                payload = json.loads(saved_files[0].read_text(encoding="utf-8"))
+                self.assertEqual(payload["config"]["cycles"], 2)
+                self.assertEqual(payload["result"]["meta"]["growth_model"], "test_model")
+                self.assertEqual(len(payload["result"]["frame_profiles"]), 3)
+                self.assertEqual(window._last_run_dir, saved_files[0].parent.resolve())
+                self.assertIn("결과 저장", window.lbl_run_dir.text())
+                self.assertEqual(window.lbl_run_dir.toolTip(), str(saved_files[0].resolve()))
 
                 window.btn_result_play.click()
                 self.assertFalse(window._result_playback_timer.isActive())

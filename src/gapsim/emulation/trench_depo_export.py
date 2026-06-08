@@ -26,7 +26,14 @@ def _default_runs_root() -> Path:
     return Path("runs") / "trench_depo_emulation"
 
 
+def _default_results_root() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent / "results" / "trench_depo_emulation"
+    return Path("results") / "trench_depo_emulation"
+
+
 DEFAULT_RUNS_ROOT = _default_runs_root()
+DEFAULT_RESULTS_ROOT = _default_results_root()
 _DEFAULT_PHYSICAL_MEMO = "라운드 conformal offset 기반 트렌치 증착"
 SPLIT_GROUP_MANIFEST_NAME = "스플릿묶음.json"
 _SPLIT_NOTE_RE = re.compile(
@@ -71,6 +78,20 @@ def create_trench_run_dir(
         except FileExistsError:
             continue
     raise RuntimeError("고유한 트렌치 run 디렉터리를 만들지 못했습니다.")
+
+
+def create_result_json_path(results_root: Path | str) -> Path:
+    root = Path(results_root)
+    now = datetime.now()
+    result_dir = root / now.strftime("%Y%m%d")
+    result_dir.mkdir(parents=True, exist_ok=True)
+    base_name = f"트렌치결과_{now.strftime('%Y%m%d_%H%M%S')}"
+    for idx in range(1000):
+        suffix = "" if idx == 0 else f"_{idx:03d}"
+        path = result_dir / f"{base_name}{suffix}.json"
+        if not path.exists():
+            return path
+    raise RuntimeError("고유한 결과 JSON 파일명을 만들지 못했습니다.")
 
 
 def result_to_payload(
@@ -361,6 +382,21 @@ def payload_to_trench_run(payload: Dict[str, Any]) -> Tuple[TrenchDepoConfig, Tr
 def load_trench_depo_run(path: Path | str) -> Tuple[TrenchDepoConfig, TrenchDepoResult, str]:
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
     return payload_to_trench_run(payload)
+
+
+def save_trench_depo_result_json(
+    config: TrenchDepoConfig,
+    result: TrenchDepoResult,
+    *,
+    request_note: str = "",
+    results_root: Path | str = DEFAULT_RESULTS_ROOT,
+) -> Path:
+    payload = result_to_payload(config, result, request_note=_coerce_note(request_note))
+    payload["save_type"] = "result_panel_json"
+    path = create_result_json_path(results_root)
+    payload["result_json_path"] = str(path)
+    write_json(path, payload)
+    return path
 
 
 def _gif_panel_lines(

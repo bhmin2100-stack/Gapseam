@@ -36,6 +36,7 @@ from gapsim.emulation.trench_depo_export import export_trench_depo_run
 from gapsim.emulation.trench_depo_export import export_trench_depo_sweep_runs
 from gapsim.emulation.trench_depo_export import load_trench_depo_run
 from gapsim.emulation.trench_depo_export import load_trench_depo_split_group
+from gapsim.emulation.trench_depo_export import save_trench_depo_result_json
 from gapsim.emulation.trench_depo_ui import merge_continued_trench_result
 
 try:
@@ -1944,6 +1945,39 @@ class TrenchDepoEmulationTest(unittest.TestCase):
             self.assertAlmostEqual(float(loaded_config.angstrom_per_cycle), 10.0, places=9)
             self.assertEqual(loaded_note, "입구 둥글어짐 확인")
             self.assertEqual(len(loaded_result.frame_profiles), 3)
+
+    def test_save_result_json_writes_single_dated_replay_file(self) -> None:
+        config = TrenchDepoConfig(cycles=1, angstrom_per_cycle=10.0)
+        result = TrenchDepoResult(
+            frame_steps=[0, 1],
+            frame_profiles=[
+                [(0.0, 0.0), (1.0, 0.0)],
+                [(0.0, -1.0), (1.0, -1.0)],
+            ],
+            frame_voids=[[], []],
+            final_profile=[(0.0, -1.0), (1.0, -1.0)],
+            meta={"cycles": 1, "growth_model": "test_model"},
+        )
+
+        with tempfile.TemporaryDirectory(prefix="gapsim_result_json_") as td:
+            path = save_trench_depo_result_json(
+                config,
+                result,
+                request_note="결과 저장 확인",
+                results_root=td,
+            )
+
+            self.assertTrue(path.exists())
+            self.assertEqual(path.suffix, ".json")
+            self.assertEqual(path.parent.parent, Path(td))
+            self.assertRegex(path.parent.name, r"^\d{8}$")
+            self.assertRegex(path.name, r"^트렌치결과_\d{8}_\d{6}(?:_\d{3})?\.json$")
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["save_type"], "result_panel_json")
+            self.assertEqual(payload["request_note_ko"], "결과 저장 확인")
+            self.assertEqual(payload["config"]["cycles"], 1)
+            self.assertEqual(payload["result"]["meta"]["growth_model"], "test_model")
+            self.assertEqual(len(payload["result"]["frame_profiles"]), 2)
 
     def test_export_sweep_runs_saves_each_case_with_split_note(self) -> None:
         config = TrenchDepoConfig(cycles=1, angstrom_per_cycle=10.0)
