@@ -3792,8 +3792,8 @@ class TrenchDepoWindow(QMainWindow):
             (self.cmb_depth_feature_type, "Hole/Line에 따라 등가 aspect ratio와 closure 후 fill 기준이 달라집니다."),
             (self.lbl_depth_feature_width, "입구 폭입니다. 폭이 좁을수록 같은 깊이에서 등가 AR이 커져 증착 비율이 낮아집니다."),
             (self.spin_depth_feature_width, "입구 폭입니다. 폭이 좁을수록 같은 깊이에서 등가 AR이 커져 증착 비율이 낮아집니다."),
-            (self.lbl_depth_feature_depth, "계산 자체보다는 depth map 그래프의 100% 깊이 기준입니다. 실제 점별 depletion은 현재 geometry 깊이를 사용합니다."),
-            (self.spin_depth_feature_depth, "계산 자체보다는 depth map 그래프의 100% 깊이 기준입니다. 실제 점별 depletion은 현재 geometry 깊이를 사용합니다."),
+            (self.lbl_depth_feature_depth, "현재 구조의 표면-바닥 깊이에 자동으로 맞춰지는 depth map의 100% 기준입니다."),
+            (self.spin_depth_feature_depth, "현재 구조의 표면-바닥 깊이에 자동으로 맞춰지는 depth map의 100% 기준입니다."),
             (self.lbl_depth_feature_length, "Line 구조의 길이입니다. 0이면 길게 열린 라인으로 간주합니다."),
             (self.spin_depth_feature_length, "Line 구조의 길이입니다. 0이면 길게 열린 라인으로 간주합니다."),
             (self.lbl_depth_decay_k, "깊이 감쇠 세기입니다. 값이 클수록 바닥 증착 비율이 빠르게 낮아집니다."),
@@ -5209,6 +5209,24 @@ class TrenchDepoWindow(QMainWindow):
             return tuple(self._structure_points)
         return tuple(self._default_points_for_active_emulator())
 
+    @staticmethod
+    def _geometry_depth_a(points: Sequence[Tuple[float, float]]) -> float:
+        pts = [(float(x), float(y)) for x, y in points]
+        if len(pts) < 2:
+            return 0.0
+        ys = [float(y) for _x, y in pts]
+        return max(0.0, max(ys) - min(ys))
+
+    def _sync_depth_feature_depth_from_geometry(self) -> None:
+        if not hasattr(self, "spin_depth_feature_depth"):
+            return
+        depth_a = self._geometry_depth_a(self._current_geometry_points())
+        if depth_a <= 0.0:
+            return
+        if abs(float(self.spin_depth_feature_depth.value()) - depth_a) <= 1e-6:
+            return
+        self.spin_depth_feature_depth.setValue(depth_a)
+
     def _current_geometry_source_name(self) -> str:
         if self._use_smoothed_geometry and len(self._smoothed_points) >= 2:
             return "smooth"
@@ -5431,6 +5449,7 @@ class TrenchDepoWindow(QMainWindow):
             f"스무딩: {smooth_count}점" if smooth_count else "스무딩: 미적용"
         )
         self.btn_use_smoothed_geometry.setEnabled(smooth_count >= 2)
+        self._sync_depth_feature_depth_from_geometry()
         self._sync_structure_map_editors()
         self._sync_progress_geometry_view()
 

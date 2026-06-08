@@ -1457,15 +1457,27 @@ class SputterGaussianEditorTest(unittest.TestCase):
 
         try:
             self.assertEqual(tuple(window.current_config().points), TrenchDepoConfig().points)
+            self.assertAlmostEqual(
+                window.spin_depth_feature_depth.value(),
+                TrenchDepoWindow._geometry_depth_a(window._current_geometry_points()),
+                places=6,
+            )
 
             window.set_active_emulator_number(2, run=False)
             self.assertEqual(tuple(window.current_config().points), ION_TRANSMISSION_STEPPED_TRENCH_POINTS)
+            self.assertAlmostEqual(
+                window.spin_depth_feature_depth.value(),
+                TrenchDepoWindow._geometry_depth_a(ION_TRANSMISSION_STEPPED_TRENCH_POINTS),
+                places=6,
+            )
 
             custom_points = [(-300.0, 0.0), (-100.0, -250.0), (100.0, -250.0), (300.0, 0.0)]
             window._set_structure_points(custom_points, fit=False)
 
             self.assertEqual(tuple(window.current_config().points), tuple(custom_points))
             self.assertIn("4점", window.lbl_geometry_source.text())
+            self.assertAlmostEqual(window.spin_depth_feature_depth.value(), 250.0, places=6)
+            self.assertAlmostEqual(window.current_config().deposition_feature_depth_a, 250.0, places=6)
         finally:
             window.close()
 
