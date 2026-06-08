@@ -171,15 +171,31 @@ def _depth_deposition_display_mode(value: object) -> str:
     return "depo_rate"
 
 
-def _depth_deposition_ratio_expression(attenuation_model: str) -> str:
+def _depth_deposition_depth_transform_text(
+    *,
+    feature_type: object,
+    feature_width_a: float,
+    feature_length_a: Optional[float],
+) -> str:
+    width = max(1e-9, float(feature_width_a))
+    type_key = str(feature_type or "hole").strip().lower()
+    if type_key in {"line", "trench"}:
+        length = None if feature_length_a is None else float(feature_length_a)
+        if length is None or not math.isfinite(length) or length <= 0.0 or length >= width * 1000.0:
+            return f"g(z)=z/(2*W), W={width:.1f} A"
+        return f"g(z)=z*(W+L)/(2*W*L), W={width:.1f} A, L={length:.1f} A"
+    return f"g(z)=z/W, W={width:.1f} A"
+
+
+def _depth_deposition_ratio_expression(attenuation_model: str, variable: str = "g(z)") -> str:
     model = str(attenuation_model or "exponential").strip().lower()
     if model == "power":
-        raw = "1/(1+K*AR^P)"
+        raw = f"1/(1+K*{variable}^P)"
     elif model == "logistic":
-        raw = "1/(1+(AR/(1/K))^P)"
+        raw = f"1/(1+({variable}/(1/K))^P)"
     else:
-        raw = "exp(-K*AR^P)"
-    return f"R(AR)=m+(1-m)*{raw}"
+        raw = f"exp(-K*{variable}^P)"
+    return f"R(z)=m+(1-m)*{raw}"
 
 
 def _depth_deposition_formula_text(
@@ -190,20 +206,28 @@ def _depth_deposition_formula_text(
     depth_decay_k: float,
     depth_decay_power: float,
     min_ratio_pct: float,
+    feature_type: object = "hole",
+    feature_width_a: float = 240.0,
+    feature_length_a: Optional[float] = None,
 ) -> str:
     mode = _depth_deposition_display_mode(display_mode)
-    ratio_expr = _depth_deposition_ratio_expression(attenuation_model)
+    ratio_expr = _depth_deposition_ratio_expression(attenuation_model, "g(z)")
+    depth_transform = _depth_deposition_depth_transform_text(
+        feature_type=feature_type,
+        feature_width_a=feature_width_a,
+        feature_length_a=feature_length_a,
+    )
     base = max(0.0, float(base_rate_a_per_cycle))
     k = max(0.0, float(depth_decay_k))
     power = max(0.05, float(depth_decay_power))
     min_pct = max(0.0, min(100.0, float(min_ratio_pct)))
     if mode == "attenuation":
         return (
-            f"감쇄식: depletion(AR)=1-R(AR), {ratio_expr}; "
+            f"감쇄식: depletion(z)=1-R(z), {ratio_expr}, {depth_transform}; "
             f"K={k:.3f}, P={power:.2f}, m={min_pct:.1f}%"
         )
     return (
-        f"Dep rate식: dep_rate(AR)=D0*R(AR), {ratio_expr}; "
+        f"Dep rate식: dep_rate(z)=D0*R(z), {ratio_expr}, {depth_transform}; "
         f"D0={base:.3f} A/CYC, K={k:.3f}, P={power:.2f}, m={min_pct:.1f}%"
     )
 
@@ -1389,9 +1413,8 @@ class DepthDepositionProfileEditor(QWidget):
         field_label = "Field max" if self._display_mode == "depo_rate" else "Field loss 0%"
         label_x = max(rect.left(), min(rect.right() - 92.0, field_x - 44.0))
         painter.drawText(QPointF(label_x, rect.top() - 8.0), field_label)
-        bottom_ear = self._effective_ar_at_depth_ratio(1.0)
         painter.setPen(QPen(QColor(15, 23, 42), 1.0))
-        painter.drawText(QPointF(rect.left() + 8.0, rect.bottom() - 8.0), f"Eff AR {bottom_ear:.2f}")
+        painter.drawText(QPointF(rect.left() + 8.0, rect.bottom() - 8.0), f"Depth {self._feature_depth_a:.0f} A")
 
         for depth_ratio in (0.18, 0.36, 0.54, 0.72, 0.90):
             y = self._y_for_depth_ratio(depth_ratio)
@@ -6503,6 +6526,8 @@ class TrenchDepoWindow(QMainWindow):
         if not hasattr(self, "lbl_depth_formula"):
             return
         mode = self._current_depth_display_mode()
+        feature_type = str(self.cmb_depth_feature_type.currentData() or "hole")
+        feature_length = float(self.spin_depth_feature_length.value())
         text = _depth_deposition_formula_text(
             display_mode=mode,
             base_rate_a_per_cycle=float(self.spin_angstrom_per_cycle.value()),
@@ -6510,6 +6535,9 @@ class TrenchDepoWindow(QMainWindow):
             depth_decay_k=float(self.spin_depth_decay_k.value()),
             depth_decay_power=float(self.spin_depth_decay_power.value()),
             min_ratio_pct=float(self.spin_depth_min_ratio_pct.value()),
+            feature_type=feature_type,
+            feature_width_a=float(self.spin_depth_feature_width.value()),
+            feature_length_a=None if feature_type != "line" or feature_length <= 0.0 else feature_length,
         )
         self.lbl_depth_formula.setText(text)
         if mode == "attenuation":
@@ -7473,6 +7501,9 @@ class TrenchDepoWindow(QMainWindow):
                         depth_decay_k=float(config.deposition_depth_decay_k),
                         depth_decay_power=float(config.deposition_depth_decay_power),
                         min_ratio_pct=float(config.deposition_min_ratio) * 100.0,
+                        feature_type=str(config.deposition_feature_type),
+                        feature_width_a=float(config.deposition_feature_width_a),
+                        feature_length_a=config.deposition_feature_length_a,
                     ),
                     _depth_deposition_formula_text(
                         display_mode="attenuation",
@@ -7481,6 +7512,9 @@ class TrenchDepoWindow(QMainWindow):
                         depth_decay_k=float(config.deposition_depth_decay_k),
                         depth_decay_power=float(config.deposition_depth_decay_power),
                         min_ratio_pct=float(config.deposition_min_ratio) * 100.0,
+                        feature_type=str(config.deposition_feature_type),
+                        feature_width_a=float(config.deposition_feature_width_a),
+                        feature_length_a=config.deposition_feature_length_a,
                     ),
                     f"Closure threshold: {self._fmt_a(config.deposition_closure_threshold_a)}",
                     f"After-close fill budget: {post_fill * 100.0:.1f}%",

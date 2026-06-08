@@ -243,6 +243,9 @@ class SputterGaussianEditorTest(unittest.TestCase):
             depth_decay_k=0.55,
             depth_decay_power=1.4,
             min_ratio_pct=5.0,
+            feature_type="hole",
+            feature_width_a=240.0,
+            feature_length_a=None,
         )
         attenuation_formula = _depth_deposition_formula_text(
             display_mode="attenuation",
@@ -251,12 +254,18 @@ class SputterGaussianEditorTest(unittest.TestCase):
             depth_decay_k=0.55,
             depth_decay_power=1.4,
             min_ratio_pct=5.0,
+            feature_type="line",
+            feature_width_a=240.0,
+            feature_length_a=2500.0,
         )
 
         self.assertIn("Dep rate식", rate_formula)
+        self.assertIn("dep_rate(z)=D0*R(z)", rate_formula)
+        self.assertIn("g(z)=z/W", rate_formula)
         self.assertIn("D0=12.500 A/CYC", rate_formula)
         self.assertIn("감쇄식", attenuation_formula)
-        self.assertIn("depletion(AR)=1-R(AR)", attenuation_formula)
+        self.assertIn("depletion(z)=1-R(z)", attenuation_formula)
+        self.assertIn("g(z)=z*(W+L)/(2*W*L)", attenuation_formula)
 
     def test_inhibition_profile_editor_drags_growth_curve_handles(self) -> None:
         editor = InhibitionProfileEditor()
@@ -1134,10 +1143,12 @@ class SputterGaussianEditorTest(unittest.TestCase):
             window.spin_angstrom_per_cycle.setValue(12.5)
             self.assertIn("Dep rate식", window.lbl_depth_formula.text())
             self.assertIn("D0=12.500 A/CYC", window.lbl_depth_formula.text())
+            self.assertIn("g(z)=z*(W+L)/(2*W*L)", window.lbl_depth_formula.text())
             attenuation_idx = window.cmb_depth_display_mode.findData("attenuation")
             window.cmb_depth_display_mode.setCurrentIndex(attenuation_idx)
             self.assertEqual(window.depth_deposition_editor.display_mode(), "attenuation")
             self.assertIn("감쇄식", window.lbl_depth_formula.text())
+            self.assertIn("depletion(z)=1-R(z)", window.lbl_depth_formula.text())
             config = window.current_config()
             self.assertAlmostEqual(config.deposition_depth_decay_k, 0.45, places=6)
             self.assertAlmostEqual(config.deposition_depth_decay_power, 1.7, places=6)
