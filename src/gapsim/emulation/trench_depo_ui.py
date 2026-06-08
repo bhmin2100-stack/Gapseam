@@ -164,6 +164,50 @@ def _elide_middle(text: str, max_chars: int) -> str:
     return f"{raw[:left]}...{raw[-right:]}"
 
 
+def _depth_deposition_display_mode(value: object) -> str:
+    raw = str(value or "depo_rate").strip().lower().replace("-", "_").replace(" ", "_")
+    if raw in {"attenuation", "depletion", "decay", "loss", "drop"}:
+        return "attenuation"
+    return "depo_rate"
+
+
+def _depth_deposition_ratio_expression(attenuation_model: str) -> str:
+    model = str(attenuation_model or "exponential").strip().lower()
+    if model == "power":
+        raw = "1/(1+K*AR^P)"
+    elif model == "logistic":
+        raw = "1/(1+(AR/(1/K))^P)"
+    else:
+        raw = "exp(-K*AR^P)"
+    return f"R(AR)=m+(1-m)*{raw}"
+
+
+def _depth_deposition_formula_text(
+    *,
+    display_mode: object,
+    base_rate_a_per_cycle: float,
+    attenuation_model: str,
+    depth_decay_k: float,
+    depth_decay_power: float,
+    min_ratio_pct: float,
+) -> str:
+    mode = _depth_deposition_display_mode(display_mode)
+    ratio_expr = _depth_deposition_ratio_expression(attenuation_model)
+    base = max(0.0, float(base_rate_a_per_cycle))
+    k = max(0.0, float(depth_decay_k))
+    power = max(0.05, float(depth_decay_power))
+    min_pct = max(0.0, min(100.0, float(min_ratio_pct)))
+    if mode == "attenuation":
+        return (
+            f"감쇄식: depletion(AR)=1-R(AR), {ratio_expr}; "
+            f"K={k:.3f}, P={power:.2f}, m={min_pct:.1f}%"
+        )
+    return (
+        f"Dep rate식: dep_rate(AR)=D0*R(AR), {ratio_expr}; "
+        f"D0={base:.3f} A/CYC, K={k:.3f}, P={power:.2f}, m={min_pct:.1f}%"
+    )
+
+
 def _profiles_same_points(
     a: Sequence[Tuple[float, float]],
     b: Sequence[Tuple[float, float]],
@@ -972,6 +1016,8 @@ class DepthDepositionProfileEditor(QWidget):
         self._decay_power = 1.2
         self._min_ratio_pct = 3.0
         self._closure_threshold_a = 8.0
+        self._base_depo_a_per_cycle = 10.0
+        self._display_mode = "depo_rate"
         self._drag_handle: Optional[str] = None
         self._structure_points: Tuple[Tuple[float, float], ...] = tuple(BOWED_JAR_TRENCH_POINTS)
         self.setMinimumHeight(220)
@@ -1018,6 +1064,23 @@ class DepthDepositionProfileEditor(QWidget):
         self._feature_length_a = None if length_f is None or length_f <= 0.0 else length_f
         if changed:
             self.update()
+
+    def display_mode(self) -> str:
+        return str(self._display_mode)
+
+    def set_display_mode(self, mode: object) -> None:
+        mode_key = _depth_deposition_display_mode(mode)
+        if mode_key == self._display_mode:
+            return
+        self._display_mode = mode_key
+        self.update()
+
+    def set_depo_rate_a_per_cycle(self, value: float) -> None:
+        rate = self._clamp(float(value), 0.0, 10000.0)
+        if abs(rate - self._base_depo_a_per_cycle) <= 1e-9:
+            return
+        self._base_depo_a_per_cycle = rate
+        self.update()
 
     def set_parameters(
         self,
@@ -1123,12 +1186,33 @@ class DepthDepositionProfileEditor(QWidget):
     def _curve_points(self) -> List[Tuple[float, float]]:
         return [(idx / 100.0, self._ratio_at_depth_ratio(idx / 100.0)) for idx in range(101)]
 
+    def _display_value_for_ratio(self, ratio: float) -> float:
+        ratio_f = self._clamp(float(ratio), 0.0, 1.0)
+        if self._display_mode == "attenuation":
+            return 1.0 - ratio_f
+        return ratio_f
+
+    def _ratio_for_display_value(self, value: float) -> float:
+        value_f = self._clamp(float(value), 0.0, 1.0)
+        if self._display_mode == "attenuation":
+            return 1.0 - value_f
+        return value_f
+
+    def _x_for_deposition_ratio(self, ratio: float) -> float:
+        return self._x_for_ratio(self._display_value_for_ratio(ratio))
+
+    def _deposition_ratio_for_x(self, x: float) -> float:
+        return self._ratio_for_display_value(self._ratio_for_x(x))
+
     def _handle_points(self) -> dict[str, QPointF]:
         rect = self._plot_rect()
         return {
-            "floor": QPointF(self._x_for_ratio(float(self._min_ratio_pct) / 100.0), rect.bottom() - 11.0),
-            "attenuation": QPointF(self._x_for_ratio(self._ratio_at_depth_ratio(1.0)), rect.bottom()),
-            "power": QPointF(self._x_for_ratio(self._ratio_at_depth_ratio(0.5)), self._y_for_depth_ratio(0.5)),
+            "floor": QPointF(self._x_for_deposition_ratio(float(self._min_ratio_pct) / 100.0), rect.bottom() - 11.0),
+            "attenuation": QPointF(self._x_for_deposition_ratio(self._ratio_at_depth_ratio(1.0)), rect.bottom()),
+            "power": QPointF(
+                self._x_for_deposition_ratio(self._ratio_at_depth_ratio(0.5)),
+                self._y_for_depth_ratio(0.5),
+            ),
             "closure": QPointF(self._x_for_closure_threshold(self._closure_threshold_a), rect.top() + 8.0),
         }
 
@@ -1157,11 +1241,11 @@ class DepthDepositionProfileEditor(QWidget):
 
     def _apply_drag(self, handle: str, pos: QPointF) -> None:
         if handle == "attenuation":
-            self._decay_k = self._decay_k_for_bottom_ratio(self._ratio_for_x(pos.x()))
+            self._decay_k = self._decay_k_for_bottom_ratio(self._deposition_ratio_for_x(pos.x()))
         elif handle == "power":
-            self._decay_power = self._decay_power_for_mid_ratio(self._ratio_for_x(pos.x()))
+            self._decay_power = self._decay_power_for_mid_ratio(self._deposition_ratio_for_x(pos.x()))
         elif handle == "floor":
-            self._min_ratio_pct = self._clamp(self._ratio_for_x(pos.x()) * 100.0, 0.0, 100.0)
+            self._min_ratio_pct = self._clamp(self._deposition_ratio_for_x(pos.x()) * 100.0, 0.0, 100.0)
         elif handle == "closure":
             self._closure_threshold_a = self._clamp(self._closure_threshold_for_x(pos.x()), 0.0, 10000.0)
         else:
@@ -1269,15 +1353,27 @@ class DepthDepositionProfileEditor(QWidget):
             x = self._x_for_ratio(ratio)
             painter.drawLine(QPointF(x, rect.top()), QPointF(x, rect.bottom()))
 
-        conformal_x = self._x_for_ratio(1.0)
+        field_x = self._x_for_deposition_ratio(1.0)
         curve_points = self._curve_points()
-        reduction_area = QPainterPath()
-        reduction_area.moveTo(QPointF(conformal_x, rect.top()))
-        reduction_area.lineTo(QPointF(conformal_x, rect.bottom()))
-        for depth_ratio, ratio in reversed(curve_points):
-            reduction_area.lineTo(QPointF(self._x_for_ratio(ratio), self._y_for_depth_ratio(depth_ratio)))
-        reduction_area.closeSubpath()
-        painter.fillPath(reduction_area, QColor(219, 234, 254, 72))
+        field_area = QPainterPath()
+        field_area.moveTo(QPointF(rect.left(), rect.top()))
+        for idx, (depth_ratio, ratio) in enumerate(curve_points):
+            point = QPointF(self._x_for_deposition_ratio(ratio), self._y_for_depth_ratio(depth_ratio))
+            if idx == 0:
+                field_area.lineTo(point)
+            else:
+                field_area.lineTo(point)
+        field_area.lineTo(QPointF(rect.left(), rect.bottom()))
+        field_area.closeSubpath()
+        if self._display_mode == "attenuation":
+            area_color = QColor(219, 234, 254, 86)
+            curve_color = QColor(37, 99, 235)
+            arrow_color = QColor(37, 99, 235, 150)
+        else:
+            area_color = QColor(187, 247, 208, 82)
+            curve_color = QColor(21, 128, 61)
+            arrow_color = QColor(22, 163, 74, 150)
+        painter.fillPath(field_area, area_color)
         _draw_structure_background(
             painter,
             self._structure_points,
@@ -1288,9 +1384,11 @@ class DepthDepositionProfileEditor(QWidget):
         )
 
         painter.setPen(QPen(QColor(37, 99, 235, 165), 1.5, Qt.PenStyle.DashLine))
-        painter.drawLine(QPointF(conformal_x, rect.top()), QPointF(conformal_x, rect.bottom()))
+        painter.drawLine(QPointF(field_x, rect.top()), QPointF(field_x, rect.bottom()))
         painter.setPen(QPen(QColor(30, 64, 175), 1.0))
-        painter.drawText(QPointF(max(rect.left(), conformal_x - 92.0), rect.top() - 8.0), "Conformal 100%")
+        field_label = "Field max" if self._display_mode == "depo_rate" else "Field loss 0%"
+        label_x = max(rect.left(), min(rect.right() - 92.0, field_x - 44.0))
+        painter.drawText(QPointF(label_x, rect.top() - 8.0), field_label)
         bottom_ear = self._effective_ar_at_depth_ratio(1.0)
         painter.setPen(QPen(QColor(15, 23, 42), 1.0))
         painter.drawText(QPointF(rect.left() + 8.0, rect.bottom() - 8.0), f"Eff AR {bottom_ear:.2f}")
@@ -1298,25 +1396,32 @@ class DepthDepositionProfileEditor(QWidget):
         for depth_ratio in (0.18, 0.36, 0.54, 0.72, 0.90):
             y = self._y_for_depth_ratio(depth_ratio)
             ratio = self._ratio_at_depth_ratio(depth_ratio)
+            curve_x = self._x_for_deposition_ratio(ratio)
+            if self._display_mode == "attenuation":
+                start = QPointF(rect.left() + 4.0, y)
+                end = QPointF(curve_x - 4.0, y)
+            else:
+                start = QPointF(field_x - 4.0, y)
+                end = QPointF(curve_x + 4.0, y)
             self._draw_arrow(
                 painter,
-                QPointF(conformal_x - 4.0, y),
-                QPointF(self._x_for_ratio(ratio) + 4.0, y),
-                QColor(37, 99, 235, 150),
+                start,
+                end,
+                arrow_color,
             )
 
-        floor_x = self._x_for_ratio(float(self._min_ratio_pct) / 100.0)
+        floor_x = self._x_for_deposition_ratio(float(self._min_ratio_pct) / 100.0)
         painter.setPen(QPen(QColor(22, 163, 74), 1.4, Qt.PenStyle.DashLine))
         painter.drawLine(QPointF(floor_x, rect.top()), QPointF(floor_x, rect.bottom()))
 
         curve = QPainterPath()
         for idx, (depth_ratio, ratio) in enumerate(curve_points):
-            point = QPointF(self._x_for_ratio(ratio), self._y_for_depth_ratio(depth_ratio))
+            point = QPointF(self._x_for_deposition_ratio(ratio), self._y_for_depth_ratio(depth_ratio))
             if idx == 0:
                 curve.moveTo(point)
             else:
                 curve.lineTo(point)
-        painter.setPen(QPen(QColor(21, 128, 61), 2.7))
+        painter.setPen(QPen(curve_color, 2.7))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawPath(curve)
 
@@ -1342,16 +1447,20 @@ class DepthDepositionProfileEditor(QWidget):
         painter.drawText(
             QPointF(rect.left(), 18.0),
             (
+                ("Dep rate    " if self._display_mode == "depo_rate" else "Attenuation    ")
+                + (
                 f"K {self._decay_k:.2f}    "
                 f"P {self._decay_power:.2f}    "
                 f"Min {self._min_ratio_pct:.1f}%    "
                 f"Close {self._closure_threshold_a:.1f} A"
+                )
             ),
         )
         painter.setPen(QPen(QColor(100, 116, 139), 1.0))
         painter.drawText(QPointF(rect.left() - 28.0, rect.top() + 4.0), "0")
         painter.drawText(QPointF(rect.left() - 34.0, rect.bottom() + 4.0), "100")
-        painter.drawText(QPointF(rect.right() - 64.0, rect.bottom() + 18.0), "depo ratio")
+        axis_label = "depletion %" if self._display_mode == "attenuation" else "dep rate A/CYC"
+        painter.drawText(QPointF(rect.right() - 82.0, rect.bottom() + 18.0), axis_label)
 
 
 class InhibitionProfileEditor(QWidget):
@@ -3087,6 +3196,7 @@ class TrenchDepoWindow(QMainWindow):
         self.spin_inhibition_smoothing.setSingleStep(10.0)
         self.spin_inhibition_smoothing.setValue(45.0)
         self.depth_deposition_editor = DepthDepositionProfileEditor()
+        self.depth_deposition_editor.set_depo_rate_a_per_cycle(float(self.spin_angstrom_per_cycle.value()))
         self.depth_deposition_editor.set_feature_geometry(
             str(self.cmb_depth_feature_type.currentData() or "hole"),
             float(self.spin_depth_feature_width.value()),
@@ -3664,6 +3774,19 @@ class TrenchDepoWindow(QMainWindow):
             "QLabel { color: #334155; background: #f8fafc; border: 1px solid #d9f99d; "
             "border-radius: 4px; padding: 6px; }"
         )
+        self.lbl_depth_display_mode = QLabel("표시")
+        self.cmb_depth_display_mode = QComboBox()
+        self.cmb_depth_display_mode.addItem("Dep rate 기준", "depo_rate")
+        self.cmb_depth_display_mode.addItem("감쇄율 기준", "attenuation")
+        self.cmb_depth_display_mode.setToolTip(
+            "Depth map을 실제 dep rate 감소로 볼지, 100% 대비 감쇄율 증가로 볼지 전환합니다."
+        )
+        self.lbl_depth_formula = QLabel("")
+        self.lbl_depth_formula.setWordWrap(True)
+        self.lbl_depth_formula.setStyleSheet(
+            "QLabel { color: #14532d; background: #f7fee7; border: 1px solid #bbf7d0; "
+            "border-radius: 4px; padding: 5px 6px; font-family: Menlo, Consolas, monospace; }"
+        )
         for widget, tooltip in (
             (self.lbl_depth_feature_type, "Hole/Line에 따라 등가 aspect ratio와 closure 후 fill 기준이 달라집니다."),
             (self.cmb_depth_feature_type, "Hole/Line에 따라 등가 aspect ratio와 closure 후 fill 기준이 달라집니다."),
@@ -3878,6 +4001,14 @@ class TrenchDepoWindow(QMainWindow):
         depth_profile_layout.setContentsMargins(10, 10, 10, 10)
         depth_profile_layout.setSpacing(8)
         depth_profile_layout.addWidget(self.lbl_depth_parameter_help)
+        depth_display_row = QHBoxLayout()
+        depth_display_row.setContentsMargins(0, 0, 0, 0)
+        depth_display_row.setSpacing(6)
+        depth_display_row.addWidget(self.lbl_depth_display_mode)
+        depth_display_row.addWidget(self.cmb_depth_display_mode)
+        depth_display_row.addStretch(1)
+        depth_profile_layout.addLayout(depth_display_row)
+        depth_profile_layout.addWidget(self.lbl_depth_formula)
         depth_profile_layout.addWidget(self.depth_deposition_editor)
         depth_profile_group.setLayout(depth_profile_layout)
 
@@ -3995,6 +4126,9 @@ class TrenchDepoWindow(QMainWindow):
             self.spin_depth_residual_decay,
             self.depth_profile_group,
             self.lbl_depth_parameter_help,
+            self.lbl_depth_display_mode,
+            self.cmb_depth_display_mode,
+            self.lbl_depth_formula,
             self.depth_deposition_editor,
         ]
         self._inhibition_widgets = [
@@ -4225,6 +4359,7 @@ class TrenchDepoWindow(QMainWindow):
         self.spin_sputter_peak.valueChanged.connect(self.sync_sputter_curve_from_spins)
         self.spin_sputter_width.valueChanged.connect(self.sync_sputter_curve_from_spins)
         self.sputter_curve_editor.parametersChanged.connect(self.apply_sputter_curve_parameters)
+        self.spin_angstrom_per_cycle.valueChanged.connect(self.sync_depth_deposition_editor_from_spins)
         self.spin_ion_start_depth.valueChanged.connect(self.sync_ion_transmission_editor_from_spins)
         self.spin_ion_decay_strength.valueChanged.connect(self.sync_ion_transmission_editor_from_spins)
         self.spin_ion_floor.valueChanged.connect(self.sync_ion_transmission_editor_from_spins)
@@ -4243,6 +4378,7 @@ class TrenchDepoWindow(QMainWindow):
         self.spin_depth_decay_power.valueChanged.connect(self.sync_depth_deposition_editor_from_spins)
         self.spin_depth_min_ratio_pct.valueChanged.connect(self.sync_depth_deposition_editor_from_spins)
         self.spin_depth_closure_threshold.valueChanged.connect(self.sync_depth_deposition_editor_from_spins)
+        self.cmb_depth_display_mode.currentIndexChanged.connect(self.sync_depth_deposition_editor_from_spins)
         self.depth_deposition_editor.parametersChanged.connect(self.apply_depth_deposition_editor_parameters)
         self.spin_depth_feature_depth.valueChanged.connect(self.sync_inhibition_profile_from_spins)
         self.spin_inhibition_strength.valueChanged.connect(self.sync_inhibition_profile_from_spins)
@@ -6339,11 +6475,42 @@ class TrenchDepoWindow(QMainWindow):
         finally:
             self._syncing_redepo_lobe = False
 
+    def _current_depth_display_mode(self) -> str:
+        if not hasattr(self, "cmb_depth_display_mode"):
+            return "depo_rate"
+        return _depth_deposition_display_mode(self.cmb_depth_display_mode.currentData())
+
+    def _sync_depth_formula_label(self) -> None:
+        if not hasattr(self, "lbl_depth_formula"):
+            return
+        mode = self._current_depth_display_mode()
+        text = _depth_deposition_formula_text(
+            display_mode=mode,
+            base_rate_a_per_cycle=float(self.spin_angstrom_per_cycle.value()),
+            attenuation_model="exponential",
+            depth_decay_k=float(self.spin_depth_decay_k.value()),
+            depth_decay_power=float(self.spin_depth_decay_power.value()),
+            min_ratio_pct=float(self.spin_depth_min_ratio_pct.value()),
+        )
+        self.lbl_depth_formula.setText(text)
+        if mode == "attenuation":
+            self.lbl_depth_formula.setStyleSheet(
+                "QLabel { color: #1e3a8a; background: #eff6ff; border: 1px solid #bfdbfe; "
+                "border-radius: 4px; padding: 5px 6px; font-family: Menlo, Consolas, monospace; }"
+            )
+        else:
+            self.lbl_depth_formula.setStyleSheet(
+                "QLabel { color: #14532d; background: #f7fee7; border: 1px solid #bbf7d0; "
+                "border-radius: 4px; padding: 5px 6px; font-family: Menlo, Consolas, monospace; }"
+            )
+
     def sync_depth_deposition_editor_from_spins(self, _value: object = 0.0) -> None:
         if self._syncing_depth_curve:
             return
         self._syncing_depth_curve = True
         try:
+            self.depth_deposition_editor.set_depo_rate_a_per_cycle(float(self.spin_angstrom_per_cycle.value()))
+            self.depth_deposition_editor.set_display_mode(self._current_depth_display_mode())
             feature_type = str(self.cmb_depth_feature_type.currentData() or "hole")
             length_enabled = feature_type == "line"
             self.lbl_depth_feature_length.setEnabled(length_enabled)
@@ -6361,6 +6528,7 @@ class TrenchDepoWindow(QMainWindow):
                 float(self.spin_depth_min_ratio_pct.value()),
                 float(self.spin_depth_closure_threshold.value()),
             )
+            self._sync_depth_formula_label()
         finally:
             self._syncing_depth_curve = False
 
@@ -6379,6 +6547,8 @@ class TrenchDepoWindow(QMainWindow):
             self.spin_depth_decay_power.setValue(float(decay_power))
             self.spin_depth_min_ratio_pct.setValue(float(min_ratio_pct))
             self.spin_depth_closure_threshold.setValue(float(closure_threshold_a))
+            self.depth_deposition_editor.set_depo_rate_a_per_cycle(float(self.spin_angstrom_per_cycle.value()))
+            self.depth_deposition_editor.set_display_mode(self._current_depth_display_mode())
             feature_type = str(self.cmb_depth_feature_type.currentData() or "hole")
             length_enabled = feature_type == "line"
             self.lbl_depth_feature_length.setEnabled(length_enabled)
@@ -6396,6 +6566,7 @@ class TrenchDepoWindow(QMainWindow):
                 float(self.spin_depth_min_ratio_pct.value()),
                 float(self.spin_depth_closure_threshold.value()),
             )
+            self._sync_depth_formula_label()
         finally:
             self._syncing_depth_curve = False
 
@@ -6754,6 +6925,9 @@ class TrenchDepoWindow(QMainWindow):
             self.spin_depth_residual_decay,
             self.depth_profile_group,
             self.lbl_depth_parameter_help,
+            self.lbl_depth_display_mode,
+            self.cmb_depth_display_mode,
+            self.lbl_depth_formula,
             self.depth_deposition_editor,
         ]
         for widget in depth_detail_widgets:
@@ -7273,6 +7447,22 @@ class TrenchDepoWindow(QMainWindow):
                 [
                     f"Feature geometry: {config.deposition_feature_type} | W {self._fmt_a(config.deposition_feature_width_a)} | Ref D {self._fmt_a(config.deposition_feature_depth_a)} | L {feature_length}",
                     f"Decay k/power/min: {float(config.deposition_depth_decay_k):.3f} / {float(config.deposition_depth_decay_power):.3f} / {float(config.deposition_min_ratio) * 100.0:.1f}%",
+                    _depth_deposition_formula_text(
+                        display_mode="depo_rate",
+                        base_rate_a_per_cycle=float(config.angstrom_per_cycle),
+                        attenuation_model=str(config.deposition_attenuation_model),
+                        depth_decay_k=float(config.deposition_depth_decay_k),
+                        depth_decay_power=float(config.deposition_depth_decay_power),
+                        min_ratio_pct=float(config.deposition_min_ratio) * 100.0,
+                    ),
+                    _depth_deposition_formula_text(
+                        display_mode="attenuation",
+                        base_rate_a_per_cycle=float(config.angstrom_per_cycle),
+                        attenuation_model=str(config.deposition_attenuation_model),
+                        depth_decay_k=float(config.deposition_depth_decay_k),
+                        depth_decay_power=float(config.deposition_depth_decay_power),
+                        min_ratio_pct=float(config.deposition_min_ratio) * 100.0,
+                    ),
                     f"Closure threshold: {self._fmt_a(config.deposition_closure_threshold_a)}",
                     f"After-close fill budget: {post_fill * 100.0:.1f}%",
                 ]

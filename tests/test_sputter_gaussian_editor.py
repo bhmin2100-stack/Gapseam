@@ -33,6 +33,7 @@ from gapsim.emulation.trench_depo_ui import (
     SplitTestWindow,
     SputterGaussianEditor,
     TrenchDepoWindow,
+    _depth_deposition_formula_text,
     _map_structure_points_to_rect,
 )
 
@@ -209,16 +210,53 @@ class SputterGaussianEditorTest(unittest.TestCase):
         self.assertAlmostEqual(editor.parameters()[3], 24.0, places=6)
         self.assertTrue(seen)
 
+    def test_depth_deposition_editor_toggles_depo_rate_and_attenuation_display(self) -> None:
+        editor = DepthDepositionProfileEditor()
+        editor.resize(420, 170)
+
+        self.assertEqual(editor.display_mode(), "depo_rate")
+        self.assertAlmostEqual(editor._deposition_ratio_for_x(editor._x_for_ratio(0.25)), 0.25, places=6)
+
+        editor.set_display_mode("attenuation")
+
+        self.assertEqual(editor.display_mode(), "attenuation")
+        self.assertAlmostEqual(editor._deposition_ratio_for_x(editor._x_for_ratio(0.25)), 0.75, places=6)
+        self.assertAlmostEqual(editor._display_value_for_ratio(0.75), 0.25, places=6)
+
     def test_depth_deposition_editor_renders_profile_curve_with_structure_background(self) -> None:
         editor = DepthDepositionProfileEditor()
         editor.resize(420, 170)
         editor.set_feature_geometry("line", 280.0, 4200.0, 2500.0)
         editor.set_parameters(0.55, 1.5, 7.0, 12.0)
+        editor.set_display_mode("attenuation")
         pixmap = QPixmap(editor.size())
 
         editor.render(pixmap)
 
         self.assertFalse(pixmap.isNull())
+
+    def test_depth_deposition_formula_text_switches_between_rate_and_attenuation(self) -> None:
+        rate_formula = _depth_deposition_formula_text(
+            display_mode="depo_rate",
+            base_rate_a_per_cycle=12.5,
+            attenuation_model="exponential",
+            depth_decay_k=0.55,
+            depth_decay_power=1.4,
+            min_ratio_pct=5.0,
+        )
+        attenuation_formula = _depth_deposition_formula_text(
+            display_mode="attenuation",
+            base_rate_a_per_cycle=12.5,
+            attenuation_model="exponential",
+            depth_decay_k=0.55,
+            depth_decay_power=1.4,
+            min_ratio_pct=5.0,
+        )
+
+        self.assertIn("Dep rate식", rate_formula)
+        self.assertIn("D0=12.500 A/CYC", rate_formula)
+        self.assertIn("감쇄식", attenuation_formula)
+        self.assertIn("depletion(AR)=1-R(AR)", attenuation_formula)
 
     def test_inhibition_profile_editor_drags_growth_curve_handles(self) -> None:
         editor = InhibitionProfileEditor()
@@ -1093,6 +1131,13 @@ class SputterGaussianEditorTest(unittest.TestCase):
             self.assertAlmostEqual(window.spin_depth_decay_power.value(), 1.7, places=6)
             self.assertAlmostEqual(window.spin_depth_min_ratio_pct.value(), 6.0, places=6)
             self.assertAlmostEqual(window.spin_depth_closure_threshold.value(), 16.0, places=6)
+            window.spin_angstrom_per_cycle.setValue(12.5)
+            self.assertIn("Dep rate식", window.lbl_depth_formula.text())
+            self.assertIn("D0=12.500 A/CYC", window.lbl_depth_formula.text())
+            attenuation_idx = window.cmb_depth_display_mode.findData("attenuation")
+            window.cmb_depth_display_mode.setCurrentIndex(attenuation_idx)
+            self.assertEqual(window.depth_deposition_editor.display_mode(), "attenuation")
+            self.assertIn("감쇄식", window.lbl_depth_formula.text())
             config = window.current_config()
             self.assertAlmostEqual(config.deposition_depth_decay_k, 0.45, places=6)
             self.assertAlmostEqual(config.deposition_depth_decay_power, 1.7, places=6)
