@@ -11,7 +11,19 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from PySide6.QtCore import QObject, QEvent, QMimeData, QPointF, QRectF, Qt, QThread, QTimer, QUrl, Signal, Slot
-from PySide6.QtGui import QColor, QBrush, QDesktopServices, QDrag, QFont, QMouseEvent, QPainter, QPainterPath, QPen
+from PySide6.QtGui import (
+    QColor,
+    QBrush,
+    QDesktopServices,
+    QDrag,
+    QFont,
+    QKeySequence,
+    QMouseEvent,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QShortcut,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -2904,6 +2916,7 @@ class TrenchDepoWindow(QMainWindow):
         self.structure_view = StructureView()
         self.structure_view.setMinimumSize(560, 540)
         self.structure_view.set_point_radius_px(4.5)
+        self.structure_view.set_multi_select_enabled(True)
         self.smoothing_view = StructureView()
         self.smoothing_view.setMinimumSize(560, 540)
         self.smoothing_view.set_point_radius_px(2.5)
@@ -2930,6 +2943,10 @@ class TrenchDepoWindow(QMainWindow):
         self._syncing_workflow_tabs = False
         self._syncing_emulator_preset = False
         self._syncing_quality_mode = False
+        self._structure_undo_stack: List[List[Tuple[float, float]]] = []
+        self._structure_drag_undo_snapshot: Optional[List[Tuple[float, float]]] = None
+        self._structure_drag_changed = False
+        self._applying_structure_undo = False
         self._structure_library_path = Path(
             os.environ.get("GAPSIM_STRUCTURE_LIBRARY", str(DEFAULT_STRUCTURE_LIBRARY_PATH))
         )
@@ -3491,6 +3508,9 @@ class TrenchDepoWindow(QMainWindow):
         self.view_tabs.addTab(smoothing_tab, "2 스무딩")
         self.view_tabs.addTab(progress_tab, "3 진행")
         self.view_tabs.addTab(result_tab, "4 결과")
+        self.shortcut_structure_undo = QShortcut(QKeySequence.StandardKey.Undo, self)
+        self.shortcut_structure_undo.setContext(Qt.ShortcutContext.WindowShortcut)
+        self.shortcut_structure_undo.activated.connect(self._undo_structure_edit)
 
         left_panel = QWidget()
         left_layout = QVBoxLayout()
@@ -4428,8 +4448,11 @@ class TrenchDepoWindow(QMainWindow):
         self.slider_ion_lateral_shadow.valueChanged.connect(self.sync_ion_shadow_slider_labels)
         self.slider_ion_edge_shadow.valueChanged.connect(self.sync_ion_shadow_slider_labels)
         self.structure_view.pointMoved.connect(self._on_structure_point_moved)
+        self.structure_view.pointsMoved.connect(self._on_structure_points_moved)
         self.structure_view.pointInserted.connect(self._on_structure_point_inserted)
         self.structure_view.pointDeleted.connect(self._on_structure_point_deleted)
+        self.structure_view.pointDragStarted.connect(self._on_structure_drag_started)
+        self.structure_view.pointDragFinished.connect(self._on_structure_drag_finished)
         self.smoothing_view.pointMoved.connect(self._on_smoothed_point_moved)
         self.smoothing_view.pointInserted.connect(self._on_smoothed_point_inserted)
         self.smoothing_view.pointDeleted.connect(self._on_smoothed_point_deleted)
@@ -4458,6 +4481,7 @@ class TrenchDepoWindow(QMainWindow):
         self.refresh_parameter_presets(show_status=False)
         self.apply_emulator_mode(run=False)
         self._reset_geometry_to_default()
+        self._clear_structure_undo_stack()
         self.sync_depth_deposition_editor_from_spins()
         self.sync_inhibition_profile_from_spins()
         self._sync_field_overlay_toggles()
@@ -4608,6 +4632,7 @@ class TrenchDepoWindow(QMainWindow):
         self._clear_continuation_context()
         self._active_structure_sheet_name = sheet_name
         self.edit_structure_name.setText(_structure_preset_display_name(sheet_name))
+        self._record_structure_undo_before_change()
         self._set_structure_points(points, fit=True, preserve_on_emulator_switch=True)
         self._update_structure_library_active_label()
         self.statusBar().showMessage(f"구조 프리셋 적용: {_structure_preset_display_name(sheet_name)}", 2200)
@@ -4955,6 +4980,84 @@ class TrenchDepoWindow(QMainWindow):
         self._update_parameter_preset_active_label()
         self.statusBar().showMessage(f"공정 파라미터 삭제됨: {deleted_name}", 2200)
 
+    @staticmethod
+    def _same_point_sequence(
+        a: Sequence[Tuple[float, float]],
+        b: Sequence[Tuple[float, float]],
+        *,
+        tol: float = 1e-9,
+    ) -> bool:
+        if len(a) != len(b):
+            return False
+        return all(
+            abs(float(ax) - float(bx)) <= tol and abs(float(ay) - float(by)) <= tol
+            for (ax, ay), (bx, by) in zip(a, b)
+        )
+
+    def _structure_snapshot(self) -> List[Tuple[float, float]]:
+        return [(float(x), float(y)) for x, y in self._structure_points]
+
+    def _push_structure_undo_snapshot(self, snapshot: Sequence[Tuple[float, float]]) -> None:
+        if self._applying_structure_undo:
+            return
+        pts = [(float(x), float(y)) for x, y in snapshot]
+        if len(pts) < 2:
+            return
+        if self._structure_undo_stack and self._same_point_sequence(self._structure_undo_stack[-1], pts):
+            return
+        self._structure_undo_stack.append(pts)
+        max_depth = 100
+        if len(self._structure_undo_stack) > max_depth:
+            del self._structure_undo_stack[: len(self._structure_undo_stack) - max_depth]
+
+    def _record_structure_undo_before_change(self) -> None:
+        if self._structure_drag_undo_snapshot is not None:
+            self._structure_drag_changed = True
+            return
+        self._push_structure_undo_snapshot(self._structure_snapshot())
+
+    def _clear_structure_undo_stack(self) -> None:
+        self._structure_undo_stack.clear()
+        self._structure_drag_undo_snapshot = None
+        self._structure_drag_changed = False
+
+    def _structure_undo_allowed(self) -> bool:
+        return hasattr(self, "view_tabs") and self.view_tabs.currentIndex() == 0
+
+    def _undo_structure_edit(self) -> None:
+        if not self._structure_undo_allowed():
+            return
+        if not self._structure_undo_stack:
+            self.statusBar().showMessage("되돌릴 구조 편집이 없습니다.", 1600)
+            return
+        previous = self._structure_undo_stack.pop()
+        self._applying_structure_undo = True
+        try:
+            self.structure_view.clear_point_selection()
+            self._clear_continuation_context()
+            self._set_structure_points(
+                previous,
+                clear_smoothing=True,
+                fit=False,
+                preserve_on_emulator_switch=True,
+            )
+        finally:
+            self._applying_structure_undo = False
+            self._structure_drag_undo_snapshot = None
+            self._structure_drag_changed = False
+        self.statusBar().showMessage("구조 편집을 되돌렸습니다.", 1600)
+
+    def _on_structure_drag_started(self, _idx: int, _x: float, _y: float) -> None:
+        self._structure_drag_undo_snapshot = self._structure_snapshot()
+        self._structure_drag_changed = False
+
+    def _on_structure_drag_finished(self, _idx: int, _x: float, _y: float) -> None:
+        snapshot = self._structure_drag_undo_snapshot
+        if snapshot is not None and self._structure_drag_changed and not self._same_point_sequence(snapshot, self._structure_points):
+            self._push_structure_undo_snapshot(snapshot)
+        self._structure_drag_undo_snapshot = None
+        self._structure_drag_changed = False
+
     def _set_structure_points(
         self,
         points: Sequence[Tuple[float, float]],
@@ -5079,6 +5182,7 @@ class TrenchDepoWindow(QMainWindow):
     def _on_structure_table_point_edit_requested(self, row: int, x: float, y: float) -> None:
         if self._syncing_structure_table:
             return
+        self._record_structure_undo_before_change()
         updated_points, mirror_idx = self._structure_points_with_symmetric_move(int(row), float(x), float(y))
         self._syncing_structure_table = True
         try:
@@ -5094,6 +5198,8 @@ class TrenchDepoWindow(QMainWindow):
             return
         valid_rows = sorted({int(row) for row in rows}, reverse=True)
         changed = False
+        if valid_rows:
+            self._record_structure_undo_before_change()
         self._syncing_structure_table = True
         try:
             for row in valid_rows:
@@ -5106,6 +5212,7 @@ class TrenchDepoWindow(QMainWindow):
     def _on_structure_table_replace_points_requested(self, points: List[Tuple[float, float]]) -> None:
         if len(points) < 2:
             return
+        self._record_structure_undo_before_change()
         self._set_structure_points(points, fit=True, preserve_on_emulator_switch=True)
 
     def _reset_geometry_to_default(self, _checked: bool = False) -> None:
@@ -5119,6 +5226,7 @@ class TrenchDepoWindow(QMainWindow):
                 self._active_structure_sheet_name = ""
         else:
             self._active_structure_sheet_name = ""
+        self._record_structure_undo_before_change()
         self._set_structure_points(self._default_points_for_active_emulator())
         self._preserve_geometry_on_emulator_switch = False
         self._update_structure_library_active_label()
@@ -5147,6 +5255,7 @@ class TrenchDepoWindow(QMainWindow):
         if self._syncing_structure_view:
             return
         if 0 <= int(idx) < len(self._structure_points):
+            self._record_structure_undo_before_change()
             updated_points, mirror_idx = self._structure_points_with_symmetric_move(int(idx), float(x), float(y))
             self._structure_points = updated_points
             moved_x, moved_y = updated_points[int(idx)]
@@ -5156,9 +5265,28 @@ class TrenchDepoWindow(QMainWindow):
                 self.structure_view.set_point_xy_silent(int(mirror_idx), mirror_x, mirror_y)
             self._mark_structure_edited()
 
+    def _on_structure_points_moved(self, moved_points: List[Tuple[int, float, float]]) -> None:
+        if self._syncing_structure_view:
+            return
+        pts = [(float(px), float(py)) for px, py in self._structure_points]
+        changed = False
+        for idx_raw, x_raw, y_raw in moved_points:
+            point_idx = int(idx_raw)
+            if 0 <= point_idx < len(pts):
+                new_point = (float(x_raw), float(y_raw))
+                if pts[point_idx] != new_point:
+                    pts[point_idx] = new_point
+                    changed = True
+        if not changed:
+            return
+        self._record_structure_undo_before_change()
+        self._structure_points = pts
+        self._mark_structure_edited()
+
     def _on_structure_point_inserted(self, idx: int, x: float, y: float) -> None:
         if self._syncing_structure_view:
             return
+        self._record_structure_undo_before_change()
         insert_idx = max(0, min(int(idx), len(self._structure_points)))
         self._structure_points.insert(insert_idx, (float(x), float(y)))
         self._mark_structure_edited()
@@ -5168,6 +5296,7 @@ class TrenchDepoWindow(QMainWindow):
             return
         delete_idx = int(idx)
         if 0 <= delete_idx < len(self._structure_points):
+            self._record_structure_undo_before_change()
             self._structure_points.pop(delete_idx)
             self._mark_structure_edited()
 
@@ -5323,6 +5452,7 @@ class TrenchDepoWindow(QMainWindow):
         self._continuation_base_run_dir = base_run_dir
         self._continuation_stage_index = next_stage
 
+        self._record_structure_undo_before_change()
         self._set_structure_points(seed, clear_smoothing=True, fit=True, preserve_on_emulator_switch=True)
         self._continuation_base_result = base_result
         self._continuation_base_run_dir = base_run_dir
@@ -8478,6 +8608,7 @@ class TrenchDepoWindow(QMainWindow):
             replay_emulator = 1
         self.set_active_emulator_number(replay_emulator, run=False)
         self._set_structure_points(config.points, preserve_on_emulator_switch=True)
+        self._clear_structure_undo_stack()
         self.spin_cycles.setValue(int(config.cycles))
         self.spin_angstrom_per_cycle.setValue(float(config.angstrom_per_cycle))
         self._set_quality_mode_for_ds(float(config.reparam_ds_a))

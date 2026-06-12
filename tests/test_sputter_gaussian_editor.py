@@ -14,8 +14,9 @@ os.environ.setdefault(
     str(Path(_STRUCTURE_LIBRARY_TMP.name) / "structures.xlsx"),
 )
 
-from PySide6.QtCore import QEvent, QPointF, QRectF
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt
 from PySide6.QtGui import QPixmap
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from gapsim.emulation.research_registry import DEFAULT_CREATED_EMULATOR_NUMBERS
@@ -1734,6 +1735,108 @@ class SputterGaussianEditorTest(unittest.TestCase):
             table_moved_points = [(-200.0, 0.0), (-80.0, -260.0), (80.0, -260.0), (200.0, 0.0)]
             self.assertEqual(tuple(window._structure_points), tuple(table_moved_points))
             self.assertEqual(tuple(window.structure_points_model.get_points()), tuple(table_moved_points))
+        finally:
+            window.close()
+
+    def test_structure_ctrl_z_undoes_point_move(self) -> None:
+        result = TrenchDepoResult(
+            frame_steps=[0],
+            frame_profiles=[[(0.0, 0.0), (1.0, 0.0)]],
+            frame_voids=[[]],
+            final_profile=[(0.0, 0.0), (1.0, 0.0)],
+            meta={"cycles": 0},
+        )
+        with (
+            mock.patch("gapsim.emulation.trench_depo_ui.run_trench_depo", return_value=result),
+            mock.patch("gapsim.emulation.trench_depo_ui.QTimer.singleShot"),
+        ):
+            window = TrenchDepoWindow()
+
+        try:
+            raw_points = [(-200.0, 0.0), (-120.0, -200.0), (120.0, -200.0), (200.0, 0.0)]
+            moved_points = [(-200.0, 0.0), (-90.0, -240.0), (120.0, -200.0), (200.0, 0.0)]
+            window._set_workflow_step("structure")
+            window._set_structure_points(raw_points, fit=False)
+            window._clear_structure_undo_stack()
+            window.show()
+            window.activateWindow()
+            window.setFocus()
+            QApplication.processEvents()
+
+            window._on_structure_point_moved(1, -90.0, -240.0)
+            self.assertEqual(tuple(window._structure_points), tuple(moved_points))
+
+            QTest.keyClick(window, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
+            QApplication.processEvents()
+
+            self.assertEqual(tuple(window._structure_points), tuple(raw_points))
+            self.assertEqual(tuple(window.structure_points_model.get_points()), tuple(raw_points))
+            self.assertEqual(
+                tuple(window.structure_view._pts),
+                tuple((float(x), -float(y)) for x, y in raw_points),
+            )
+        finally:
+            window.close()
+
+    def test_structure_shift_box_selects_and_moves_multiple_points(self) -> None:
+        result = TrenchDepoResult(
+            frame_steps=[0],
+            frame_profiles=[[(0.0, 0.0), (1.0, 0.0)]],
+            frame_voids=[[]],
+            final_profile=[(0.0, 0.0), (1.0, 0.0)],
+            meta={"cycles": 0},
+        )
+        with (
+            mock.patch("gapsim.emulation.trench_depo_ui.run_trench_depo", return_value=result),
+            mock.patch("gapsim.emulation.trench_depo_ui.QTimer.singleShot"),
+        ):
+            window = TrenchDepoWindow()
+
+        try:
+            raw_points = [
+                (-200.0, 0.0),
+                (-120.0, -200.0),
+                (0.0, -260.0),
+                (120.0, -200.0),
+                (200.0, 0.0),
+            ]
+            moved_points = [
+                (-200.0, 0.0),
+                (-100.0, -220.0),
+                (20.0, -280.0),
+                (140.0, -220.0),
+                (200.0, 0.0),
+            ]
+            window._set_workflow_step("structure")
+            window._set_structure_points(raw_points, fit=False)
+            window._clear_structure_undo_stack()
+            window.resize(1280, 820)
+            window.show()
+            window.structure_view.fit_points()
+            QApplication.processEvents()
+
+            view = window.structure_view
+            start = QPoint(view.mapFromScene(QPointF(-150.0, 150.0)))
+            end = QPoint(view.mapFromScene(QPointF(150.0, 300.0)))
+            QTest.mousePress(view.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ShiftModifier, start)
+            QTest.mouseMove(view.viewport(), end)
+            QTest.mouseRelease(view.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ShiftModifier, end)
+            QApplication.processEvents()
+
+            self.assertEqual(view.selected_point_indices(), [1, 2, 3])
+
+            view._on_item_drag_start_raw(1, -120.0, 200.0)
+            view._point_items[1].setPos(QPointF(-100.0, 220.0))
+            view._on_item_drag_finish_raw(1, -100.0, 220.0)
+            QApplication.processEvents()
+
+            self.assertEqual(tuple(window._structure_points), tuple(moved_points))
+            self.assertEqual(tuple(window.structure_points_model.get_points()), tuple(moved_points))
+
+            QTest.keyClick(window, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
+            QApplication.processEvents()
+
+            self.assertEqual(tuple(window._structure_points), tuple(raw_points))
         finally:
             window.close()
 

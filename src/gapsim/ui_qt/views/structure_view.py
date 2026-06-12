@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QGraphicsItem,
     QGraphicsPathItem,
     QGraphicsPixmapItem,
+    QGraphicsRectItem,
     QGraphicsScene,
     QGraphicsSimpleTextItem,
     QGraphicsView,
@@ -94,6 +95,7 @@ class StructureView(QGraphicsView):
     pointDeleted = Signal(int)  # idx
     pointDragStarted = Signal(int, float, float)  # idx, x_user, y_user
     pointDragFinished = Signal(int, float, float)  # idx, x_user, y_user
+    pointsMoved = Signal(list)  # [(idx, x_user, y_user), ...]
 
     def __init__(self) -> None:
         super().__init__()
@@ -118,6 +120,13 @@ class StructureView(QGraphicsView):
         self._overlay_dragging = False
         self._overlay_drag_last_scene: Optional[QPointF] = None
         self._suppress_point_item_change = False
+        self._multi_select_enabled = False
+        self._selected_indices: set[int] = set()
+        self._selection_start_scene: Optional[QPointF] = None
+        self._selection_rect_item: Optional[QGraphicsRectItem] = None
+        self._multi_drag_anchor_idx: Optional[int] = None
+        self._multi_drag_start_pts: Optional[List[Tuple[float, float]]] = None
+        self._multi_drag_indices: List[int] = []
 
         self._drag_label: Optional[QGraphicsSimpleTextItem] = None
         self._recreate_drag_label()
@@ -156,9 +165,29 @@ class StructureView(QGraphicsView):
         self._radius_px = float(r)
         self._rebuild_items()
 
+    def set_multi_select_enabled(self, enabled: bool) -> None:
+        self._multi_select_enabled = bool(enabled)
+        if not self._multi_select_enabled:
+            self.clear_point_selection()
+
+    def selected_point_indices(self) -> List[int]:
+        return sorted(idx for idx in self._selected_indices if 0 <= idx < len(self._pts))
+
+    def clear_point_selection(self) -> None:
+        if not self._selected_indices:
+            return
+        self._selected_indices.clear()
+        self._sync_selected_point_items()
+
     def set_points_xy(self, pts: List[Point]) -> None:
         # USER -> SCENE conversion: y_scene = -y_user (depth goes down visually)
         self._pts = [(float(x), -float(y)) for x, y in pts]
+        self._selected_indices.clear()
+        self._multi_drag_anchor_idx = None
+        self._multi_drag_start_pts = None
+        self._multi_drag_indices = []
+        self._selection_start_scene = None
+        self._selection_rect_item = None
         self._rebuild_items()
         self._fit_if_first()
 
@@ -328,6 +357,37 @@ class StructureView(QGraphicsView):
                 return self._pts[idx]
             return float(x), float(y)
         sx, sy = self._snap(x, y)
+        if (
+            self._multi_select_enabled
+            and self._multi_drag_anchor_idx == idx
+            and self._multi_drag_start_pts is not None
+            and len(self._multi_drag_indices) > 1
+            and 0 <= idx < len(self._multi_drag_start_pts)
+        ):
+            base_x, base_y = self._multi_drag_start_pts[idx]
+            dx, dy = sx - base_x, sy - base_y
+            moved: List[Tuple[int, float, float]] = []
+            self._suppress_point_item_change = True
+            try:
+                for point_idx in self._multi_drag_indices:
+                    if point_idx < 0 or point_idx >= len(self._pts) or point_idx >= len(self._multi_drag_start_pts):
+                        continue
+                    ox, oy = self._multi_drag_start_pts[point_idx]
+                    nx, ny = ox + dx, oy + dy
+                    self._pts[point_idx] = (nx, ny)
+                    if point_idx != idx and point_idx < len(self._point_items):
+                        self._point_items[point_idx].setPos(QPointF(nx, ny))
+                    moved.append((point_idx, nx, -ny))
+            finally:
+                self._suppress_point_item_change = False
+            self._update_path_from_points()
+            if self._drag_label is not None:
+                self._drag_label.setText(f"{len(moved)} pts | ({sx:.1f}, {-sy:.1f})")
+                self._set_drag_label_position(sx, sy)
+                self._drag_label.setVisible(True)
+            if moved:
+                self.pointsMoved.emit(moved)
+            return sx, sy
         if 0 <= idx < len(self._pts):
             self._pts[idx] = (sx, sy)
             self._update_path_from_points()
@@ -339,13 +399,30 @@ class StructureView(QGraphicsView):
         return sx, sy
 
     def _on_item_drag_start_raw(self, idx: int, x: float, y: float) -> None:
+        self._multi_drag_anchor_idx = None
+        self._multi_drag_start_pts = None
+        self._multi_drag_indices = []
+        if self._multi_select_enabled:
+            if idx not in self._selected_indices:
+                self._selected_indices = {int(idx)}
+                self._sync_selected_point_items()
+            selected = self.selected_point_indices()
+            if idx in selected and len(selected) > 1:
+                self._multi_drag_anchor_idx = int(idx)
+                self._multi_drag_start_pts = list(self._pts)
+                self._multi_drag_indices = selected
         self.pointDragStarted.emit(idx, float(x), -float(y))
 
     def _on_item_drag_finish_raw(self, idx: int, x: float, y: float) -> None:
         self.pointDragFinished.emit(idx, float(x), -float(y))
+        self._multi_drag_anchor_idx = None
+        self._multi_drag_start_pts = None
+        self._multi_drag_indices = []
 
     def _rebuild_items(self) -> None:
         self._scene.clear()
+        self._selection_start_scene = None
+        self._selection_rect_item = None
         self._recreate_drag_label()
         self._add_overlay_item()
         self._reference_items = []
@@ -397,7 +474,22 @@ class StructureView(QGraphicsView):
             self._scene.addItem(it)
             self._point_items.append(it)
 
+        self._selected_indices = {idx for idx in self._selected_indices if 0 <= idx < len(self._point_items)}
+        self._sync_selected_point_items()
         self._ensure_scene_margin()
+
+    def _sync_selected_point_items(self) -> None:
+        selected_pen = QPen(QColor("#f59e0b"), 2.2)
+        selected_pen.setCosmetic(True)
+        normal_pen = QPen(QColor(self._current_color))
+        normal_pen.setCosmetic(True)
+        selected_brush = QBrush(QColor("#fbbf24"))
+        normal_brush = QBrush(QColor(self._current_color))
+        for idx, item in enumerate(self._point_items):
+            is_selected = self._multi_select_enabled and idx in self._selected_indices
+            item.setSelected(is_selected)
+            item.setPen(selected_pen if is_selected else normal_pen)
+            item.setBrush(selected_brush if is_selected else normal_brush)
 
     def _add_overlay_item(self) -> None:
         self._overlay_item = None
@@ -474,6 +566,7 @@ class StructureView(QGraphicsView):
         sx, sy = self._snap(float(scene_pos.x()), float(scene_pos.y()))
         insert_idx = seg_i + 1
         self._pts.insert(insert_idx, (sx, sy))
+        self._selected_indices = {insert_idx} if self._multi_select_enabled else set()
         self._rebuild_items()
         self._inserting_idx = insert_idx
         if self._drag_label is not None:
@@ -489,6 +582,12 @@ class StructureView(QGraphicsView):
         if idx <= 0 or idx >= (len(self._pts) - 1):
             return False
         self._pts.pop(idx)
+        if self._multi_select_enabled:
+            self._selected_indices = {
+                (selected_idx - 1 if selected_idx > idx else selected_idx)
+                for selected_idx in self._selected_indices
+                if selected_idx != idx
+            }
         self._inserting_idx = None
         self._rebuild_items()
         if self._drag_label is not None:
@@ -503,6 +602,11 @@ class StructureView(QGraphicsView):
             return
         margin = max(rect.width(), rect.height(), 300.0) * 2.0
         self._scene.setSceneRect(rect.adjusted(-margin, -margin, margin, margin))
+
+    def _mouse_event_pos(self, event) -> QPoint:
+        if hasattr(event, "position"):
+            return event.position().toPoint()
+        return event.pos()
 
     def drawBackground(self, painter, rect) -> None:
         super().drawBackground(painter, rect)
@@ -596,9 +700,30 @@ class StructureView(QGraphicsView):
         super().wheelEvent(event)
 
     def mousePressEvent(self, event) -> None:
+        if (
+            self._multi_select_enabled
+            and self._editing_enabled
+            and event.button() == Qt.MouseButton.LeftButton
+            and (event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+            and not (event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+        ):
+            event_pos = self._mouse_event_pos(event)
+            self._selection_start_scene = self.mapToScene(event_pos)
+            if self._selection_rect_item is not None:
+                self._scene.removeItem(self._selection_rect_item)
+            rect = QRectF(self._selection_start_scene, self._selection_start_scene)
+            self._selection_rect_item = QGraphicsRectItem(rect)
+            pen = QPen(QColor("#2563eb"), 1.2, Qt.PenStyle.DashLine)
+            pen.setCosmetic(True)
+            self._selection_rect_item.setPen(pen)
+            self._selection_rect_item.setBrush(QBrush(QColor(37, 99, 235, 36)))
+            self._selection_rect_item.setZValue(9_000)
+            self._scene.addItem(self._selection_rect_item)
+            event.accept()
+            return
         if (event.modifiers() & Qt.KeyboardModifier.ControlModifier) and event.button() == Qt.MouseButton.LeftButton:
             self._panning = True
-            self._pan_start = QPointF(event.pos())
+            self._pan_start = QPointF(self._mouse_event_pos(event))
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
             event.accept()
             return
@@ -609,7 +734,7 @@ class StructureView(QGraphicsView):
             and not (event.modifiers() & Qt.KeyboardModifier.ControlModifier)
         ):
             self._overlay_dragging = True
-            self._overlay_drag_last_scene = self.mapToScene(event.pos())
+            self._overlay_drag_last_scene = self.mapToScene(self._mouse_event_pos(event))
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
             event.accept()
             return
@@ -618,7 +743,7 @@ class StructureView(QGraphicsView):
             and event.button() == Qt.MouseButton.RightButton
             and not (event.modifiers() & Qt.KeyboardModifier.ControlModifier)
         ):
-            scene_pos = self.mapToScene(event.pos())
+            scene_pos = self.mapToScene(self._mouse_event_pos(event))
             pidx = self._find_point_near_click(scene_pos)
             if pidx is not None and self._delete_point_at(pidx):
                 event.accept()
@@ -628,7 +753,7 @@ class StructureView(QGraphicsView):
             and event.button() == Qt.MouseButton.LeftButton
             and not (event.modifiers() & Qt.KeyboardModifier.ControlModifier)
         ):
-            scene_pos = self.mapToScene(event.pos())
+            scene_pos = self.mapToScene(self._mouse_event_pos(event))
             pidx = self._find_point_near_click(scene_pos)
             if pidx is None:
                 seg_i = self._find_segment_near_click(scene_pos)
@@ -639,9 +764,15 @@ class StructureView(QGraphicsView):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:
+        if self._selection_start_scene is not None and self._selection_rect_item is not None:
+            now_scene = self.mapToScene(self._mouse_event_pos(event))
+            self._selection_rect_item.setRect(QRectF(self._selection_start_scene, now_scene).normalized())
+            event.accept()
+            return
         if self._panning and self._pan_start is not None and (event.buttons() & Qt.MouseButton.LeftButton):
-            delta = QPointF(event.pos()) - self._pan_start
-            self._pan_start = QPointF(event.pos())
+            event_pos = QPointF(self._mouse_event_pos(event))
+            delta = event_pos - self._pan_start
+            self._pan_start = event_pos
             self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - int(delta.x()))
             self.verticalScrollBar().setValue(self.verticalScrollBar().value() - int(delta.y()))
             event.accept()
@@ -652,7 +783,7 @@ class StructureView(QGraphicsView):
             and self._overlay_drag_last_scene is not None
             and (event.buttons() & Qt.MouseButton.LeftButton)
         ):
-            now_scene = self.mapToScene(event.pos())
+            now_scene = self.mapToScene(self._mouse_event_pos(event))
             delta = now_scene - self._overlay_drag_last_scene
             self._overlay_drag_last_scene = now_scene
             new_pos = self._overlay_item.pos() + delta
@@ -663,12 +794,31 @@ class StructureView(QGraphicsView):
         if self._inserting_idx is not None and (event.buttons() & Qt.MouseButton.LeftButton):
             idx = self._inserting_idx
             if 0 <= idx < len(self._point_items):
-                self._point_items[idx].setPos(self.mapToScene(event.pos()))
+                self._point_items[idx].setPos(self.mapToScene(self._mouse_event_pos(event)))
             event.accept()
             return
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
+        if self._selection_start_scene is not None and event.button() == Qt.MouseButton.LeftButton:
+            rect = QRectF(self._selection_start_scene, self.mapToScene(self._mouse_event_pos(event))).normalized()
+            if self._selection_rect_item is not None:
+                self._scene.removeItem(self._selection_rect_item)
+                self._selection_rect_item = None
+            self._selection_start_scene = None
+            min_view_span = 3.0
+            view_rect = QRectF(QPointF(self.mapFromScene(rect.topLeft())), QPointF(self.mapFromScene(rect.bottomRight()))).normalized()
+            if view_rect.width() >= min_view_span or view_rect.height() >= min_view_span:
+                self._selected_indices = {
+                    idx
+                    for idx, (x, y) in enumerate(self._pts)
+                    if rect.contains(QPointF(float(x), float(y)))
+                }
+            else:
+                self._selected_indices.clear()
+            self._sync_selected_point_items()
+            event.accept()
+            return
         if self._panning and event.button() == Qt.MouseButton.LeftButton:
             self._panning = False
             self._pan_start = None
