@@ -38,6 +38,16 @@ class MainWindowProjectResultsTest(unittest.TestCase):
             ):
                 self.assertEqual(MainWindow._runs_root_dir(), exe_path.resolve().parent / "runs")
 
+    def test_decay_k_editor_accepts_five_decimal_places(self) -> None:
+        win = MainWindow()
+        try:
+            self.assertEqual(win.spin_decay_k.decimals(), 5)
+            self.assertAlmostEqual(win.spin_decay_k.singleStep(), 0.00001, places=8)
+            win.spin_decay_k.setValue(0.12345)
+            self.assertAlmostEqual(win.spin_decay_k.value(), 0.12345, places=6)
+        finally:
+            win.close()
+
     def _wait_for_result_load(self, win: MainWindow, timeout_s: float = 3.0) -> None:
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:

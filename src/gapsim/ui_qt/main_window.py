@@ -893,8 +893,9 @@ class MainWindow(QMainWindow):
 
         self.lbl_decay_k = QLabel()
         self.spin_decay_k = QDoubleSpinBox()
-        self.spin_decay_k.setDecimals(3)
+        self.spin_decay_k.setDecimals(5)
         self.spin_decay_k.setRange(0.0, 1e12)
+        self.spin_decay_k.setSingleStep(0.00001)
         self.spin_decay_k.setValue(1.0)
         self._setup_float_editor(self.spin_decay_k)
         adv_form.addRow(self.lbl_decay_k, self.spin_decay_k)
@@ -1079,7 +1080,6 @@ class MainWindow(QMainWindow):
         widget.installEventFilter(self._no_wheel_filter)
 
     def _setup_float_editor(self, widget: QDoubleSpinBox) -> None:
-        widget.setDecimals(3)
         widget.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         widget.setKeyboardTracking(False)
         widget.installEventFilter(self._no_wheel_filter)

@@ -226,11 +226,11 @@ def _depth_deposition_formula_text(
     if mode == "attenuation":
         return (
             f"감쇄식: depletion(z)=1-R(z), {ratio_expr}, {depth_transform}; "
-            f"K={k:.3f}, P={power:.2f}, m={min_pct:.1f}%"
+            f"K={k:.5f}, P={power:.2f}, m={min_pct:.1f}%"
         )
     return (
         f"Dep rate식: dep_rate(z)=D0*R(z), {ratio_expr}, {depth_transform}; "
-        f"D0={base:.3f} A/CYC, K={k:.3f}, P={power:.2f}, m={min_pct:.1f}%"
+        f"D0={base:.3f} A/CYC, K={k:.5f}, P={power:.2f}, m={min_pct:.1f}%"
     )
 
 
@@ -1474,7 +1474,7 @@ class DepthDepositionProfileEditor(QWidget):
             (
                 ("Dep rate    " if self._display_mode == "depo_rate" else "Attenuation    ")
                 + (
-                f"K {self._decay_k:.2f}    "
+                f"K {self._decay_k:.5f}    "
                 f"P {self._decay_power:.2f}    "
                 f"Min {self._min_ratio_pct:.1f}%    "
                 f"Close {self._closure_threshold_a:.1f} A"
@@ -3147,8 +3147,8 @@ class TrenchDepoWindow(QMainWindow):
         self.spin_depth_feature_length.setValue(0.0)
         self.spin_depth_decay_k = QDoubleSpinBox()
         self.spin_depth_decay_k.setRange(0.0, 20.0)
-        self.spin_depth_decay_k.setDecimals(3)
-        self.spin_depth_decay_k.setSingleStep(0.1)
+        self.spin_depth_decay_k.setDecimals(5)
+        self.spin_depth_decay_k.setSingleStep(0.00001)
         self.spin_depth_decay_k.setValue(0.8)
         self.spin_depth_decay_power = QDoubleSpinBox()
         self.spin_depth_decay_power.setRange(0.05, 8.0)
@@ -7240,7 +7240,7 @@ class TrenchDepoWindow(QMainWindow):
         elif parameter == "closure_redepo_smoothing_a":
             values = (0.0, 320.0, 80.0, 0, 0.0, 5000.0)
         elif parameter == "deposition_depth_decay_k":
-            values = (0.2, 1.4, 0.3, 2, 0.0, 20.0)
+            values = (0.2, 1.4, 0.3, 5, 0.0, 20.0)
         elif parameter == "deposition_depth_decay_power":
             values = (0.8, 2.0, 0.4, 2, 0.05, 8.0)
         elif parameter in {
@@ -7272,13 +7272,15 @@ class TrenchDepoWindow(QMainWindow):
             values = (0.0, 16.0, 4.0, 3, 0.0, 100.0)
 
         start, end, step, decimals, minimum, maximum = values
+        decimals_i = int(decimals)
+        fine_step = 10.0 ** (-decimals_i) if decimals_i > 0 else 1.0
         for spin in (self.spin_split_start, self.spin_split_end):
-            spin.setDecimals(int(decimals))
+            spin.setDecimals(decimals_i)
             spin.setRange(float(minimum), float(maximum))
-            spin.setSingleStep(max(float(step), 1.0))
-        self.spin_split_step.setDecimals(int(decimals))
-        self.spin_split_step.setRange(0.001 if int(decimals) > 0 else 1.0, float(maximum))
-        self.spin_split_step.setSingleStep(max(float(step), 1.0))
+            spin.setSingleStep(max(float(step), fine_step))
+        self.spin_split_step.setDecimals(decimals_i)
+        self.spin_split_step.setRange(fine_step, float(maximum))
+        self.spin_split_step.setSingleStep(max(float(step), fine_step))
         self.spin_split_start.setValue(float(start))
         self.spin_split_end.setValue(float(end))
         self.spin_split_step.setValue(float(step))
@@ -7508,7 +7510,7 @@ class TrenchDepoWindow(QMainWindow):
             lines.extend(
                 [
                     f"Feature geometry: {config.deposition_feature_type} | W {self._fmt_a(config.deposition_feature_width_a)} | Ref D {self._fmt_a(config.deposition_feature_depth_a)} | L {feature_length}",
-                    f"Decay k/power/min: {float(config.deposition_depth_decay_k):.3f} / {float(config.deposition_depth_decay_power):.3f} / {float(config.deposition_min_ratio) * 100.0:.1f}%",
+                    f"Decay k/power/min: {float(config.deposition_depth_decay_k):.5f} / {float(config.deposition_depth_decay_power):.3f} / {float(config.deposition_min_ratio) * 100.0:.1f}%",
                     _depth_deposition_formula_text(
                         display_mode="depo_rate",
                         base_rate_a_per_cycle=float(config.angstrom_per_cycle),
