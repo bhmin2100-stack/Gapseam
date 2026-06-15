@@ -1573,6 +1573,61 @@ class SputterGaussianEditorTest(unittest.TestCase):
             finally:
                 window.close()
 
+    def test_addon_panel_lists_and_toggles_loaded_addons(self) -> None:
+        result = TrenchDepoResult(
+            frame_steps=[0],
+            frame_profiles=[[(0.0, 0.0), (1.0, 0.0)]],
+            frame_voids=[[]],
+            final_profile=[(0.0, 0.0), (1.0, 0.0)],
+            meta={"cycles": 0},
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "addon_src"
+            source.mkdir()
+            (source / "addon.json").write_text(
+                json.dumps(
+                    {
+                        "id": "rate-guard",
+                        "name": "Rate Guard",
+                        "version": "0.1.0",
+                        "description": "Checks deposition rate settings.",
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {
+                        "GAPSIM_ADDON_ROOT": str(root / "addons"),
+                        "GAPSIM_ADDON_STATE": str(root / "addons_state.json"),
+                    },
+                ),
+                mock.patch("gapsim.emulation.trench_depo_ui.run_trench_depo", return_value=result),
+                mock.patch("gapsim.emulation.trench_depo_ui.QTimer.singleShot"),
+            ):
+                window = TrenchDepoWindow()
+
+            try:
+                window._install_addon_from_path(source)
+
+                self.assertEqual(window.addon_list.count(), 1)
+                item = window.addon_list.item(0)
+                self.assertEqual(item.data(Qt.ItemDataRole.UserRole), "rate-guard")
+                self.assertEqual(item.checkState(), Qt.CheckState.Checked)
+                self.assertIn("활성 1개", window.lbl_addon_status.text())
+                self.assertEqual(window._addon_manager.enabled_ids(), ["rate-guard"])
+
+                item.setCheckState(Qt.CheckState.Unchecked)
+                QApplication.processEvents()
+
+                self.assertEqual(window._addon_manager.enabled_ids(), [])
+                self.assertIn("활성 0개", window.lbl_addon_status.text())
+            finally:
+                window.close()
+
     def test_structure_table_and_image_overlay_match_gapsim_flow(self) -> None:
         result = TrenchDepoResult(
             frame_steps=[0],

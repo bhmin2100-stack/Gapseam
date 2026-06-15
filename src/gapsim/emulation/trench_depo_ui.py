@@ -42,6 +42,8 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
@@ -71,6 +73,12 @@ from gapsim.emulation.parameter_library import (
     read_parameter_preset,
     sanitize_parameter_preset_name,
     save_parameter_preset,
+)
+from gapsim.emulation.addon_manager import (
+    DEFAULT_ADDON_ROOT,
+    DEFAULT_ADDON_STATE_PATH,
+    AddonError,
+    AddonManager,
 )
 from gapsim.emulation.structure_library import (
     DEFAULT_EMULATOR_STRUCTURE_SHEETS,
@@ -2953,6 +2961,10 @@ class TrenchDepoWindow(QMainWindow):
         self._parameter_library_path = Path(
             os.environ.get("GAPSIM_PARAMETER_LIBRARY", str(DEFAULT_PARAMETER_LIBRARY_PATH))
         )
+        self._addon_manager = AddonManager(
+            addons_dir=Path(os.environ.get("GAPSIM_ADDON_ROOT", str(DEFAULT_ADDON_ROOT))),
+            state_path=Path(os.environ.get("GAPSIM_ADDON_STATE", str(DEFAULT_ADDON_STATE_PATH))),
+        )
         self._active_structure_sheet_name = ""
         self._active_parameter_preset_name = ""
         self._overlay_opacity = 0.35
@@ -3549,6 +3561,35 @@ class TrenchDepoWindow(QMainWindow):
         parameter_preset_layout.addWidget(self.lbl_parameter_preset_active, 3, 0, 1, 4)
         parameter_preset_layout.addWidget(self.lbl_parameter_preset_path, 4, 0, 1, 4)
         parameter_preset_group.setLayout(parameter_preset_layout)
+
+        self.addon_group = QGroupBox("애드온")
+        addon_layout = QVBoxLayout()
+        addon_layout.setContentsMargins(10, 10, 10, 10)
+        addon_layout.setSpacing(8)
+        self.addon_list = QListWidget()
+        self.addon_list.setMinimumHeight(120)
+        self.addon_list.setAlternatingRowColors(True)
+        self.lbl_addon_status = QLabel("애드온: 0개")
+        self.lbl_addon_status.setWordWrap(True)
+        addon_button_row = QHBoxLayout()
+        addon_button_row.setContentsMargins(0, 0, 0, 0)
+        self.btn_load_addon_file = QPushButton("파일 불러오기")
+        self.btn_load_addon_folder = QPushButton("폴더 불러오기")
+        self.btn_refresh_addons = QPushButton("새로고침")
+        addon_button_row.addWidget(self.btn_load_addon_file)
+        addon_button_row.addWidget(self.btn_load_addon_folder)
+        addon_button_row.addWidget(self.btn_refresh_addons)
+        addon_button_row.addStretch(1)
+        addon_open_row = QHBoxLayout()
+        addon_open_row.setContentsMargins(0, 0, 0, 0)
+        self.btn_open_addon_folder = QPushButton("애드온 폴더")
+        addon_open_row.addWidget(self.btn_open_addon_folder)
+        addon_open_row.addStretch(1)
+        addon_layout.addWidget(self.addon_list)
+        addon_layout.addLayout(addon_button_row)
+        addon_layout.addLayout(addon_open_row)
+        addon_layout.addWidget(self.lbl_addon_status)
+        self.addon_group.setLayout(addon_layout)
 
         self.structure_points_model = PointsTableModel()
         self.structure_points_table = PointsTableView()
@@ -4273,6 +4314,7 @@ class TrenchDepoWindow(QMainWindow):
         progress_panel_layout.setSpacing(8)
         progress_panel_layout.addWidget(emulator_group)
         progress_panel_layout.addWidget(parameter_preset_group)
+        progress_panel_layout.addWidget(self.addon_group)
         progress_panel_layout.addWidget(action_group)
         progress_panel_layout.addWidget(params_group)
         progress_panel_layout.addWidget(gaussian_group)
@@ -4462,6 +4504,11 @@ class TrenchDepoWindow(QMainWindow):
         self.btn_delete_structure.clicked.connect(self.delete_selected_structure_from_library)
         self.btn_export_default_structures.clicked.connect(self.export_default_structures_to_library)
         self.btn_open_structure_workbook.clicked.connect(self.open_structure_library_workbook)
+        self.btn_load_addon_file.clicked.connect(self.load_addon_file)
+        self.btn_load_addon_folder.clicked.connect(self.load_addon_folder)
+        self.btn_refresh_addons.clicked.connect(self.refresh_addons)
+        self.btn_open_addon_folder.clicked.connect(self.open_addon_folder)
+        self.addon_list.itemChanged.connect(self._on_addon_item_changed)
         self.btn_reload_parameter_presets.clicked.connect(self.refresh_parameter_presets)
         self.cmb_parameter_preset.currentIndexChanged.connect(self._on_parameter_preset_selected)
         self.btn_apply_parameter_preset.clicked.connect(self.apply_selected_parameter_preset)
@@ -4479,6 +4526,7 @@ class TrenchDepoWindow(QMainWindow):
 
         self.refresh_structure_library(show_status=False)
         self.refresh_parameter_presets(show_status=False)
+        self.refresh_addons(show_status=False)
         self.apply_emulator_mode(run=False)
         self._reset_geometry_to_default()
         self._clear_structure_undo_stack()
@@ -4705,6 +4753,90 @@ class TrenchDepoWindow(QMainWindow):
             self.export_default_structures_to_library()
         if self._structure_library_path.exists():
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._structure_library_path.resolve())))
+
+    def refresh_addons(self, _checked: bool = False, *, show_status: bool = True) -> None:
+        try:
+            records = self._addon_manager.scan()
+        except AddonError as exc:
+            records = []
+            if show_status:
+                QMessageBox.warning(self, "애드온", f"애드온 목록 읽기 실패:\n{exc}")
+        self.addon_list.blockSignals(True)
+        try:
+            self.addon_list.clear()
+            for record in records:
+                manifest = record.manifest
+                label = f"{manifest.name}  v{manifest.version}"
+                item = QListWidgetItem(label)
+                item.setData(Qt.ItemDataRole.UserRole, manifest.addon_id)
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                item.setCheckState(Qt.CheckState.Checked if record.enabled else Qt.CheckState.Unchecked)
+                tooltip_parts = [f"ID: {manifest.addon_id}", f"경로: {manifest.path}"]
+                if manifest.description:
+                    tooltip_parts.insert(0, manifest.description)
+                if manifest.extension_points:
+                    tooltip_parts.append("확장점: " + ", ".join(manifest.extension_points))
+                item.setToolTip("\n".join(tooltip_parts))
+                self.addon_list.addItem(item)
+        finally:
+            self.addon_list.blockSignals(False)
+        enabled = [record for record in records if record.enabled]
+        self.lbl_addon_status.setText(
+            f"애드온: {len(records)}개 / 활성 {len(enabled)}개\n"
+            f"폴더: {self._addon_manager.addons_dir}"
+        )
+        if show_status:
+            self.statusBar().showMessage(f"애드온 목록 갱신: {len(records)}개", 1800)
+
+    def _install_addon_from_path(self, path: Path | str) -> None:
+        try:
+            manifest = self._addon_manager.install_from_path(path, enable=True)
+        except AddonError as exc:
+            QMessageBox.warning(self, "애드온", f"애드온 불러오기 실패:\n{exc}")
+            return
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "애드온", f"애드온 설치 실패:\n{exc}")
+            return
+        self.refresh_addons(show_status=False)
+        self.statusBar().showMessage(f"애드온 불러옴: {manifest.name}", 2400)
+
+    def load_addon_file(self, _checked: bool = False) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "애드온 파일 불러오기",
+            str(self._addon_manager.addons_dir),
+            "Addon manifest (addon.json *.json);;JSON (*.json);;All files (*)",
+        )
+        if path:
+            self._install_addon_from_path(path)
+
+    def load_addon_folder(self, _checked: bool = False) -> None:
+        path = QFileDialog.getExistingDirectory(
+            self,
+            "애드온 폴더 불러오기",
+            str(self._addon_manager.addons_dir),
+        )
+        if path:
+            self._install_addon_from_path(path)
+
+    def open_addon_folder(self, _checked: bool = False) -> None:
+        self._addon_manager.addons_dir.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._addon_manager.addons_dir.resolve())))
+
+    def _on_addon_item_changed(self, item: QListWidgetItem) -> None:
+        addon_id = str(item.data(Qt.ItemDataRole.UserRole) or "")
+        if not addon_id:
+            return
+        enabled = item.checkState() == Qt.CheckState.Checked
+        try:
+            self._addon_manager.set_enabled(addon_id, enabled)
+        except AddonError as exc:
+            QMessageBox.warning(self, "애드온", f"애드온 상태 저장 실패:\n{exc}")
+            self.refresh_addons(show_status=False)
+            return
+        self.refresh_addons(show_status=False)
+        state = "활성" if enabled else "비활성"
+        self.statusBar().showMessage(f"애드온 {state}: {addon_id}", 1600)
 
     def refresh_parameter_presets(self, _checked: bool = False, *, show_status: bool = True) -> None:
         try:
