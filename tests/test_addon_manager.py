@@ -73,6 +73,39 @@ class AddonManagerTest(unittest.TestCase):
             self.assertEqual(manifest.name, "No ID")
             self.assertEqual(sanitize_addon_id(" a/b:c "), "a_b_c")
 
+    def test_ensure_builtin_manifest_keeps_existing_toggle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = AddonManager(addons_dir=root / "addons", state_path=root / "addons_state.json")
+
+            manifest = manager.ensure_builtin_manifest(
+                {
+                    "id": "dent-analysis",
+                    "name": "Dent 분석",
+                    "version": "0.1.0",
+                    "description": "Built in.",
+                },
+                enable_by_default=True,
+            )
+
+            self.assertEqual(manifest.addon_id, "dent-analysis")
+            self.assertEqual(manager.enabled_ids(), ["dent-analysis"])
+
+            manager.set_enabled("dent-analysis", False)
+            manager.ensure_builtin_manifest(
+                {
+                    "id": "dent-analysis",
+                    "name": "Dent 분석",
+                    "version": "0.1.1",
+                    "description": "Updated.",
+                },
+                enable_by_default=True,
+            )
+
+            records = manager.scan()
+            self.assertEqual(records[0].manifest.version, "0.1.1")
+            self.assertFalse(records[0].enabled)
+
     def test_invalid_manifest_raises_addon_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             manifest_path = Path(tmp) / ADDON_MANIFEST_FILENAME

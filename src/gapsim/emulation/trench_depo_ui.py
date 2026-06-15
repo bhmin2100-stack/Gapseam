@@ -80,6 +80,13 @@ from gapsim.emulation.addon_manager import (
     AddonError,
     AddonManager,
 )
+from gapsim.emulation.dent_analysis import (
+    DentLine,
+    DentRegion,
+    DentSample,
+    analyze_dent_frames,
+    dent_samples_to_payload,
+)
 from gapsim.emulation.structure_library import (
     DEFAULT_EMULATOR_STRUCTURE_SHEETS,
     DEFAULT_STRUCTURE_LIBRARY_PATH,
@@ -141,6 +148,14 @@ DEFAULT_MODEL_PARAMETER_SECTION_ORDER: Tuple[str, ...] = (
     "lf",
     "closure",
 )
+DENT_ANALYSIS_ADDON_ID = "dent-analysis"
+DENT_ANALYSIS_MANIFEST: Mapping[str, Any] = {
+    "id": DENT_ANALYSIS_ADDON_ID,
+    "name": "Dent 분석",
+    "version": "0.1.0",
+    "description": "ROI와 기준선을 지정해 cycle별 dent depth와 막질 slope를 분석합니다.",
+    "extension_points": ["progress.panel", "results.panel"],
+}
 
 
 def _display_decimation_stride(profiles: Sequence[Sequence[Tuple[float, float]]]) -> int:
@@ -2712,6 +2727,145 @@ class SplitTestWindow(QMainWindow):
         super().closeEvent(event)
 
 
+class DentAnalysisGraph(QWidget):
+    def __init__(self) -> None:
+        super().__init__()
+        self._samples: List[DentSample] = []
+        self._x_mode = "cycle"
+        self.setMinimumHeight(190)
+
+    def set_samples(self, samples: Sequence[DentSample], *, x_mode: str = "cycle") -> None:
+        self._samples = list(samples)
+        self._x_mode = str(x_mode or "cycle")
+        self.update()
+
+    def _x_value(self, sample: DentSample) -> float:
+        if self._x_mode == "thickness":
+            return float(sample.thickness_a)
+        return float(sample.cycle)
+
+    @staticmethod
+    def _range(values: Sequence[float], *, zero_floor: bool = False) -> Tuple[float, float]:
+        if not values:
+            return (0.0, 1.0)
+        lo = min(values)
+        hi = max(values)
+        if zero_floor:
+            lo = min(0.0, lo)
+        if abs(hi - lo) <= 1e-12:
+            pad = max(1.0, abs(hi) * 0.12)
+        else:
+            pad = (hi - lo) * 0.12
+        return (lo - pad if not zero_floor else min(0.0, lo - pad), hi + pad)
+
+    def paintEvent(self, event) -> None:  # noqa: N802, ANN001
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(10.0, 8.0, -10.0, -8.0)
+        painter.fillRect(rect, QColor(255, 255, 255))
+        painter.setPen(QPen(QColor(203, 213, 225), 1.0))
+        painter.drawRect(rect)
+
+        samples = [sample for sample in self._samples if sample.dent_depth_a is not None]
+        if not samples:
+            painter.setPen(QColor(100, 116, 139))
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "Dent 결과 없음")
+            return
+
+        plot = rect.adjusted(52.0, 18.0, -52.0, -34.0)
+        if plot.width() <= 4.0 or plot.height() <= 4.0:
+            return
+        x_values = [self._x_value(sample) for sample in samples]
+        depth_values = [float(sample.dent_depth_a or 0.0) for sample in samples]
+        slope_samples = [sample for sample in samples if sample.slope_delta_deg is not None]
+        slope_values = [float(sample.slope_delta_deg or 0.0) for sample in slope_samples]
+        x_min, x_max = self._range(x_values)
+        depth_min, depth_max = self._range(depth_values, zero_floor=True)
+        slope_min, slope_max = self._range(slope_values)
+
+        def map_x(value: float) -> float:
+            if abs(x_max - x_min) <= 1e-12:
+                return float(plot.left())
+            return float(plot.left() + ((value - x_min) / (x_max - x_min)) * plot.width())
+
+        def map_depth(value: float) -> float:
+            if abs(depth_max - depth_min) <= 1e-12:
+                return float(plot.bottom())
+            return float(plot.bottom() - ((value - depth_min) / (depth_max - depth_min)) * plot.height())
+
+        def map_slope(value: float) -> float:
+            if abs(slope_max - slope_min) <= 1e-12:
+                return float(plot.center().y())
+            return float(plot.bottom() - ((value - slope_min) / (slope_max - slope_min)) * plot.height())
+
+        grid_pen = QPen(QColor(226, 232, 240), 1.0)
+        painter.setPen(grid_pen)
+        for idx in range(5):
+            y = plot.top() + plot.height() * float(idx) / 4.0
+            painter.drawLine(QPointF(plot.left(), y), QPointF(plot.right(), y))
+        axis_pen = QPen(QColor(71, 85, 105), 1.2)
+        painter.setPen(axis_pen)
+        painter.drawLine(QPointF(plot.left(), plot.top()), QPointF(plot.left(), plot.bottom()))
+        painter.drawLine(QPointF(plot.right(), plot.top()), QPointF(plot.right(), plot.bottom()))
+        painter.drawLine(QPointF(plot.left(), plot.bottom()), QPointF(plot.right(), plot.bottom()))
+
+        painter.setPen(QColor(71, 85, 105))
+        painter.drawText(QRectF(rect.left(), plot.top() - 8.0, 50.0, 18.0), Qt.AlignmentFlag.AlignRight, "Depth")
+        painter.drawText(
+            QRectF(plot.right() + 5.0, plot.top() - 8.0, 48.0, 18.0),
+            Qt.AlignmentFlag.AlignLeft,
+            "Slope",
+        )
+        painter.drawText(
+            QRectF(plot.left(), plot.bottom() + 8.0, plot.width(), 20.0),
+            Qt.AlignmentFlag.AlignCenter,
+            "Thickness A" if self._x_mode == "thickness" else "Cycle",
+        )
+        painter.drawText(QRectF(rect.left(), plot.top(), 48.0, 18.0), Qt.AlignmentFlag.AlignRight, f"{depth_max:.1f}")
+        painter.drawText(QRectF(rect.left(), plot.bottom() - 12.0, 48.0, 18.0), Qt.AlignmentFlag.AlignRight, f"{depth_min:.1f}")
+        if slope_values:
+            painter.drawText(QRectF(plot.right() + 5.0, plot.top(), 48.0, 18.0), Qt.AlignmentFlag.AlignLeft, f"{slope_max:.1f}")
+            painter.drawText(
+                QRectF(plot.right() + 5.0, plot.bottom() - 12.0, 48.0, 18.0),
+                Qt.AlignmentFlag.AlignLeft,
+                f"{slope_min:.1f}",
+            )
+
+        def draw_series(values: Sequence[Tuple[float, float]], color: QColor, width: float) -> None:
+            if not values:
+                return
+            pen = QPen(color, width)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(pen)
+            last: Optional[QPointF] = None
+            for x, y in values:
+                point = QPointF(float(x), float(y))
+                painter.setBrush(color)
+                painter.drawEllipse(point, 2.7, 2.7)
+                if last is not None:
+                    painter.drawLine(last, point)
+                last = point
+
+        draw_series([(map_x(self._x_value(sample)), map_depth(float(sample.dent_depth_a or 0.0))) for sample in samples], QColor("#2563eb"), 2.2)
+        if slope_samples:
+            draw_series(
+                [(map_x(self._x_value(sample)), map_slope(float(sample.slope_delta_deg or 0.0))) for sample in slope_samples],
+                QColor("#ea580c"),
+                2.0,
+            )
+
+        legend_y = rect.top() + 4.0
+        painter.setPen(QPen(QColor("#2563eb"), 2.4))
+        painter.drawLine(QPointF(plot.left(), legend_y + 6.0), QPointF(plot.left() + 26.0, legend_y + 6.0))
+        painter.setPen(QColor(15, 23, 42))
+        painter.drawText(QPointF(plot.left() + 32.0, legend_y + 10.0), "Dent depth")
+        painter.setPen(QPen(QColor("#ea580c"), 2.4))
+        painter.drawLine(QPointF(plot.left() + 132.0, legend_y + 6.0), QPointF(plot.left() + 158.0, legend_y + 6.0))
+        painter.setPen(QColor(15, 23, 42))
+        painter.drawText(QPointF(plot.left() + 164.0, legend_y + 10.0), "Slope delta")
+
+
 class _EmulationRunWorker(QObject):
     progress = Signal(int, int, str)
     finished = Signal(object, object, bool, object, bool, str)
@@ -2965,6 +3119,9 @@ class TrenchDepoWindow(QMainWindow):
             addons_dir=Path(os.environ.get("GAPSIM_ADDON_ROOT", str(DEFAULT_ADDON_ROOT))),
             state_path=Path(os.environ.get("GAPSIM_ADDON_STATE", str(DEFAULT_ADDON_STATE_PATH))),
         )
+        self._dent_region: Optional[DentRegion] = None
+        self._dent_slope_line: Optional[DentLine] = None
+        self._dent_samples: List[DentSample] = []
         self._active_structure_sheet_name = ""
         self._active_parameter_preset_name = ""
         self._overlay_opacity = 0.35
@@ -3590,6 +3747,41 @@ class TrenchDepoWindow(QMainWindow):
         addon_layout.addLayout(addon_open_row)
         addon_layout.addWidget(self.lbl_addon_status)
         self.addon_group.setLayout(addon_layout)
+
+        self.dent_group = QGroupBox("Dent 분석")
+        dent_layout = QGridLayout()
+        dent_layout.setContentsMargins(10, 10, 10, 10)
+        dent_layout.setHorizontalSpacing(8)
+        dent_layout.setVerticalSpacing(6)
+        self.cmb_dent_orientation = QComboBox()
+        self.cmb_dent_orientation.addItem("세로방향 dent (깊이 Y)", "vertical")
+        self.cmb_dent_orientation.addItem("가로방향 dent (깊이 X)", "horizontal")
+        self.cmb_dent_orientation.setToolTip("field의 아래쪽 dent는 세로방향, 벽 dent는 가로방향을 선택합니다.")
+        self.cmb_dent_x_axis = QComboBox()
+        self.cmb_dent_x_axis.addItem("X축: Cycle", "cycle")
+        self.cmb_dent_x_axis.addItem("X축: 두께 A", "thickness")
+        self.btn_select_dent_region = QPushButton("Dent 영역 지정")
+        self.btn_select_dent_region.setToolTip("왼쪽 3 진행 화면에서 dent 부위를 네모로 드래그합니다.")
+        self.btn_select_dent_slope_line = QPushButton("Slope 기준선")
+        self.btn_select_dent_slope_line.setToolTip("왼쪽 3 진행 화면에서 slope 기준 선분을 드래그합니다.")
+        self.btn_clear_dent = QPushButton("Dent 설정 지우기")
+        self.lbl_dent_region = QLabel("영역: 미지정")
+        self.lbl_dent_region.setWordWrap(True)
+        self.lbl_dent_slope_line = QLabel("기준선: 미지정")
+        self.lbl_dent_slope_line.setWordWrap(True)
+        self.lbl_dent_status = QLabel("스무딩 후 실행 전에 영역과 기준선을 지정하세요.")
+        self.lbl_dent_status.setWordWrap(True)
+        dent_layout.addWidget(QLabel("방향"), 0, 0)
+        dent_layout.addWidget(self.cmb_dent_orientation, 0, 1, 1, 2)
+        dent_layout.addWidget(QLabel("그래프"), 1, 0)
+        dent_layout.addWidget(self.cmb_dent_x_axis, 1, 1, 1, 2)
+        dent_layout.addWidget(self.btn_select_dent_region, 2, 0, 1, 2)
+        dent_layout.addWidget(self.btn_select_dent_slope_line, 2, 2)
+        dent_layout.addWidget(self.btn_clear_dent, 3, 0, 1, 3)
+        dent_layout.addWidget(self.lbl_dent_region, 4, 0, 1, 3)
+        dent_layout.addWidget(self.lbl_dent_slope_line, 5, 0, 1, 3)
+        dent_layout.addWidget(self.lbl_dent_status, 6, 0, 1, 3)
+        self.dent_group.setLayout(dent_layout)
 
         self.structure_points_model = PointsTableModel()
         self.structure_points_table = PointsTableView()
@@ -4315,6 +4507,7 @@ class TrenchDepoWindow(QMainWindow):
         progress_panel_layout.addWidget(emulator_group)
         progress_panel_layout.addWidget(parameter_preset_group)
         progress_panel_layout.addWidget(self.addon_group)
+        progress_panel_layout.addWidget(self.dent_group)
         progress_panel_layout.addWidget(action_group)
         progress_panel_layout.addWidget(params_group)
         progress_panel_layout.addWidget(gaussian_group)
@@ -4356,7 +4549,23 @@ class TrenchDepoWindow(QMainWindow):
         result_save_row.addStretch(1)
         result_summary_layout.addLayout(result_save_row)
         self.result_summary_group.setLayout(result_summary_layout)
+        self.dent_result_group = QGroupBox("Dent 분석 결과")
+        dent_result_layout = QVBoxLayout()
+        dent_result_layout.setContentsMargins(10, 10, 10, 10)
+        dent_result_layout.setSpacing(6)
+        self.lbl_dent_result_current = QLabel("Dent 결과 없음")
+        self.lbl_dent_result_current.setWordWrap(True)
+        self.dent_graph = DentAnalysisGraph()
+        self.edit_dent_result_table = QPlainTextEdit()
+        self.edit_dent_result_table.setReadOnly(True)
+        self.edit_dent_result_table.setMinimumHeight(110)
+        self.edit_dent_result_table.setPlainText("Dent 영역을 지정한 뒤 실행하면 cycle별 값이 표시됩니다.")
+        dent_result_layout.addWidget(self.lbl_dent_result_current)
+        dent_result_layout.addWidget(self.dent_graph)
+        dent_result_layout.addWidget(self.edit_dent_result_table)
+        self.dent_result_group.setLayout(dent_result_layout)
         result_panel_layout.addWidget(self.result_summary_group)
+        result_panel_layout.addWidget(self.dent_result_group)
         result_panel_nav = QHBoxLayout()
         result_panel_nav.setContentsMargins(0, 0, 0, 0)
         result_panel_nav.addWidget(self.btn_results_panel_back)
@@ -4509,6 +4718,13 @@ class TrenchDepoWindow(QMainWindow):
         self.btn_refresh_addons.clicked.connect(self.refresh_addons)
         self.btn_open_addon_folder.clicked.connect(self.open_addon_folder)
         self.addon_list.itemChanged.connect(self._on_addon_item_changed)
+        self.btn_select_dent_region.clicked.connect(self.begin_dent_region_selection)
+        self.btn_select_dent_slope_line.clicked.connect(self.begin_dent_slope_line_selection)
+        self.btn_clear_dent.clicked.connect(self.clear_dent_analysis)
+        self.cmb_dent_orientation.currentIndexChanged.connect(self._on_dent_settings_changed)
+        self.cmb_dent_x_axis.currentIndexChanged.connect(self._on_dent_x_axis_changed)
+        self.progress_geometry_view.measurementRegionSelected.connect(self._on_dent_region_selected)
+        self.progress_geometry_view.measurementLineSelected.connect(self._on_dent_slope_line_selected)
         self.btn_reload_parameter_presets.clicked.connect(self.refresh_parameter_presets)
         self.cmb_parameter_preset.currentIndexChanged.connect(self._on_parameter_preset_selected)
         self.btn_apply_parameter_preset.clicked.connect(self.apply_selected_parameter_preset)
@@ -4526,6 +4742,7 @@ class TrenchDepoWindow(QMainWindow):
 
         self.refresh_structure_library(show_status=False)
         self.refresh_parameter_presets(show_status=False)
+        self._ensure_builtin_addons()
         self.refresh_addons(show_status=False)
         self.apply_emulator_mode(run=False)
         self._reset_geometry_to_default()
@@ -4754,6 +4971,13 @@ class TrenchDepoWindow(QMainWindow):
         if self._structure_library_path.exists():
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._structure_library_path.resolve())))
 
+    def _ensure_builtin_addons(self) -> None:
+        try:
+            self._addon_manager.ensure_builtin_manifest(DENT_ANALYSIS_MANIFEST, enable_by_default=True)
+        except AddonError as exc:
+            if hasattr(self, "lbl_addon_status"):
+                self.lbl_addon_status.setText(f"내장 애드온 준비 실패: {exc}")
+
     def refresh_addons(self, _checked: bool = False, *, show_status: bool = True) -> None:
         try:
             records = self._addon_manager.scan()
@@ -4785,6 +5009,7 @@ class TrenchDepoWindow(QMainWindow):
             f"애드온: {len(records)}개 / 활성 {len(enabled)}개\n"
             f"폴더: {self._addon_manager.addons_dir}"
         )
+        self._sync_dent_addon_visibility(records)
         if show_status:
             self.statusBar().showMessage(f"애드온 목록 갱신: {len(records)}개", 1800)
 
@@ -4837,6 +5062,245 @@ class TrenchDepoWindow(QMainWindow):
         self.refresh_addons(show_status=False)
         state = "활성" if enabled else "비활성"
         self.statusBar().showMessage(f"애드온 {state}: {addon_id}", 1600)
+
+    def _sync_dent_addon_visibility(self, records: Optional[Sequence[object]] = None) -> None:
+        if records is None:
+            try:
+                records = self._addon_manager.scan()
+            except AddonError:
+                records = []
+        enabled = any(
+            getattr(getattr(record, "manifest", None), "addon_id", "") == DENT_ANALYSIS_ADDON_ID
+            and bool(getattr(record, "enabled", False))
+            for record in records
+        )
+        if hasattr(self, "dent_group"):
+            self.dent_group.setVisible(enabled)
+        if hasattr(self, "dent_result_group"):
+            self.dent_result_group.setVisible(enabled)
+        if not enabled:
+            if self._result is not None:
+                self._result.meta.pop("dent_analysis", None)
+            self._dent_samples = []
+        elif self._result is not None and self._result_config is not None and self._dent_region is not None:
+            self._update_dent_analysis_for_result(self._result_config, self._result, refresh_summary=False)
+        if hasattr(self, "dent_graph"):
+            self._refresh_dent_result_views()
+
+    def _dent_addon_enabled(self) -> bool:
+        try:
+            return DENT_ANALYSIS_ADDON_ID in self._addon_manager.enabled_ids()
+        except AddonError:
+            return False
+
+    def _dent_orientation(self) -> str:
+        if not hasattr(self, "cmb_dent_orientation"):
+            return "vertical"
+        data = self.cmb_dent_orientation.currentData()
+        return str(data or "vertical")
+
+    def begin_dent_region_selection(self, _checked: bool = False) -> None:
+        if not self._dent_addon_enabled():
+            QMessageBox.information(self, "Dent 분석", "Dent 분석 애드온을 먼저 활성화하세요.")
+            return
+        self._set_workflow_step("progress")
+        self._sync_progress_geometry_view(fit=False)
+        self.progress_geometry_view.begin_measurement_region_selection()
+        self.lbl_dent_status.setText("왼쪽 3 진행 화면에서 dent 부위를 네모로 드래그하세요.")
+
+    def begin_dent_slope_line_selection(self, _checked: bool = False) -> None:
+        if not self._dent_addon_enabled():
+            QMessageBox.information(self, "Dent 분석", "Dent 분석 애드온을 먼저 활성화하세요.")
+            return
+        self._set_workflow_step("progress")
+        self._sync_progress_geometry_view(fit=False)
+        self.progress_geometry_view.begin_measurement_line_selection()
+        self.lbl_dent_status.setText("왼쪽 3 진행 화면에서 slope 기준 선분을 드래그하세요.")
+
+    def _on_dent_region_selected(self, x0: float, y0: float, x1: float, y1: float) -> None:
+        self._dent_region = DentRegion(float(x0), float(y0), float(x1), float(y1)).normalized()
+        self._refresh_dent_input_labels()
+        self.lbl_dent_status.setText("Dent 영역 지정 완료")
+        self._recalculate_dent_analysis_from_current_result()
+
+    def _on_dent_slope_line_selected(self, x0: float, y0: float, x1: float, y1: float) -> None:
+        self._dent_slope_line = DentLine(float(x0), float(y0), float(x1), float(y1))
+        self._refresh_dent_input_labels()
+        self.lbl_dent_status.setText("Slope 기준선 지정 완료")
+        self._recalculate_dent_analysis_from_current_result()
+
+    def clear_dent_analysis(self, _checked: bool = False) -> None:
+        self._dent_region = None
+        self._dent_slope_line = None
+        self._dent_samples = []
+        if self._result is not None:
+            self._result.meta.pop("dent_analysis", None)
+        self.progress_geometry_view.clear_measurement_overlays()
+        self._refresh_dent_input_labels()
+        self._refresh_dent_result_views()
+        self._update_result_parameter_summary(self._result_config, self._result)
+        self.lbl_dent_status.setText("Dent 설정을 지웠습니다.")
+
+    def _on_dent_settings_changed(self, _index: int = 0) -> None:
+        self._recalculate_dent_analysis_from_current_result()
+
+    def _on_dent_x_axis_changed(self, _index: int = 0) -> None:
+        self._refresh_dent_result_views()
+
+    def _recalculate_dent_analysis_from_current_result(self) -> None:
+        if self._result is None or self._result_config is None:
+            self._refresh_dent_result_views()
+            return
+        self._update_dent_analysis_for_result(self._result_config, self._result)
+
+    def _refresh_dent_input_labels(self) -> None:
+        if not hasattr(self, "lbl_dent_region"):
+            return
+        if self._dent_region is None:
+            self.lbl_dent_region.setText("영역: 미지정")
+        else:
+            reg = self._dent_region.normalized()
+            self.lbl_dent_region.setText(
+                f"영역: x {reg.x0:.2f}..{reg.x1:.2f} A | y {reg.y0:.2f}..{reg.y1:.2f} A"
+            )
+            self.progress_geometry_view.set_measurement_region_xy(reg.x0, reg.y0, reg.x1, reg.y1)
+        if self._dent_slope_line is None:
+            self.lbl_dent_slope_line.setText("기준선: 미지정")
+        else:
+            line = self._dent_slope_line
+            self.lbl_dent_slope_line.setText(
+                f"기준선: ({line.x0:.2f}, {line.y0:.2f}) -> ({line.x1:.2f}, {line.y1:.2f})"
+            )
+            self.progress_geometry_view.set_measurement_line_xy(line.x0, line.y0, line.x1, line.y1)
+
+    def _restore_dent_analysis_from_result_meta(self, result: TrenchDepoResult) -> None:
+        raw = result.meta.get("dent_analysis")
+        if not isinstance(raw, Mapping):
+            return
+        region = raw.get("region")
+        if isinstance(region, Mapping):
+            try:
+                self._dent_region = DentRegion(
+                    float(region["x0"]),
+                    float(region["y0"]),
+                    float(region["x1"]),
+                    float(region["y1"]),
+                ).normalized()
+            except (KeyError, TypeError, ValueError):
+                self._dent_region = None
+        slope_line = raw.get("slope_line")
+        if isinstance(slope_line, Mapping):
+            try:
+                self._dent_slope_line = DentLine(
+                    float(slope_line["x0"]),
+                    float(slope_line["y0"]),
+                    float(slope_line["x1"]),
+                    float(slope_line["y1"]),
+                )
+            except (KeyError, TypeError, ValueError):
+                self._dent_slope_line = None
+        orientation = str(raw.get("orientation") or "")
+        if orientation and hasattr(self, "cmb_dent_orientation"):
+            idx = self.cmb_dent_orientation.findData(orientation)
+            if idx >= 0:
+                self.cmb_dent_orientation.setCurrentIndex(idx)
+        self._refresh_dent_input_labels()
+
+    def _update_dent_analysis_for_result(
+        self,
+        config: TrenchDepoConfig,
+        result: TrenchDepoResult,
+        *,
+        refresh_summary: bool = True,
+    ) -> None:
+        if not self._dent_addon_enabled() or self._dent_region is None:
+            self._dent_samples = []
+            result.meta.pop("dent_analysis", None)
+            self._refresh_dent_result_views()
+            if refresh_summary:
+                self._update_result_parameter_summary(config, result)
+            return
+        self._dent_samples = analyze_dent_frames(
+            result.frame_profiles,
+            result.frame_steps,
+            self._dent_region,
+            self._dent_orientation(),
+            slope_line=self._dent_slope_line,
+            angstrom_per_cycle=float(config.angstrom_per_cycle),
+        )
+        result.meta["dent_analysis"] = {
+            "addon_id": DENT_ANALYSIS_ADDON_ID,
+            "orientation": self._dent_orientation(),
+            "region": {
+                "x0": float(self._dent_region.x0),
+                "y0": float(self._dent_region.y0),
+                "x1": float(self._dent_region.x1),
+                "y1": float(self._dent_region.y1),
+            },
+            "slope_line": (
+                None
+                if self._dent_slope_line is None
+                else {
+                    "x0": float(self._dent_slope_line.x0),
+                    "y0": float(self._dent_slope_line.y0),
+                    "x1": float(self._dent_slope_line.x1),
+                    "y1": float(self._dent_slope_line.y1),
+                }
+            ),
+            "samples": dent_samples_to_payload(self._dent_samples),
+        }
+        self._refresh_dent_result_views()
+        if refresh_summary:
+            self._update_result_parameter_summary(config, result)
+
+    def _dent_sample_for_frame(self, frame_index: int) -> Optional[DentSample]:
+        if not self._dent_samples:
+            return None
+        idx = max(0, min(int(frame_index), len(self._dent_samples) - 1))
+        for sample in self._dent_samples:
+            if sample.frame_index == frame_index:
+                return sample
+        return self._dent_samples[idx]
+
+    def _dent_current_summary_text(self, frame_index: int) -> str:
+        sample = self._dent_sample_for_frame(frame_index)
+        if sample is None or sample.dent_depth_a is None:
+            return ""
+        parts = [f"Dent depth {float(sample.dent_depth_a):.3f} A"]
+        if sample.slope_delta_deg is not None:
+            parts.append(f"Slope delta {float(sample.slope_delta_deg):.3f} deg")
+        return " | ".join(parts)
+
+    def _refresh_dent_result_views(self) -> None:
+        if hasattr(self, "dent_graph"):
+            x_mode = str(self.cmb_dent_x_axis.currentData() or "cycle") if hasattr(self, "cmb_dent_x_axis") else "cycle"
+            self.dent_graph.set_samples(self._dent_samples, x_mode=x_mode)
+        if hasattr(self, "edit_dent_result_table"):
+            if not self._dent_samples:
+                self.edit_dent_result_table.setPlainText("Dent 영역을 지정한 뒤 실행하면 cycle별 값이 표시됩니다.")
+            else:
+                lines = ["cycle\tthickness_A\tdepth_A\tslope_delta_deg"]
+                for sample in self._dent_samples:
+                    depth = "" if sample.dent_depth_a is None else f"{float(sample.dent_depth_a):.5f}"
+                    slope = "" if sample.slope_delta_deg is None else f"{float(sample.slope_delta_deg):.5f}"
+                    lines.append(f"{sample.cycle}\t{sample.thickness_a:.5f}\t{depth}\t{slope}")
+                self.edit_dent_result_table.setPlainText("\n".join(lines))
+        if self._result is not None and hasattr(self, "lbl_dent_result_current"):
+            self._update_dent_current_label(int(self.slider_frame.value()) if hasattr(self, "slider_frame") else 0)
+
+    def _update_dent_current_label(self, frame_index: int) -> None:
+        if not hasattr(self, "lbl_dent_result_current"):
+            return
+        if self._dent_region is None:
+            self.lbl_dent_result_current.setText("Dent 영역 미지정")
+            return
+        summary = self._dent_current_summary_text(frame_index)
+        if not summary:
+            self.lbl_dent_result_current.setText("Dent 결과 없음")
+            return
+        sample = self._dent_sample_for_frame(frame_index)
+        cycle_text = "" if sample is None else f"Cycle {sample.cycle} | "
+        self.lbl_dent_result_current.setText(f"{cycle_text}{summary}")
 
     def refresh_parameter_presets(self, _checked: bool = False, *, show_status: bool = True) -> None:
         try:
@@ -7825,6 +8289,27 @@ class TrenchDepoWindow(QMainWindow):
                 lines.append(
                     f"Closure: step {meta.get('deposition_closure_step')} | depth {float(meta.get('deposition_closure_depth_a') or 0.0):.3f} A"
                 )
+            if self._dent_samples:
+                final_sample = self._dent_samples[-1]
+                depth_text = (
+                    "n/a"
+                    if final_sample.dent_depth_a is None
+                    else f"{float(final_sample.dent_depth_a):.3f} A"
+                )
+                slope_text = (
+                    "n/a"
+                    if final_sample.slope_delta_deg is None
+                    else f"{float(final_sample.slope_delta_deg):.3f} deg"
+                )
+                lines.extend(
+                    [
+                        "",
+                        "[Dent 분석]",
+                        f"Orientation: {self._dent_orientation()}",
+                        f"Final depth: {depth_text}",
+                        f"Final slope delta: {slope_text}",
+                    ]
+                )
 
         return "\n".join(lines)
 
@@ -8203,6 +8688,7 @@ class TrenchDepoWindow(QMainWindow):
         self._set_result_playback_available(max_idx > 0)
         self._set_next_depo_button_state()
         self.btn_save_result_json.setEnabled(True)
+        self._update_dent_analysis_for_result(config, result, refresh_summary=False)
         self._update_result_parameter_summary(config, result)
         self.show_frame(max_idx)
         if not use_preview_cache:
@@ -8715,7 +9201,12 @@ class TrenchDepoWindow(QMainWindow):
         points = len(self._result.frame_profiles[idx])
         self.lbl_status.setText(f"Cycle {cycle}/{total} | 점 {points}")
         if hasattr(self, "lbl_result_summary"):
-            self.lbl_result_summary.setText(f"결과: Cycle {cycle}/{total} | 점 {points}")
+            summary = f"결과: Cycle {cycle}/{total} | 점 {points}"
+            dent_summary = self._dent_current_summary_text(idx)
+            if dent_summary:
+                summary = f"{summary}\n{dent_summary}"
+            self.lbl_result_summary.setText(summary)
+        self._update_dent_current_label(idx)
 
     def load_replay_json(self, path: Path | str) -> None:
         self._stop_result_playback()
@@ -8843,6 +9334,8 @@ class TrenchDepoWindow(QMainWindow):
         self._set_result_playback_available(max_idx > 0)
         self._set_next_depo_button_state()
         self.btn_save_result_json.setEnabled(True)
+        self._restore_dent_analysis_from_result_meta(result)
+        self._update_dent_analysis_for_result(config, result, refresh_summary=False)
         self._update_result_parameter_summary(config, result)
         self.show_frame(max_idx)
         self._set_workflow_step("results")

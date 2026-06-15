@@ -181,3 +181,37 @@ class AddonManager:
         state.setdefault("enabled", {})[installed_manifest.addon_id] = bool(enable)
         self._write_state(state)
         return installed_manifest
+
+    def ensure_builtin_manifest(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        enable_by_default: bool = True,
+    ) -> AddonManifest:
+        raw_id = str(payload.get("id", "")).strip()
+        if not raw_id:
+            raise AddonError("Builtin addon payload must include an id.")
+        addon_id = sanitize_addon_id(raw_id)
+        target_dir = (self.addons_dir / addon_id).resolve()
+        target_dir.mkdir(parents=True, exist_ok=True)
+        manifest_path = target_dir / ADDON_MANIFEST_FILENAME
+        manifest_payload = dict(payload)
+        manifest_payload["id"] = addon_id
+        encoded = json.dumps(manifest_payload, ensure_ascii=False, indent=2, sort_keys=True)
+        if not manifest_path.exists() or manifest_path.read_text(encoding="utf-8") != encoded:
+            manifest_path.write_text(encoded, encoding="utf-8")
+        manifest = read_addon_manifest(target_dir)
+        state = self._read_state()
+        state.setdefault("installed", {}).setdefault(
+            manifest.addon_id,
+            {
+                "id": manifest.addon_id,
+                "source": "builtin",
+                "installed_at": datetime.now().isoformat(timespec="seconds"),
+            },
+        )
+        enabled_map = state.setdefault("enabled", {})
+        if manifest.addon_id not in enabled_map:
+            enabled_map[manifest.addon_id] = bool(enable_by_default)
+        self._write_state(state)
+        return manifest
