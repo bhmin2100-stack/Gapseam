@@ -13,9 +13,6 @@ os.environ.setdefault(
     "GAPSIM_STRUCTURE_LIBRARY",
     str(Path(_STRUCTURE_LIBRARY_TMP.name) / "structures.xlsx"),
 )
-_ADDON_LIBRARY_TMP = tempfile.TemporaryDirectory()
-os.environ.setdefault("GAPSIM_ADDON_ROOT", str(Path(_ADDON_LIBRARY_TMP.name) / "addons"))
-os.environ.setdefault("GAPSIM_ADDON_STATE", str(Path(_ADDON_LIBRARY_TMP.name) / "addons_state.json"))
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt
 from PySide6.QtGui import QPixmap
@@ -990,77 +987,6 @@ class SputterGaussianEditorTest(unittest.TestCase):
             finally:
                 window.close()
 
-    def test_dent_analysis_addon_measures_result_and_updates_meta(self) -> None:
-        result = TrenchDepoResult(
-            frame_steps=[0, 1, 2],
-            frame_profiles=[
-                [(-2.0, 0.0), (0.0, -1.0), (2.0, 0.0)],
-                [(-2.0, 0.0), (0.0, -3.0), (2.0, 0.0)],
-                [(-2.0, 0.0), (0.0, -6.0), (2.0, 0.0)],
-            ],
-            frame_voids=[[], [], []],
-            final_profile=[(-2.0, 0.0), (0.0, -6.0), (2.0, 0.0)],
-            meta={"cycles": 2, "growth_model": "dent_test"},
-        )
-        with tempfile.TemporaryDirectory() as tmp:
-            with (
-                mock.patch.dict(
-                    os.environ,
-                    {
-                        "GAPSIM_ADDON_ROOT": str(Path(tmp) / "addons"),
-                        "GAPSIM_ADDON_STATE": str(Path(tmp) / "addons_state.json"),
-                    },
-                ),
-                mock.patch("gapsim.emulation.trench_depo_ui.QTimer.singleShot"),
-            ):
-                window = TrenchDepoWindow()
-
-            try:
-                self.assertFalse(window.dent_group.isHidden())
-                addon_ids = {
-                    window.addon_list.item(idx).data(Qt.ItemDataRole.UserRole)
-                    for idx in range(window.addon_list.count())
-                }
-                self.assertIn("dent-analysis", addon_ids)
-
-                window._on_dent_region_selected(-2.0, -8.0, 2.0, 1.0)
-                window._on_dent_slope_line_selected(-2.0, 0.0, 2.0, 0.0)
-                config = TrenchDepoConfig(
-                    points=result.frame_profiles[0],
-                    cycles=2,
-                    angstrom_per_cycle=10.0,
-                )
-
-                window._apply_emulation_result(config, result, None, use_preview_cache=True)
-
-                self.assertEqual(len(window._dent_samples), 3)
-                self.assertAlmostEqual(window._dent_samples[-1].dent_depth_a or 0.0, 6.0)
-                self.assertIsNotNone(window._dent_samples[-1].slope_delta_deg)
-                self.assertIn("Dent depth 6.000 A", window.lbl_result_summary.text())
-                self.assertIn("dent_analysis", result.meta)
-                self.assertEqual(result.meta["dent_analysis"]["orientation"], "vertical")
-                self.assertEqual(len(result.meta["dent_analysis"]["samples"]), 3)
-                self.assertIn("Final depth: 6.000 A", window.edit_result_parameters.toPlainText())
-
-                idx = window.cmb_dent_x_axis.findData("thickness")
-                window.cmb_dent_x_axis.setCurrentIndex(idx)
-                self.assertEqual(window.dent_graph._x_mode, "thickness")
-
-                dent_item = None
-                for row in range(window.addon_list.count()):
-                    candidate = window.addon_list.item(row)
-                    if candidate.data(Qt.ItemDataRole.UserRole) == "dent-analysis":
-                        dent_item = candidate
-                        break
-                self.assertIsNotNone(dent_item)
-                dent_item.setCheckState(Qt.CheckState.Unchecked)
-                QApplication.processEvents()
-
-                self.assertTrue(window.dent_group.isHidden())
-                self.assertNotIn("dent_analysis", result.meta)
-            finally:
-                window.close()
-
     @unittest.skip("Model7 LF overhang proxy was removed from the rebuilt 0-5 active menu.")
     def test_emulator_seven_exposes_lf_overhang_proxy_and_collapses_sections(self) -> None:
         result = TrenchDepoResult(
@@ -1687,24 +1613,18 @@ class SputterGaussianEditorTest(unittest.TestCase):
             try:
                 window._install_addon_from_path(source)
 
-                self.assertEqual(window.addon_list.count(), 2)
-                item = None
-                for idx in range(window.addon_list.count()):
-                    candidate = window.addon_list.item(idx)
-                    if candidate.data(Qt.ItemDataRole.UserRole) == "rate-guard":
-                        item = candidate
-                        break
-                self.assertIsNotNone(item)
+                self.assertEqual(window.addon_list.count(), 1)
+                item = window.addon_list.item(0)
                 self.assertEqual(item.data(Qt.ItemDataRole.UserRole), "rate-guard")
                 self.assertEqual(item.checkState(), Qt.CheckState.Checked)
-                self.assertIn("활성 2개", window.lbl_addon_status.text())
-                self.assertEqual(window._addon_manager.enabled_ids(), ["dent-analysis", "rate-guard"])
+                self.assertIn("활성 1개", window.lbl_addon_status.text())
+                self.assertEqual(window._addon_manager.enabled_ids(), ["rate-guard"])
 
                 item.setCheckState(Qt.CheckState.Unchecked)
                 QApplication.processEvents()
 
-                self.assertEqual(window._addon_manager.enabled_ids(), ["dent-analysis"])
-                self.assertIn("활성 1개", window.lbl_addon_status.text())
+                self.assertEqual(window._addon_manager.enabled_ids(), [])
+                self.assertIn("활성 0개", window.lbl_addon_status.text())
             finally:
                 window.close()
 
@@ -1972,59 +1892,6 @@ class SputterGaussianEditorTest(unittest.TestCase):
             QApplication.processEvents()
 
             self.assertEqual(tuple(window._structure_points), tuple(raw_points))
-        finally:
-            window.close()
-
-    def test_dent_region_and_slope_line_can_be_drawn_on_progress_view(self) -> None:
-        result = TrenchDepoResult(
-            frame_steps=[0],
-            frame_profiles=[[(0.0, 0.0), (1.0, 0.0)]],
-            frame_voids=[[]],
-            final_profile=[(0.0, 0.0), (1.0, 0.0)],
-            meta={"cycles": 0},
-        )
-        with (
-            mock.patch("gapsim.emulation.trench_depo_ui.run_trench_depo", return_value=result),
-            mock.patch("gapsim.emulation.trench_depo_ui.QTimer.singleShot"),
-        ):
-            window = TrenchDepoWindow()
-
-        try:
-            window._set_structure_points(
-                [(-3.0, 0.0), (-1.0, -5.0), (0.0, -7.0), (1.0, -5.0), (3.0, 0.0)],
-                fit=False,
-            )
-            window._set_workflow_step("progress")
-            window.resize(1280, 820)
-            window.show()
-            window._sync_progress_geometry_view(fit=True)
-            window.progress_geometry_view.fit_points()
-            QApplication.processEvents()
-
-            view = window.progress_geometry_view
-            window.begin_dent_region_selection()
-            region_start = QPoint(view.mapFromScene(QPointF(-2.0, -1.0)))
-            region_end = QPoint(view.mapFromScene(QPointF(2.0, 8.0)))
-            QTest.mousePress(view.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, region_start)
-            QTest.mouseMove(view.viewport(), region_end)
-            QTest.mouseRelease(view.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, region_end)
-            QApplication.processEvents()
-
-            self.assertIsNotNone(window._dent_region)
-            self.assertAlmostEqual(window._dent_region.x0, -2.0, delta=0.15)
-            self.assertAlmostEqual(window._dent_region.y1, 1.0, delta=0.15)
-
-            window.begin_dent_slope_line_selection()
-            line_start = QPoint(view.mapFromScene(QPointF(-2.0, 0.0)))
-            line_end = QPoint(view.mapFromScene(QPointF(2.0, 0.0)))
-            QTest.mousePress(view.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, line_start)
-            QTest.mouseMove(view.viewport(), line_end)
-            QTest.mouseRelease(view.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, line_end)
-            QApplication.processEvents()
-
-            self.assertIsNotNone(window._dent_slope_line)
-            self.assertAlmostEqual(window._dent_slope_line.x0, -2.0, delta=0.15)
-            self.assertAlmostEqual(window._dent_slope_line.y1, 0.0, delta=0.15)
         finally:
             window.close()
 
