@@ -47,6 +47,14 @@ class AddonContext:
             raise RuntimeError("Host window does not support result addon widgets.")
         callback(widget, title=title or self.manifest.name)
 
+    @property
+    def result_applied(self) -> Any:
+        return getattr(self.window, "addonResultApplied", None)
+
+    @property
+    def frame_shown(self) -> Any:
+        return getattr(self.window, "addonFrameShown", None)
+
 
 def _entrypoint_path(manifest: AddonManifest) -> Optional[Path]:
     entrypoint = str(manifest.entrypoint or "").strip()

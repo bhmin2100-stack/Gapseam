@@ -2842,6 +2842,9 @@ class DraggableParameterSectionLabel(QLabel):
 
 
 class TrenchDepoWindow(QMainWindow):
+    addonResultApplied = Signal(object, object)  # config, result
+    addonFrameShown = Signal(int)  # frame index
+
     def _make_parameter_section(
         self,
         text: str,
@@ -8286,6 +8289,7 @@ class TrenchDepoWindow(QMainWindow):
         self.btn_save_result_json.setEnabled(True)
         self._update_result_parameter_summary(config, result)
         self.show_frame(max_idx)
+        self.addonResultApplied.emit(config, result)
         if not use_preview_cache:
             self._set_workflow_step("results")
         QTimer.singleShot(0, self.view.fit_content)
@@ -8797,6 +8801,7 @@ class TrenchDepoWindow(QMainWindow):
         self.lbl_status.setText(f"Cycle {cycle}/{total} | 점 {points}")
         if hasattr(self, "lbl_result_summary"):
             self.lbl_result_summary.setText(f"결과: Cycle {cycle}/{total} | 점 {points}")
+        self.addonFrameShown.emit(idx)
 
     def load_replay_json(self, path: Path | str) -> None:
         self._stop_result_playback()
@@ -8926,6 +8931,7 @@ class TrenchDepoWindow(QMainWindow):
         self.btn_save_result_json.setEnabled(True)
         self._update_result_parameter_summary(config, result)
         self.show_frame(max_idx)
+        self.addonResultApplied.emit(config, result)
         self._set_workflow_step("results")
         QTimer.singleShot(0, self.view.fit_content)
         self._set_run_dir_label(self._last_run_dir)

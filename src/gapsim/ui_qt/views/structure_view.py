@@ -8,6 +8,7 @@ from PySide6.QtGui import QBrush, QColor, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
     QGraphicsEllipseItem,
     QGraphicsItem,
+    QGraphicsLineItem,
     QGraphicsPathItem,
     QGraphicsPixmapItem,
     QGraphicsRectItem,
@@ -96,6 +97,8 @@ class StructureView(QGraphicsView):
     pointDragStarted = Signal(int, float, float)  # idx, x_user, y_user
     pointDragFinished = Signal(int, float, float)  # idx, x_user, y_user
     pointsMoved = Signal(list)  # [(idx, x_user, y_user), ...]
+    measurementRegionSelected = Signal(float, float, float, float)  # x0, y0, x1, y1
+    measurementLineSelected = Signal(float, float, float, float)  # x0, y0, x1, y1
 
     def __init__(self) -> None:
         super().__init__()
@@ -127,6 +130,14 @@ class StructureView(QGraphicsView):
         self._multi_drag_anchor_idx: Optional[int] = None
         self._multi_drag_start_pts: Optional[List[Tuple[float, float]]] = None
         self._multi_drag_indices: List[int] = []
+        self._measurement_mode: Optional[str] = None
+        self._measurement_start_scene: Optional[QPointF] = None
+        self._measurement_temp_rect_item: Optional[QGraphicsRectItem] = None
+        self._measurement_temp_line_item: Optional[QGraphicsLineItem] = None
+        self._measurement_region_scene: Optional[QRectF] = None
+        self._measurement_line_scene: Optional[Tuple[QPointF, QPointF]] = None
+        self._measurement_region_item: Optional[QGraphicsRectItem] = None
+        self._measurement_line_item: Optional[QGraphicsLineItem] = None
 
         self._drag_label: Optional[QGraphicsSimpleTextItem] = None
         self._recreate_drag_label()
@@ -178,6 +189,42 @@ class StructureView(QGraphicsView):
             return
         self._selected_indices.clear()
         self._sync_selected_point_items()
+
+    def begin_measurement_region_selection(self) -> None:
+        self.cancel_measurement_selection()
+        self._measurement_mode = "region"
+        self.setCursor(Qt.CursorShape.CrossCursor)
+
+    def begin_measurement_line_selection(self) -> None:
+        self.cancel_measurement_selection()
+        self._measurement_mode = "line"
+        self.setCursor(Qt.CursorShape.CrossCursor)
+
+    def cancel_measurement_selection(self) -> None:
+        self._measurement_mode = None
+        self._measurement_start_scene = None
+        self._remove_temp_measurement_items()
+        self._restore_idle_cursor()
+
+    def set_measurement_region_xy(self, x0: float, y0: float, x1: float, y1: float) -> None:
+        self._measurement_region_scene = QRectF(
+            QPointF(float(x0), -float(y0)),
+            QPointF(float(x1), -float(y1)),
+        ).normalized()
+        self._refresh_measurement_overlay_items()
+
+    def set_measurement_line_xy(self, x0: float, y0: float, x1: float, y1: float) -> None:
+        self._measurement_line_scene = (
+            QPointF(float(x0), -float(y0)),
+            QPointF(float(x1), -float(y1)),
+        )
+        self._refresh_measurement_overlay_items()
+
+    def clear_measurement_overlays(self) -> None:
+        self.cancel_measurement_selection()
+        self._measurement_region_scene = None
+        self._measurement_line_scene = None
+        self._refresh_measurement_overlay_items()
 
     def set_points_xy(self, pts: List[Point]) -> None:
         # USER -> SCENE conversion: y_scene = -y_user (depth goes down visually)
@@ -423,6 +470,10 @@ class StructureView(QGraphicsView):
         self._scene.clear()
         self._selection_start_scene = None
         self._selection_rect_item = None
+        self._measurement_temp_rect_item = None
+        self._measurement_temp_line_item = None
+        self._measurement_region_item = None
+        self._measurement_line_item = None
         self._recreate_drag_label()
         self._add_overlay_item()
         self._reference_items = []
@@ -476,6 +527,7 @@ class StructureView(QGraphicsView):
 
         self._selected_indices = {idx for idx in self._selected_indices if 0 <= idx < len(self._point_items)}
         self._sync_selected_point_items()
+        self._add_measurement_overlay_items()
         self._ensure_scene_margin()
 
     def _sync_selected_point_items(self) -> None:
@@ -503,6 +555,58 @@ class StructureView(QGraphicsView):
         item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
         self._scene.addItem(item)
         self._overlay_item = item
+
+    def _restore_idle_cursor(self) -> None:
+        if self._overlay_drag_enabled:
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
+        else:
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+
+    def _measurement_region_pen(self) -> QPen:
+        pen = QPen(QColor("#0f766e"), 1.8, Qt.PenStyle.DashLine)
+        pen.setCosmetic(True)
+        return pen
+
+    def _measurement_line_pen(self) -> QPen:
+        pen = QPen(QColor("#ea580c"), 2.0)
+        pen.setCosmetic(True)
+        return pen
+
+    def _remove_scene_item(self, item) -> None:
+        if item is not None and item.scene() is self._scene:
+            self._scene.removeItem(item)
+
+    def _remove_temp_measurement_items(self) -> None:
+        self._remove_scene_item(self._measurement_temp_rect_item)
+        self._remove_scene_item(self._measurement_temp_line_item)
+        self._measurement_temp_rect_item = None
+        self._measurement_temp_line_item = None
+
+    def _refresh_measurement_overlay_items(self) -> None:
+        self._remove_scene_item(self._measurement_region_item)
+        self._remove_scene_item(self._measurement_line_item)
+        self._measurement_region_item = None
+        self._measurement_line_item = None
+        self._add_measurement_overlay_items()
+        self.viewport().update()
+
+    def _add_measurement_overlay_items(self) -> None:
+        if self._measurement_region_scene is not None:
+            item = QGraphicsRectItem(QRectF(self._measurement_region_scene))
+            item.setPen(self._measurement_region_pen())
+            item.setBrush(QBrush(QColor(13, 148, 136, 34)))
+            item.setZValue(8_600)
+            item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+            self._scene.addItem(item)
+            self._measurement_region_item = item
+        if self._measurement_line_scene is not None:
+            p0, p1 = self._measurement_line_scene
+            item = QGraphicsLineItem(float(p0.x()), float(p0.y()), float(p1.x()), float(p1.y()))
+            item.setPen(self._measurement_line_pen())
+            item.setZValue(8_700)
+            item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+            self._scene.addItem(item)
+            self._measurement_line_item = item
 
     def _update_path_from_points(self) -> None:
         if self._path_item is None:
@@ -713,6 +817,25 @@ class StructureView(QGraphicsView):
         self._scene.addItem(self._selection_rect_item)
 
     def mousePressEvent(self, event) -> None:
+        if self._measurement_mode in {"region", "line"} and event.button() == Qt.MouseButton.LeftButton:
+            start = self.mapToScene(self._mouse_event_pos(event))
+            self._measurement_start_scene = QPointF(start)
+            self._remove_temp_measurement_items()
+            if self._measurement_mode == "region":
+                item = QGraphicsRectItem(QRectF(start, start))
+                item.setPen(self._measurement_region_pen())
+                item.setBrush(QBrush(QColor(13, 148, 136, 44)))
+                item.setZValue(8_800)
+                self._scene.addItem(item)
+                self._measurement_temp_rect_item = item
+            else:
+                item = QGraphicsLineItem(float(start.x()), float(start.y()), float(start.x()), float(start.y()))
+                item.setPen(self._measurement_line_pen())
+                item.setZValue(8_900)
+                self._scene.addItem(item)
+                self._measurement_temp_line_item = item
+            event.accept()
+            return
         if (
             self._multi_select_enabled
             and self._editing_enabled
@@ -771,6 +894,19 @@ class StructureView(QGraphicsView):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:
+        if self._measurement_start_scene is not None and self._measurement_mode in {"region", "line"}:
+            now_scene = self.mapToScene(self._mouse_event_pos(event))
+            if self._measurement_mode == "region" and self._measurement_temp_rect_item is not None:
+                self._measurement_temp_rect_item.setRect(QRectF(self._measurement_start_scene, now_scene).normalized())
+            elif self._measurement_mode == "line" and self._measurement_temp_line_item is not None:
+                self._measurement_temp_line_item.setLine(
+                    float(self._measurement_start_scene.x()),
+                    float(self._measurement_start_scene.y()),
+                    float(now_scene.x()),
+                    float(now_scene.y()),
+                )
+            event.accept()
+            return
         if self._selection_start_scene is not None and self._selection_rect_item is not None:
             now_scene = self.mapToScene(self._mouse_event_pos(event))
             self._selection_rect_item.setRect(QRectF(self._selection_start_scene, now_scene).normalized())
@@ -807,6 +943,29 @@ class StructureView(QGraphicsView):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
+        if (
+            self._measurement_start_scene is not None
+            and self._measurement_mode in {"region", "line"}
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
+            start = QPointF(self._measurement_start_scene)
+            end = self.mapToScene(self._mouse_event_pos(event))
+            mode = str(self._measurement_mode)
+            self._measurement_mode = None
+            self._measurement_start_scene = None
+            self._remove_temp_measurement_items()
+            self._restore_idle_cursor()
+            view_rect = QRectF(QPointF(self.mapFromScene(start)), QPointF(self.mapFromScene(end))).normalized()
+            if mode == "region":
+                if view_rect.width() >= 3.0 or view_rect.height() >= 3.0:
+                    self.set_measurement_region_xy(float(start.x()), -float(start.y()), float(end.x()), -float(end.y()))
+                    self.measurementRegionSelected.emit(float(start.x()), -float(start.y()), float(end.x()), -float(end.y()))
+            else:
+                if math.hypot(view_rect.width(), view_rect.height()) >= 3.0:
+                    self.set_measurement_line_xy(float(start.x()), -float(start.y()), float(end.x()), -float(end.y()))
+                    self.measurementLineSelected.emit(float(start.x()), -float(start.y()), float(end.x()), -float(end.y()))
+            event.accept()
+            return
         if self._selection_start_scene is not None and event.button() == Qt.MouseButton.LeftButton:
             rect = QRectF(self._selection_start_scene, self.mapToScene(self._mouse_event_pos(event))).normalized()
             if self._selection_rect_item is not None:

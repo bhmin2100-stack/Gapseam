@@ -41,6 +41,7 @@ from gapsim.emulation.trench_depo_ui import (
     _depth_deposition_formula_text,
     _map_structure_points_to_rect,
 )
+from gapsim.ui_qt.views.structure_view import StructureView
 
 
 EXPECTED_EMULATOR_NUMBERS = list(DEFAULT_CREATED_EMULATOR_NUMBERS)
@@ -1685,6 +1686,72 @@ class SputterGaussianEditorTest(unittest.TestCase):
             finally:
                 window.close()
 
+    def test_addon_runtime_receives_result_and_frame_events(self) -> None:
+        result = TrenchDepoResult(
+            frame_steps=[0, 3],
+            frame_profiles=[
+                [(0.0, 0.0), (1.0, 0.0)],
+                [(0.0, 0.0), (1.0, -2.0)],
+            ],
+            frame_voids=[[], []],
+            final_profile=[(0.0, 0.0), (1.0, -2.0)],
+            meta={"cycles": 3},
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            addon_dir = root / "addons" / "event_probe"
+            addon_dir.mkdir(parents=True)
+            (addon_dir / "addon.json").write_text(
+                json.dumps(
+                    {
+                        "id": "event-probe",
+                        "name": "Event Probe",
+                        "version": "0.1.0",
+                        "entrypoint": "addon.py",
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            (addon_dir / "addon.py").write_text(
+                "def register(context):\n"
+                "    events = []\n"
+                "    if context.frame_shown is not None:\n"
+                "        context.frame_shown.connect(lambda idx: events.append(('frame', int(idx))))\n"
+                "    if context.result_applied is not None:\n"
+                "        context.result_applied.connect(\n"
+                "            lambda _config, result: events.append(('result', len(result.frame_profiles)))\n"
+                "        )\n"
+                "    return {'events': events}\n",
+                encoding="utf-8",
+            )
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {
+                        "GAPSIM_ADDON_ROOT": str(root / "addons"),
+                        "GAPSIM_ADDON_STATE": str(root / "addons" / "addons_state.json"),
+                    },
+                ),
+                mock.patch("gapsim.emulation.trench_depo_ui.run_trench_depo", return_value=result),
+                mock.patch("gapsim.emulation.trench_depo_ui.QTimer.singleShot"),
+            ):
+                window = TrenchDepoWindow()
+
+            try:
+                self.assertEqual(len(window._addon_runtime_handles), 1)
+                handle = window._addon_runtime_handles[0]
+                self.assertEqual(handle["events"], [])
+
+                config = TrenchDepoConfig(points=result.frame_profiles[0], cycles=3)
+                with mock.patch("gapsim.emulation.trench_depo_ui.QTimer.singleShot"):
+                    window._apply_emulation_result(config, result, None, use_preview_cache=True)
+
+                self.assertIn(("frame", 1), handle["events"])
+                self.assertIn(("result", 2), handle["events"])
+            finally:
+                window.close()
+
     def test_structure_table_and_image_overlay_match_gapsim_flow(self) -> None:
         result = TrenchDepoResult(
             frame_steps=[0],
@@ -2008,6 +2075,50 @@ class SputterGaussianEditorTest(unittest.TestCase):
             self.assertEqual(tuple(window.structure_points_model.get_points()), tuple(moved_points))
         finally:
             window.close()
+
+    def test_structure_view_measurement_region_and_line_emit_user_coordinates(self) -> None:
+        view = StructureView()
+        view.resize(520, 360)
+        view.set_points_xy([(-3.0, 0.0), (-1.0, -5.0), (0.0, -7.0), (1.0, -5.0), (3.0, 0.0)])
+        view.show()
+        view.fit_points()
+        QApplication.processEvents()
+
+        try:
+            regions = []
+            lines = []
+            view.measurementRegionSelected.connect(lambda *args: regions.append(tuple(float(v) for v in args)))
+            view.measurementLineSelected.connect(lambda *args: lines.append(tuple(float(v) for v in args)))
+
+            view.begin_measurement_region_selection()
+            region_start = QPoint(view.mapFromScene(QPointF(-2.0, -1.0)))
+            region_end = QPoint(view.mapFromScene(QPointF(2.0, 8.0)))
+            QTest.mousePress(view.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, region_start)
+            QTest.mouseMove(view.viewport(), region_end)
+            QTest.mouseRelease(view.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, region_end)
+            QApplication.processEvents()
+
+            self.assertEqual(len(regions), 1)
+            self.assertAlmostEqual(regions[0][0], -2.0, delta=0.2)
+            self.assertAlmostEqual(regions[0][1], 1.0, delta=0.2)
+            self.assertAlmostEqual(regions[0][2], 2.0, delta=0.2)
+            self.assertAlmostEqual(regions[0][3], -8.0, delta=0.2)
+
+            view.begin_measurement_line_selection()
+            line_start = QPoint(view.mapFromScene(QPointF(-2.0, 0.0)))
+            line_end = QPoint(view.mapFromScene(QPointF(2.0, 0.0)))
+            QTest.mousePress(view.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, line_start)
+            QTest.mouseMove(view.viewport(), line_end)
+            QTest.mouseRelease(view.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, line_end)
+            QApplication.processEvents()
+
+            self.assertEqual(len(lines), 1)
+            self.assertAlmostEqual(lines[0][0], -2.0, delta=0.2)
+            self.assertAlmostEqual(lines[0][1], 0.0, delta=0.2)
+            self.assertAlmostEqual(lines[0][2], 2.0, delta=0.2)
+            self.assertAlmostEqual(lines[0][3], 0.0, delta=0.2)
+        finally:
+            view.close()
 
     def test_geometry_changes_invalidate_result_and_show_latest_preview(self) -> None:
         result = TrenchDepoResult(
