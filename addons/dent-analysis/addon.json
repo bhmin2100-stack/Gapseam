@@ -1,0 +1,13 @@
+{
+  "id": "dent-analysis",
+  "name": "Dent Analysis",
+  "version": "0.1.0",
+  "description": "Measures selected dent depth and local film slope by cycle or thickness.",
+  "entrypoint": "addon.py",
+  "extension_points": [
+    "progress.panel",
+    "result.panel",
+    "structure.measurement"
+  ],
+  "enabled_by_default": true
+}
