@@ -13,6 +13,14 @@ GFE(Gap Fill Emulator)는 Gap Fill 공정 아이디어를 빠르게 실험하기
 
 처음 실행하면 `.venv` 가상환경과 필요한 Python 패키지를 자동으로 준비합니다. 소스 ZIP 방식은 PC에 Python 3.10 이상이 설치되어 있어야 합니다.
 
+`run_gfe.bat`는 기존 `.venv`가 깨졌거나 Python 경로가 바뀐 경우 자동으로 `.venv`를 다시 만들고 재시도합니다. 그래도 실행이 실패하면 아래 파일에 마지막 실행 로그가 남습니다.
+
+```text
+runs/trench_depo_emulation/run_gfe_last.log
+```
+
+`.venv` 삭제가 실패했다는 메시지가 나오면 열려 있는 GFE/Python 창을 모두 닫고 `run_gfe.bat`를 다시 실행하세요.
+
 ## Python 없이 실행하는 배포 ZIP
 
 Python 설치가 없는 PC에 배포하려면 GitHub Actions가 만든 portable ZIP을 사용합니다.
