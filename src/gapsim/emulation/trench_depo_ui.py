@@ -4839,7 +4839,18 @@ class TrenchDepoWindow(QMainWindow):
         if len(self._addon_runtime_log_lines) > 200:
             self._addon_runtime_log_lines = self._addon_runtime_log_lines[-200:]
 
+    def _teardown_addon_runtime_handles(self) -> None:
+        for handle in list(getattr(self, "_addon_runtime_handles", [])):
+            teardown = getattr(handle, "teardown", None)
+            if not callable(teardown):
+                continue
+            try:
+                teardown()
+            except Exception as exc:  # noqa: BLE001
+                self._addon_runtime_log(f"Addon teardown failed: {exc}")
+
     def _reload_enabled_addons(self, records: Sequence[object]) -> None:
+        self._teardown_addon_runtime_handles()
         self._clear_addon_runtime_widgets()
         self._addon_runtime_handles = []
         self._addon_load_results = []

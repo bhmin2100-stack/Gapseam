@@ -1714,15 +1714,28 @@ class SputterGaussianEditorTest(unittest.TestCase):
                 encoding="utf-8",
             )
             (addon_dir / "addon.py").write_text(
-                "def register(context):\n"
-                "    events = []\n"
-                "    if context.frame_shown is not None:\n"
-                "        context.frame_shown.connect(lambda idx: events.append(('frame', int(idx))))\n"
-                "    if context.result_applied is not None:\n"
-                "        context.result_applied.connect(\n"
-                "            lambda _config, result: events.append(('result', len(result.frame_profiles)))\n"
+                "class Probe:\n"
+                "    def __init__(self, context):\n"
+                "        self.events = []\n"
+                "        self._frame_signal = context.frame_shown\n"
+                "        self._result_signal = context.result_applied\n"
+                "        self._frame_slot = lambda idx: self.events.append(('frame', int(idx)))\n"
+                "        self._result_slot = lambda _config, result: self.events.append(\n"
+                "            ('result', len(result.frame_profiles))\n"
                 "        )\n"
-                "    return {'events': events}\n",
+                "        if self._frame_signal is not None:\n"
+                "            self._frame_signal.connect(self._frame_slot)\n"
+                "        if self._result_signal is not None:\n"
+                "            self._result_signal.connect(self._result_slot)\n"
+                "\n"
+                "    def teardown(self):\n"
+                "        if self._frame_signal is not None:\n"
+                "            self._frame_signal.disconnect(self._frame_slot)\n"
+                "        if self._result_signal is not None:\n"
+                "            self._result_signal.disconnect(self._result_slot)\n"
+                "\n"
+                "def register(context):\n"
+                "    return Probe(context)\n",
                 encoding="utf-8",
             )
             with (
@@ -1741,14 +1754,23 @@ class SputterGaussianEditorTest(unittest.TestCase):
             try:
                 self.assertEqual(len(window._addon_runtime_handles), 1)
                 handle = window._addon_runtime_handles[0]
-                self.assertEqual(handle["events"], [])
+                self.assertEqual(handle.events, [])
 
                 config = TrenchDepoConfig(points=result.frame_profiles[0], cycles=3)
                 with mock.patch("gapsim.emulation.trench_depo_ui.QTimer.singleShot"):
                     window._apply_emulation_result(config, result, None, use_preview_cache=True)
 
-                self.assertIn(("frame", 1), handle["events"])
-                self.assertIn(("result", 2), handle["events"])
+                self.assertIn(("frame", 1), handle.events)
+                self.assertIn(("result", 2), handle.events)
+                event_count = len(handle.events)
+                item = window.addon_list.item(0)
+                item.setCheckState(Qt.CheckState.Unchecked)
+                QApplication.processEvents()
+
+                with mock.patch("gapsim.emulation.trench_depo_ui.QTimer.singleShot"):
+                    window._apply_emulation_result(config, result, None, use_preview_cache=True)
+
+                self.assertEqual(len(handle.events), event_count)
             finally:
                 window.close()
 
