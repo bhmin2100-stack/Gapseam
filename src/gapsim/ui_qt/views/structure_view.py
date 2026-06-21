@@ -699,6 +699,19 @@ class StructureView(QGraphicsView):
             return
         super().wheelEvent(event)
 
+    def _start_box_selection(self, scene_pos: QPointF) -> None:
+        self._selection_start_scene = QPointF(scene_pos)
+        if self._selection_rect_item is not None:
+            self._scene.removeItem(self._selection_rect_item)
+        rect = QRectF(self._selection_start_scene, self._selection_start_scene)
+        self._selection_rect_item = QGraphicsRectItem(rect)
+        pen = QPen(QColor("#2563eb"), 1.2, Qt.PenStyle.DashLine)
+        pen.setCosmetic(True)
+        self._selection_rect_item.setPen(pen)
+        self._selection_rect_item.setBrush(QBrush(QColor(37, 99, 235, 36)))
+        self._selection_rect_item.setZValue(9_000)
+        self._scene.addItem(self._selection_rect_item)
+
     def mousePressEvent(self, event) -> None:
         if (
             self._multi_select_enabled
@@ -708,17 +721,7 @@ class StructureView(QGraphicsView):
             and not (event.modifiers() & Qt.KeyboardModifier.ControlModifier)
         ):
             event_pos = self._mouse_event_pos(event)
-            self._selection_start_scene = self.mapToScene(event_pos)
-            if self._selection_rect_item is not None:
-                self._scene.removeItem(self._selection_rect_item)
-            rect = QRectF(self._selection_start_scene, self._selection_start_scene)
-            self._selection_rect_item = QGraphicsRectItem(rect)
-            pen = QPen(QColor("#2563eb"), 1.2, Qt.PenStyle.DashLine)
-            pen.setCosmetic(True)
-            self._selection_rect_item.setPen(pen)
-            self._selection_rect_item.setBrush(QBrush(QColor(37, 99, 235, 36)))
-            self._selection_rect_item.setZValue(9_000)
-            self._scene.addItem(self._selection_rect_item)
+            self._start_box_selection(self.mapToScene(event_pos))
             event.accept()
             return
         if (event.modifiers() & Qt.KeyboardModifier.ControlModifier) and event.button() == Qt.MouseButton.LeftButton:
@@ -759,6 +762,10 @@ class StructureView(QGraphicsView):
                 seg_i = self._find_segment_near_click(scene_pos)
                 if seg_i is not None:
                     self._insert_point_and_start_drag(seg_i, scene_pos)
+                    event.accept()
+                    return
+                if self._multi_select_enabled:
+                    self._start_box_selection(scene_pos)
                     event.accept()
                     return
         super().mousePressEvent(event)

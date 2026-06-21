@@ -1952,6 +1952,63 @@ class SputterGaussianEditorTest(unittest.TestCase):
         finally:
             window.close()
 
+    def test_structure_plain_box_selects_multiple_points_from_empty_area(self) -> None:
+        result = TrenchDepoResult(
+            frame_steps=[0],
+            frame_profiles=[[(0.0, 0.0), (1.0, 0.0)]],
+            frame_voids=[[]],
+            final_profile=[(0.0, 0.0), (1.0, 0.0)],
+            meta={"cycles": 0},
+        )
+        with (
+            mock.patch("gapsim.emulation.trench_depo_ui.run_trench_depo", return_value=result),
+            mock.patch("gapsim.emulation.trench_depo_ui.QTimer.singleShot"),
+        ):
+            window = TrenchDepoWindow()
+
+        try:
+            raw_points = [
+                (-200.0, 0.0),
+                (-120.0, -200.0),
+                (0.0, -260.0),
+                (120.0, -200.0),
+                (200.0, 0.0),
+            ]
+            moved_points = [
+                (-200.0, 0.0),
+                (-100.0, -220.0),
+                (20.0, -280.0),
+                (140.0, -220.0),
+                (200.0, 0.0),
+            ]
+            window._set_workflow_step("structure")
+            window._set_structure_points(raw_points, fit=False)
+            window._clear_structure_undo_stack()
+            window.resize(1280, 820)
+            window.show()
+            window.structure_view.fit_points()
+            QApplication.processEvents()
+
+            view = window.structure_view
+            start = QPoint(view.mapFromScene(QPointF(-150.0, 150.0)))
+            end = QPoint(view.mapFromScene(QPointF(150.0, 300.0)))
+            QTest.mousePress(view.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, start)
+            QTest.mouseMove(view.viewport(), end)
+            QTest.mouseRelease(view.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, end)
+            QApplication.processEvents()
+
+            self.assertEqual(view.selected_point_indices(), [1, 2, 3])
+
+            view._on_item_drag_start_raw(1, -120.0, 200.0)
+            view._point_items[1].setPos(QPointF(-100.0, 220.0))
+            view._on_item_drag_finish_raw(1, -100.0, 220.0)
+            QApplication.processEvents()
+
+            self.assertEqual(tuple(window._structure_points), tuple(moved_points))
+            self.assertEqual(tuple(window.structure_points_model.get_points()), tuple(moved_points))
+        finally:
+            window.close()
+
     def test_geometry_changes_invalidate_result_and_show_latest_preview(self) -> None:
         result = TrenchDepoResult(
             frame_steps=[0],
