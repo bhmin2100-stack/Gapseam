@@ -8,14 +8,22 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Sequence
 
-from gapsim.emulation.research_registry import DEFAULT_RESEARCH_ROOT
-
 
 ADDON_MANIFEST_FILENAME = "addon.json"
 ADDON_LIBRARY_VERSION = 1
-DEFAULT_ADDON_ROOT = DEFAULT_RESEARCH_ROOT / "addons"
-DEFAULT_ADDON_STATE_PATH = DEFAULT_RESEARCH_ROOT / "addons_state.json"
 _INVALID_ID_CHARS = re.compile(r"[^A-Za-z0-9_.-]+")
+
+
+def _default_addon_root() -> Path:
+    import sys
+
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent / "addons"
+    return Path("addons")
+
+
+DEFAULT_ADDON_ROOT = _default_addon_root()
+DEFAULT_ADDON_STATE_PATH = DEFAULT_ADDON_ROOT / "addons_state.json"
 
 
 class AddonError(ValueError):
@@ -30,6 +38,8 @@ class AddonManifest:
     description: str
     path: Path
     extension_points: tuple[str, ...] = ()
+    entrypoint: str = ""
+    enabled_by_default: bool = True
 
 
 @dataclass(frozen=True)
@@ -74,6 +84,10 @@ def read_addon_manifest(path: Path | str) -> AddonManifest:
         extension_points = tuple(str(point).strip() for point in raw_points if str(point).strip())
     else:
         extension_points = ()
+    raw_entrypoint = str(payload.get("entrypoint") or "").strip()
+    if not raw_entrypoint and (manifest_path.parent / "addon.py").is_file():
+        raw_entrypoint = "addon.py"
+    raw_enabled_default = payload.get("enabled_by_default", True)
     return AddonManifest(
         addon_id=addon_id,
         name=name,
@@ -81,6 +95,8 @@ def read_addon_manifest(path: Path | str) -> AddonManifest:
         description=description,
         path=manifest_path.parent.resolve(),
         extension_points=extension_points,
+        entrypoint=raw_entrypoint.replace("\\", "/"),
+        enabled_by_default=bool(raw_enabled_default),
     )
 
 
@@ -139,10 +155,26 @@ class AddonManager:
     def scan(self) -> List[AddonRecord]:
         state = self._read_state()
         enabled_map = state.get("enabled", {})
+        installed_map = state.get("installed", {})
+        state_changed = False
         records: List[AddonRecord] = []
         for manifest_path in self._iter_manifest_paths():
             manifest = read_addon_manifest(manifest_path)
+            if manifest.addon_id not in enabled_map:
+                enabled_map[manifest.addon_id] = bool(manifest.enabled_by_default)
+                state_changed = True
+            if manifest.addon_id not in installed_map:
+                installed_map[manifest.addon_id] = {
+                    "id": manifest.addon_id,
+                    "source": str(manifest.path),
+                    "installed_at": datetime.now().isoformat(timespec="seconds"),
+                }
+                state_changed = True
             records.append(AddonRecord(manifest=manifest, enabled=bool(enabled_map.get(manifest.addon_id, False))))
+        if state_changed:
+            state["enabled"] = enabled_map
+            state["installed"] = installed_map
+            self._write_state(state)
         return records
 
     def enabled_ids(self) -> List[str]:

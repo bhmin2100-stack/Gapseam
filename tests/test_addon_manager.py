@@ -28,11 +28,13 @@ class AddonManagerTest(unittest.TestCase):
                         "version": "1.2.3",
                         "description": "Adds depth utilities.",
                         "extension_points": ["progress.panel"],
+                        "entrypoint": "addon.py",
                     },
                     ensure_ascii=False,
                 ),
                 encoding="utf-8",
             )
+            (source / "addon.py").write_text("def register(context):\n    context.log('ready')\n", encoding="utf-8")
             manager = AddonManager(addons_dir=root / "addons", state_path=root / "addons_state.json")
 
             manifest = manager.install_from_path(source, enable=True)
@@ -43,6 +45,7 @@ class AddonManagerTest(unittest.TestCase):
             records = manager.scan()
             self.assertEqual(len(records), 1)
             self.assertEqual(records[0].manifest.name, "Depth Helper")
+            self.assertEqual(records[0].manifest.entrypoint, "addon.py")
             self.assertTrue(records[0].enabled)
             self.assertEqual(manager.enabled_ids(), ["depth-helper"])
 
@@ -57,6 +60,35 @@ class AddonManagerTest(unittest.TestCase):
             records = manager.scan()
             self.assertEqual(len(records), 1)
             self.assertTrue(records[0].enabled)
+
+    def test_drop_in_addon_folder_is_enabled_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            addon_dir = root / "addons" / "dropped_in"
+            addon_dir.mkdir(parents=True)
+            (addon_dir / ADDON_MANIFEST_FILENAME).write_text(
+                json.dumps(
+                    {
+                        "id": "drop-in",
+                        "name": "Drop In",
+                        "version": "0.1.0",
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            manager = AddonManager(addons_dir=root / "addons", state_path=root / "addons" / "addons_state.json")
+
+            records = manager.scan()
+
+            self.assertEqual(len(records), 1)
+            self.assertTrue(records[0].enabled)
+            self.assertEqual(manager.enabled_ids(), ["drop-in"])
+
+            manager.set_enabled("drop-in", False)
+
+            records = manager.scan()
+            self.assertFalse(records[0].enabled)
 
     def test_read_manifest_uses_safe_folder_id_when_id_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

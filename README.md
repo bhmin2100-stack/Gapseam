@@ -43,6 +43,42 @@ build_gfe_portable.bat
 
 빌드가 끝나면 `dist/GFE_portable_*.zip`이 생성됩니다.
 
+## Addon 폴더
+
+GFE는 시작할 때 루트의 `addons/` 폴더를 자동으로 확인합니다. addon 하나는 폴더 하나로 관리합니다.
+
+```text
+addons/
+  my-addon/
+    addon.json
+    addon.py
+```
+
+`addon.json` 예시:
+
+```json
+{
+  "id": "my-addon",
+  "name": "My Addon",
+  "version": "0.1.0",
+  "description": "Adds a custom panel.",
+  "entrypoint": "addon.py",
+  "extension_points": ["progress.panel"]
+}
+```
+
+`addon.py`에는 `register(context)` 함수를 둡니다. 처음 발견된 addon은 기본 ON으로 표시되고, GFE의 **애드온** 목록에서 체크/해제할 수 있습니다.
+
+```python
+from PySide6.QtWidgets import QLabel
+
+
+def register(context):
+    context.add_progress_widget(QLabel("Addon loaded"), title="My Addon")
+```
+
+체크 상태는 `addons/addons_state.json`에 저장됩니다. 외부 addon은 로컬 Python 코드로 실행되므로 신뢰할 수 있는 폴더만 넣으세요.
+
 ## macOS 실행
 
 macOS에서는 루트 폴더의 아래 파일을 실행합니다.
@@ -90,6 +126,7 @@ python -m gapsim.emulation.trench_depo_ui
 - `build_gfe_macos.sh`: macOS 앱 번들 빌드
 - `GFE.spec`: PyInstaller 빌드 설정
 - `pyproject.toml`: Python 패키지/의존성 설정
+- `addons/`: GFE 시작 시 자동 인식되는 addon 폴더
 
 ## 연속 Depo 실행
 

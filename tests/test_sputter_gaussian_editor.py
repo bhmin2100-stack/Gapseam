@@ -13,11 +13,14 @@ os.environ.setdefault(
     "GAPSIM_STRUCTURE_LIBRARY",
     str(Path(_STRUCTURE_LIBRARY_TMP.name) / "structures.xlsx"),
 )
+_ADDON_LIBRARY_TMP = tempfile.TemporaryDirectory()
+os.environ.setdefault("GAPSIM_ADDON_ROOT", str(Path(_ADDON_LIBRARY_TMP.name) / "addons"))
+os.environ.setdefault("GAPSIM_ADDON_STATE", str(Path(_ADDON_LIBRARY_TMP.name) / "addons_state.json"))
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt
 from PySide6.QtGui import QPixmap
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLabel
 
 from gapsim.emulation.research_registry import DEFAULT_CREATED_EMULATOR_NUMBERS
 from gapsim.emulation.trench_depo import (
@@ -1625,6 +1628,60 @@ class SputterGaussianEditorTest(unittest.TestCase):
 
                 self.assertEqual(window._addon_manager.enabled_ids(), [])
                 self.assertIn("활성 0개", window.lbl_addon_status.text())
+            finally:
+                window.close()
+
+    def test_drop_in_addon_folder_loads_progress_widget_on_startup(self) -> None:
+        result = TrenchDepoResult(
+            frame_steps=[0],
+            frame_profiles=[[(0.0, 0.0), (1.0, 0.0)]],
+            frame_voids=[[]],
+            final_profile=[(0.0, 0.0), (1.0, 0.0)],
+            meta={"cycles": 0},
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            addon_dir = root / "addons" / "startup_widget"
+            addon_dir.mkdir(parents=True)
+            (addon_dir / "addon.json").write_text(
+                json.dumps(
+                    {
+                        "id": "startup-widget",
+                        "name": "Startup Widget",
+                        "version": "0.1.0",
+                        "entrypoint": "addon.py",
+                        "extension_points": ["progress.panel"],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            (addon_dir / "addon.py").write_text(
+                "from PySide6.QtWidgets import QLabel\n"
+                "\n"
+                "def register(context):\n"
+                "    context.add_progress_widget(QLabel('startup addon loaded'), title='Startup Widget')\n",
+                encoding="utf-8",
+            )
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {
+                        "GAPSIM_ADDON_ROOT": str(root / "addons"),
+                        "GAPSIM_ADDON_STATE": str(root / "addons" / "addons_state.json"),
+                    },
+                ),
+                mock.patch("gapsim.emulation.trench_depo_ui.run_trench_depo", return_value=result),
+                mock.patch("gapsim.emulation.trench_depo_ui.QTimer.singleShot"),
+            ):
+                window = TrenchDepoWindow()
+
+            try:
+                self.assertEqual(window._addon_manager.enabled_ids(), ["startup-widget"])
+                self.assertFalse(window.addon_extension_group.isHidden())
+                self.assertIn("기능 로드: 1개", window.lbl_addon_status.text())
+                labels = [label.text() for label in window.addon_extension_group.findChildren(QLabel)]
+                self.assertIn("startup addon loaded", labels)
             finally:
                 window.close()
 

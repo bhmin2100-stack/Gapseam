@@ -80,6 +80,7 @@ from gapsim.emulation.addon_manager import (
     AddonError,
     AddonManager,
 )
+from gapsim.emulation.addon_runtime import AddonLoadResult, load_enabled_addons
 from gapsim.emulation.structure_library import (
     DEFAULT_EMULATOR_STRUCTURE_SHEETS,
     DEFAULT_STRUCTURE_LIBRARY_PATH,
@@ -2965,6 +2966,9 @@ class TrenchDepoWindow(QMainWindow):
             addons_dir=Path(os.environ.get("GAPSIM_ADDON_ROOT", str(DEFAULT_ADDON_ROOT))),
             state_path=Path(os.environ.get("GAPSIM_ADDON_STATE", str(DEFAULT_ADDON_STATE_PATH))),
         )
+        self._addon_runtime_handles: List[Any] = []
+        self._addon_load_results: List[AddonLoadResult] = []
+        self._addon_runtime_log_lines: List[str] = []
         self._active_structure_sheet_name = ""
         self._active_parameter_preset_name = ""
         self._overlay_opacity = 0.35
@@ -3590,6 +3594,13 @@ class TrenchDepoWindow(QMainWindow):
         addon_layout.addLayout(addon_open_row)
         addon_layout.addWidget(self.lbl_addon_status)
         self.addon_group.setLayout(addon_layout)
+
+        self.addon_extension_group = QGroupBox("애드온 기능")
+        self.addon_extension_layout = QVBoxLayout()
+        self.addon_extension_layout.setContentsMargins(10, 10, 10, 10)
+        self.addon_extension_layout.setSpacing(8)
+        self.addon_extension_group.setLayout(self.addon_extension_layout)
+        self.addon_extension_group.setVisible(False)
 
         self.structure_points_model = PointsTableModel()
         self.structure_points_table = PointsTableView()
@@ -4315,6 +4326,7 @@ class TrenchDepoWindow(QMainWindow):
         progress_panel_layout.addWidget(emulator_group)
         progress_panel_layout.addWidget(parameter_preset_group)
         progress_panel_layout.addWidget(self.addon_group)
+        progress_panel_layout.addWidget(self.addon_extension_group)
         progress_panel_layout.addWidget(action_group)
         progress_panel_layout.addWidget(params_group)
         progress_panel_layout.addWidget(gaussian_group)
@@ -4356,7 +4368,14 @@ class TrenchDepoWindow(QMainWindow):
         result_save_row.addStretch(1)
         result_summary_layout.addLayout(result_save_row)
         self.result_summary_group.setLayout(result_summary_layout)
+        self.addon_result_extension_group = QGroupBox("애드온 결과")
+        self.addon_result_extension_layout = QVBoxLayout()
+        self.addon_result_extension_layout.setContentsMargins(10, 10, 10, 10)
+        self.addon_result_extension_layout.setSpacing(8)
+        self.addon_result_extension_group.setLayout(self.addon_result_extension_layout)
+        self.addon_result_extension_group.setVisible(False)
         result_panel_layout.addWidget(self.result_summary_group)
+        result_panel_layout.addWidget(self.addon_result_extension_group)
         result_panel_nav = QHBoxLayout()
         result_panel_nav.setContentsMargins(0, 0, 0, 0)
         result_panel_nav.addWidget(self.btn_results_panel_back)
@@ -4780,13 +4799,75 @@ class TrenchDepoWindow(QMainWindow):
                 self.addon_list.addItem(item)
         finally:
             self.addon_list.blockSignals(False)
+        self._reload_enabled_addons(records)
         enabled = [record for record in records if record.enabled]
+        loaded = [result for result in self._addon_load_results if result.loaded]
+        failed = [result for result in self._addon_load_results if not result.loaded]
+        runtime_line = f"기능 로드: {len(loaded)}개"
+        if failed:
+            runtime_line += f" / 실패 {len(failed)}개"
         self.lbl_addon_status.setText(
             f"애드온: {len(records)}개 / 활성 {len(enabled)}개\n"
+            f"{runtime_line}\n"
             f"폴더: {self._addon_manager.addons_dir}"
         )
         if show_status:
             self.statusBar().showMessage(f"애드온 목록 갱신: {len(records)}개", 1800)
+
+    def _clear_addon_layout(self, layout: QVBoxLayout) -> None:
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+
+    def _clear_addon_runtime_widgets(self) -> None:
+        if hasattr(self, "addon_extension_layout"):
+            self._clear_addon_layout(self.addon_extension_layout)
+            self.addon_extension_group.setVisible(False)
+        if hasattr(self, "addon_result_extension_layout"):
+            self._clear_addon_layout(self.addon_result_extension_layout)
+            self.addon_result_extension_group.setVisible(False)
+
+    def _addon_runtime_log(self, message: str) -> None:
+        text = str(message)
+        self._addon_runtime_log_lines.append(text)
+        if len(self._addon_runtime_log_lines) > 200:
+            self._addon_runtime_log_lines = self._addon_runtime_log_lines[-200:]
+
+    def _reload_enabled_addons(self, records: Sequence[object]) -> None:
+        self._clear_addon_runtime_widgets()
+        self._addon_runtime_handles = []
+        self._addon_load_results = []
+        self._addon_runtime_log_lines = []
+        handles, results = load_enabled_addons(records, window=self, log=self._addon_runtime_log)
+        self._addon_runtime_handles = handles
+        self._addon_load_results = results
+
+    def _wrap_addon_widget(self, widget: QWidget, *, title: str = "") -> QWidget:
+        if not title:
+            return widget
+        group = QGroupBox(title)
+        layout = QVBoxLayout()
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.addWidget(widget)
+        group.setLayout(layout)
+        return group
+
+    def _add_addon_progress_widget(self, widget: QWidget, *, title: str = "") -> None:
+        if not isinstance(widget, QWidget):
+            raise TypeError("Addon progress widget must be a QWidget.")
+        host = self._wrap_addon_widget(widget, title=str(title or ""))
+        self.addon_extension_layout.addWidget(host)
+        self.addon_extension_group.setVisible(True)
+
+    def _add_addon_result_widget(self, widget: QWidget, *, title: str = "") -> None:
+        if not isinstance(widget, QWidget):
+            raise TypeError("Addon result widget must be a QWidget.")
+        host = self._wrap_addon_widget(widget, title=str(title or ""))
+        self.addon_result_extension_layout.addWidget(host)
+        self.addon_result_extension_group.setVisible(True)
 
     def _install_addon_from_path(self, path: Path | str) -> None:
         try:
