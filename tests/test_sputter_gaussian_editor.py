@@ -1453,6 +1453,7 @@ class SputterGaussianEditorTest(unittest.TestCase):
             self.assertIs(window.split_group.parent(), window.action_group)
             self.assertIs(window.compare_group.parent(), window.action_group)
             self.assertIs(window.addon_group.parent(), window.options_panel_content)
+            self.assertIs(window.addon_extension_group.parent(), window.progress_panel_content)
             self.assertEqual(window.btn_split_options.text(), "Split")
             self.assertEqual(window.btn_compare_options.text(), "Compare")
             self.assertEqual(window.split_group.title(), "Split Test 파라미터")
@@ -1696,6 +1697,8 @@ class SputterGaussianEditorTest(unittest.TestCase):
 
             try:
                 self.assertEqual(window._addon_manager.enabled_ids(), ["startup-widget"])
+                self.assertIs(window.addon_group.parent(), window.options_panel_content)
+                self.assertIs(window.addon_extension_group.parent(), window.progress_panel_content)
                 self.assertFalse(window.addon_extension_group.isHidden())
                 self.assertIn("기능 로드: 1개", window.lbl_addon_status.text())
                 labels = [label.text() for label in window.addon_extension_group.findChildren(QLabel)]
