@@ -38,9 +38,9 @@ class StructureLibraryTest(unittest.TestCase):
             second = ensure_default_structures(path)
 
             self.assertEqual(second, [])
-            self.assertIn(DEFAULT_EMULATOR_STRUCTURE_SHEETS[2], written)
-            self.assertIn(DEFAULT_EMULATOR_STRUCTURE_SHEETS[5], list_structure_names(path))
-            self.assertGreaterEqual(len(read_structure_points(path, DEFAULT_EMULATOR_STRUCTURE_SHEETS[5])), 2)
+            self.assertEqual(written, [DEFAULT_EMULATOR_STRUCTURE_SHEETS[0]])
+            self.assertEqual(list_structure_names(path), [DEFAULT_EMULATOR_STRUCTURE_SHEETS[0]])
+            self.assertGreaterEqual(len(read_structure_points(path, DEFAULT_EMULATOR_STRUCTURE_SHEETS[0])), 2)
 
     def test_sanitize_structure_name_for_excel_sheet_limits(self) -> None:
         self.assertEqual(sanitize_structure_name(" bad/name:*? "), "bad_name___")

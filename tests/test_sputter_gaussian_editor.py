@@ -362,7 +362,10 @@ class SputterGaussianEditorTest(unittest.TestCase):
             window = TrenchDepoWindow()
 
         try:
-            window.set_active_emulator_number(5, run=False)
+            window.set_active_emulator_number(0, run=False)
+            window.chk_depth_deposition.setChecked(True)
+            window.chk_inhibition_deposition.setChecked(True)
+            window.sync_etch_control_availability()
             self.assertFalse(window.inhibition_profile_group.isHidden())
             self.assertFalse(window.depth_profile_group.isHidden())
             self.assertTrue(window.chk_depth_deposition.isChecked())
@@ -413,7 +416,7 @@ class SputterGaussianEditorTest(unittest.TestCase):
             window = TrenchDepoWindow()
 
         try:
-            window.set_active_emulator_number(2, run=False)
+            window.set_active_emulator_number(0, run=False)
             window.spin_cycles.setValue(37)
             window.spin_angstrom_per_cycle.setValue(12.25)
             window.spin_sputter_strength.setValue(8.75)
@@ -422,7 +425,7 @@ class SputterGaussianEditorTest(unittest.TestCase):
             window.spin_sputter_width.setValue(19.0)
             window.spin_sputter_smoothing.setValue(52.5)
 
-            window.set_active_emulator_number(3, run=False)
+            window.set_active_emulator_number(0, run=False)
 
             self.assertEqual(window.spin_cycles.value(), 37)
             self.assertAlmostEqual(window.spin_angstrom_per_cycle.value(), 12.25, places=6)
@@ -448,10 +451,10 @@ class SputterGaussianEditorTest(unittest.TestCase):
             self.assertAlmostEqual(window.spin_redepo_efficiency.value(), 43.0, places=6)
             self.assertAlmostEqual(window.spin_depth_decay_k.value(), 0.72, places=6)
             self.assertAlmostEqual(window.spin_depth_min_ratio_pct.value(), 11.0, places=6)
-            self.assertTrue(window.chk_sputter.isChecked())
-            self.assertTrue(window.chk_ion_transmission.isChecked())
-            self.assertTrue(window.chk_redepo.isChecked())
-            self.assertTrue(window.chk_depth_deposition.isChecked())
+            self.assertFalse(window.chk_sputter.isChecked())
+            self.assertFalse(window.chk_ion_transmission.isChecked())
+            self.assertFalse(window.chk_redepo.isChecked())
+            self.assertFalse(window.chk_depth_deposition.isChecked())
             self.assertFalse(window.chk_reflected_ion.isChecked())
         finally:
             window.close()
@@ -574,7 +577,7 @@ class SputterGaussianEditorTest(unittest.TestCase):
         finally:
             window.close()
 
-    def test_emulator_three_shows_ion_transmission_map_controls(self) -> None:
+    def test_unified_model_shows_ion_transmission_map_controls_when_enabled(self) -> None:
         result = TrenchDepoResult(
             frame_steps=[0],
             frame_profiles=[[(0.0, 0.0), (1.0, 0.0)]],
@@ -589,21 +592,21 @@ class SputterGaussianEditorTest(unittest.TestCase):
             window = TrenchDepoWindow()
 
         try:
-            window.set_active_emulator_number(3, run=False)
+            window.set_active_emulator_number(0, run=False)
+            window.chk_sputter.setChecked(True)
+            window.chk_ion_transmission.setChecked(True)
+            window.sync_etch_control_availability()
 
             self.assertTrue(window._active_emulator_supports_sputter())
             self.assertTrue(window._active_emulator_supports_ion_transmission())
             self.assertFalse(window._active_emulator_supports_reflected_ion())
             self.assertEqual(window.chk_sputter.text(), "Etch enabled")
-            self.assertEqual(window.lbl_etch_section.text(), "Direct angle sputter etch (ion transmission source)")
+            self.assertEqual(window.lbl_etch_section.text(), "Direct angle sputter etch (통합 source)")
             self.assertFalse(window.ion_map_group.isHidden())
             self.assertTrue(all(not widget.isHidden() for widget in window._ion_transmission_widgets))
             self.assertEqual(tuple(window.ion_transmission_editor._points), tuple(window._current_geometry_points()))
-            deep_idx = window.cmb_emulator_default_preset.findText("Deep-select ion")
-            self.assertGreaterEqual(deep_idx, 0)
-            window.cmb_emulator_default_preset.setCurrentIndex(deep_idx)
-            self.assertAlmostEqual(window.spin_ion_start_depth.value(), 45.0, places=6)
-            self.assertAlmostEqual(window.spin_ion_curve_power.value(), 1.8, places=6)
+            self.assertEqual(window.cmb_emulator_default_preset.count(), 1)
+            self.assertEqual(window.cmb_emulator_default_preset.itemText(0), "기본")
 
             split_keys = {
                 window.cmb_split_parameter.itemData(idx)
@@ -942,16 +945,17 @@ class SputterGaussianEditorTest(unittest.TestCase):
         ):
             window = TrenchDepoWindow()
             try:
-                window.set_active_emulator_number(2, run=False)
+                window.set_active_emulator_number(0, run=False)
                 window.spin_cycles.setValue(2)
                 window.spin_angstrom_per_cycle.setValue(12.5)
                 window.spin_sputter_strength.setValue(6.25)
+                window.chk_sputter.setChecked(True)
 
                 window.run_emulation(save_artifacts=False)
 
                 self.assertIs(captured["config"], window._result_config)
                 params_text = window.edit_result_parameters.toPlainText()
-                self.assertIn("에뮬레이터: Direct angle sputter etch", params_text)
+                self.assertIn("모델: 기본 통합 모델", params_text)
                 self.assertIn("현재 stage cycles: 2", params_text)
                 self.assertIn("표시 누적 cycles: 2", params_text)
                 self.assertIn("Depo: 12.500 A/CYC", params_text)
@@ -1048,7 +1052,7 @@ class SputterGaussianEditorTest(unittest.TestCase):
         finally:
             window.close()
 
-    def test_emulator_four_is_depth_deposition_only_with_current_geometry(self) -> None:
+    def test_unified_model_depth_deposition_uses_current_geometry_when_enabled(self) -> None:
         result = TrenchDepoResult(
             frame_steps=[0],
             frame_profiles=[[(0.0, 0.0), (1.0, 0.0)]],
@@ -1063,29 +1067,16 @@ class SputterGaussianEditorTest(unittest.TestCase):
             window = TrenchDepoWindow()
 
         try:
-            window.set_active_emulator_number(4, run=False)
+            window.set_active_emulator_number(0, run=False)
+            window.chk_depth_deposition.setChecked(True)
+            window.sync_etch_control_availability()
 
-            self.assertFalse(window._active_emulator_supports_sputter())
+            self.assertTrue(window._active_emulator_supports_sputter())
             self.assertTrue(window._active_emulator_supports_depth_deposition())
             self.assertFalse(window._active_emulator_supports_lf_overhang())
-            self.assertTrue(all(not widget.isHidden() for widget in [
-                window.lbl_depth_depo_section,
-                window.chk_depth_deposition,
-                window.lbl_depth_feature_type,
-                window.cmb_depth_feature_type,
-                window.lbl_depth_feature_width,
-                window.spin_depth_feature_width,
-                window.lbl_depth_feature_depth,
-                window.spin_depth_feature_depth,
-                window.lbl_depth_decay_k,
-                window.spin_depth_decay_k,
-                window.lbl_depth_decay_power,
-                window.spin_depth_decay_power,
-                window.lbl_depth_min_ratio,
-                window.spin_depth_min_ratio_pct,
-                window.btn_depth_advanced,
-                window.depth_profile_group,
-            ]))
+            self.assertFalse(window.chk_depth_deposition.isHidden())
+            self.assertFalse(window.spin_depth_decay_k.isHidden())
+            self.assertFalse(window.depth_profile_group.isHidden())
             self.assertTrue(all(widget.isHidden() for widget in window._depth_advanced_widgets()))
             window.btn_depth_advanced.setChecked(True)
             self.assertTrue(all(not widget.isHidden() for widget in [
@@ -1103,25 +1094,27 @@ class SputterGaussianEditorTest(unittest.TestCase):
                 window.lbl_depth_residual_decay,
                 window.spin_depth_residual_decay,
             ]))
-            self.assertTrue(all(widget.isHidden() for widget in window._sputter_widgets))
-            self.assertTrue(all(widget.isHidden() for widget in window._redeposition_widgets))
+            self.assertFalse(window.chk_sputter.isHidden())
+            self.assertFalse(window.chk_redepo.isHidden())
+            self.assertFalse(window.chk_sputter.isChecked())
+            self.assertFalse(window.chk_redepo.isChecked())
             self.assertTrue(all(widget.isHidden() for widget in window._lf_overhang_widgets))
             self.assertFalse(window.depth_profile_group.isHidden())
             self.assertTrue(window.chk_depth_deposition.isChecked())
-            self.assertGreaterEqual(window.cmb_emulator_default_preset.findText("Depth fill default"), 0)
+            self.assertGreaterEqual(window.cmb_emulator_default_preset.findText("기본"), 0)
             self.assertEqual(tuple(window.depth_deposition_editor._structure_points), tuple(window._current_geometry_points()))
             self.assertIs(window.structure_points_group.parent(), window.structure_panel_content)
             self.assertIs(window.overlay_group.parent(), window.structure_panel_content)
             self.assertIs(window.smoothing_controls_group.parent(), window.smoothing_panel_content)
             self.assertIs(window.smoothed_points_group.parent(), window.smoothing_panel_content)
-            self.assertIs(window.emulator_group.parent(), window.progress_panel_content)
+            self.assertFalse(hasattr(window, "emulator_group"))
+            self.assertFalse(hasattr(window, "parameter_preset_group"))
             self.assertIs(window.params_group.parent(), window.progress_panel_content)
             self.assertIs(window.gaussian_group.parent(), window.progress_panel_content)
             self.assertIs(window.ion_map_group.parent(), window.progress_panel_content)
             self.assertIs(window.redepo_lobe_group.parent(), window.progress_panel_content)
             self.assertIs(window.depth_profile_group.parent(), window.progress_panel_content)
             self.assertIs(window.result_summary_group.parent(), window.result_panel_content)
-            self.assertEqual(window.emulator_group.title(), "3 진행 / 에뮬레이터 버전")
             self.assertFalse(hasattr(window, "btn_new_emulator"))
             self.assertEqual(
                 [window.view_tabs.tabText(idx) for idx in range(window.view_tabs.count())],
@@ -1129,7 +1122,7 @@ class SputterGaussianEditorTest(unittest.TestCase):
             )
             self.assertEqual(
                 [window.workflow_tabs.tabText(idx) for idx in range(window.workflow_tabs.count())],
-                ["1 구조", "2 스무딩", "3 진행", "4 결과"],
+                ["1 구조", "2 스무딩", "3 진행", "4 결과", "5 옵션"],
             )
             self.assertGreaterEqual(window.right_panel.minimumWidth(), 440)
             self.assertGreaterEqual(window.right_panel.maximumWidth(), 560)
@@ -1189,8 +1182,8 @@ class SputterGaussianEditorTest(unittest.TestCase):
             }
             self.assertIn("deposition_depth_decay_k", split_keys)
             self.assertIn("deposition_post_closure_fill_pct_line", split_keys)
-            self.assertNotIn("sputter_strength_a_per_cycle", split_keys)
-            self.assertNotIn("redepo_efficiency_pct", split_keys)
+            self.assertIn("sputter_strength_a_per_cycle", split_keys)
+            self.assertIn("redepo_efficiency_pct", split_keys)
             depth_k_idx = window.cmb_split_parameter.findData("deposition_depth_decay_k")
             self.assertGreaterEqual(depth_k_idx, 0)
             window.cmb_split_parameter.setCurrentIndex(depth_k_idx)
@@ -1235,36 +1228,27 @@ class SputterGaussianEditorTest(unittest.TestCase):
             self.assertFalse(window._active_emulator_supports_lf_overhang())
             self.assertFalse(window._active_emulator_supports_reflected_ion())
             self.assertFalse(window.chk_sputter.isHidden())
-            self.assertTrue(all(not widget.isHidden() for widget in window._ion_transmission_widgets))
+            self.assertFalse(window.chk_ion_transmission.isHidden())
+            self.assertTrue(any(widget.isHidden() for widget in window._ion_transmission_widgets))
             self.assertFalse(window.chk_redepo.isHidden())
-            self.assertFalse(window.lbl_redepo_efficiency.isHidden())
+            self.assertTrue(window.lbl_redepo_efficiency.isHidden())
             self.assertTrue(window.cmb_redepo_source_model.isHidden())
-            self.assertFalse(window.redepo_lobe_group.isHidden())
+            self.assertTrue(window.redepo_lobe_group.isHidden())
             self.assertTrue(all(widget.isHidden() for widget in window._lf_overhang_widgets))
-            self.assertTrue(all(not widget.isHidden() for widget in [
-                window.lbl_depth_depo_section,
-                window.chk_depth_deposition,
-                window.lbl_depth_feature_type,
-                window.cmb_depth_feature_type,
-                window.lbl_depth_feature_width,
-                window.spin_depth_feature_width,
-                window.lbl_depth_feature_depth,
-                window.spin_depth_feature_depth,
-                window.lbl_depth_decay_k,
-                window.spin_depth_decay_k,
-                window.lbl_depth_decay_power,
-                window.spin_depth_decay_power,
-                window.lbl_depth_min_ratio,
-                window.spin_depth_min_ratio_pct,
-                window.btn_depth_advanced,
-                window.depth_profile_group,
-            ]))
+            self.assertFalse(window.chk_depth_deposition.isHidden())
+            self.assertTrue(window.spin_depth_decay_k.isHidden())
+            self.assertTrue(window.depth_profile_group.isHidden())
             self.assertTrue(all(widget.isHidden() for widget in window._reflected_ion_widgets))
             self.assertIn("통합", window.lbl_etch_section.text())
             self.assertEqual(window.chk_depth_deposition.text(), "Depth depletion")
             self.assertEqual(window.chk_inhibition_deposition.text(), "Inhibition deposition")
             self.assertFalse(window.chk_inhibition_deposition.isHidden())
-            self.assertEqual(window.cmb_compare_target.currentData(), 1)
+            self.assertEqual(window.cmb_compare_target.currentData(), "legacy_gapsim_angle")
+            self.assertFalse(window.chk_sputter.isChecked())
+            self.assertFalse(window.chk_ion_transmission.isChecked())
+            self.assertFalse(window.chk_redepo.isChecked())
+            self.assertFalse(window.chk_depth_deposition.isChecked())
+            self.assertFalse(window.chk_inhibition_deposition.isChecked())
 
             split_parameters = {
                 str(window.cmb_split_parameter.itemData(idx))
@@ -1282,6 +1266,23 @@ class SputterGaussianEditorTest(unittest.TestCase):
 
             config = window.current_config()
             self.assertEqual(tuple(config.points), tuple(window._current_geometry_points()))
+            self.assertFalse(config.sputter_enabled)
+            self.assertFalse(config.ion_transmission_enabled)
+            self.assertFalse(config.redepo_enabled)
+            self.assertFalse(config.deposition_depth_enabled)
+            self.assertFalse(config.inhibition_enabled)
+
+            window.chk_sputter.setChecked(True)
+            window.chk_ion_transmission.setChecked(True)
+            window.chk_redepo.setChecked(True)
+            window.chk_depth_deposition.setChecked(True)
+            window.sync_etch_control_availability()
+            self.assertTrue(all(not widget.isHidden() for widget in window._ion_transmission_widgets))
+            self.assertFalse(window.lbl_redepo_efficiency.isHidden())
+            self.assertFalse(window.redepo_lobe_group.isHidden())
+            self.assertFalse(window.spin_depth_decay_k.isHidden())
+            self.assertFalse(window.depth_profile_group.isHidden())
+            config = window.current_config()
             self.assertTrue(config.sputter_enabled)
             self.assertTrue(config.ion_transmission_enabled)
             self.assertTrue(config.redepo_enabled)
@@ -1341,7 +1342,7 @@ class SputterGaussianEditorTest(unittest.TestCase):
         finally:
             window.close()
 
-    def test_emulator_six_exposes_reflection_gaussian_redepo_controls(self) -> None:
+    def test_unified_model_exposes_reflection_gaussian_redepo_controls_when_enabled(self) -> None:
         result = TrenchDepoResult(
             frame_steps=[0],
             frame_profiles=[[(0.0, 0.0), (1.0, 0.0)]],
@@ -1356,14 +1357,17 @@ class SputterGaussianEditorTest(unittest.TestCase):
             window = TrenchDepoWindow()
 
         try:
-            window.set_active_emulator_number(6, run=False)
+            window.set_active_emulator_number(0, run=False)
+            window.chk_sputter.setChecked(True)
+            window.chk_redepo.setChecked(True)
+            window.sync_etch_control_availability()
 
             self.assertTrue(window._active_emulator_supports_sputter())
             self.assertTrue(window._active_emulator_supports_redeposition())
-            self.assertFalse(window._active_emulator_supports_ion_transmission())
-            self.assertFalse(window._active_emulator_supports_depth_deposition())
-            self.assertEqual(window.cmb_compare_target.currentData(), 2)
-            self.assertIn("reflection", window.lbl_etch_section.text().lower())
+            self.assertTrue(window._active_emulator_supports_ion_transmission())
+            self.assertTrue(window._active_emulator_supports_depth_deposition())
+            self.assertEqual(window.cmb_compare_target.currentData(), "legacy_gapsim_angle")
+            self.assertIn("통합", window.lbl_etch_section.text())
             self.assertIn("reflection", window.lbl_redepo_section.text())
             self.assertEqual(window.lbl_redepo_emit_power.text(), "Angular spread deg")
             self.assertEqual(window.lbl_redepo_distance_power.text(), "Specular bias %")
@@ -1385,10 +1389,10 @@ class SputterGaussianEditorTest(unittest.TestCase):
             self.assertIn("redepo_efficiency_pct", split_parameters)
             self.assertIn("redepo_emit_power", split_parameters)
             self.assertIn("redepo_distance_power", split_parameters)
-            self.assertNotIn("ion_transmission_start_depth_pct", split_parameters)
+            self.assertIn("ion_transmission_start_depth_pct", split_parameters)
 
             config = window.current_config()
-            self.assertEqual(config.emulator_number, 6)
+            self.assertEqual(config.emulator_number, 0)
             self.assertTrue(config.sputter_enabled)
             self.assertTrue(config.redepo_enabled)
             self.assertAlmostEqual(config.redepo_emit_power, 22.0, places=6)
@@ -1439,7 +1443,8 @@ class SputterGaussianEditorTest(unittest.TestCase):
             self.assertEqual(window.view_tabs.currentIndex(), 0)
             self.assertEqual(window.workflow_tabs.currentIndex(), 0)
             self.assertTrue(window.result_controls_widget.isHidden())
-            self.assertIs(window.emulator_group.parent(), window.progress_panel_content)
+            self.assertFalse(hasattr(window, "emulator_group"))
+            self.assertFalse(hasattr(window, "parameter_preset_group"))
             self.assertFalse(hasattr(window, "btn_new_emulator"))
             self.assertIs(window.structure_library_group.parent(), window.structure_panel_content)
             self.assertIs(window.smoothing_controls_group.parent(), window.smoothing_panel_content)
@@ -1447,8 +1452,9 @@ class SputterGaussianEditorTest(unittest.TestCase):
             self.assertIs(window.action_group.parent(), window.progress_panel_content)
             self.assertIs(window.split_group.parent(), window.action_group)
             self.assertIs(window.compare_group.parent(), window.action_group)
-            self.assertEqual(window.btn_split_options.text(), "Split Test")
-            self.assertEqual(window.btn_compare_options.text(), "Compare Test")
+            self.assertIs(window.addon_group.parent(), window.options_panel_content)
+            self.assertEqual(window.btn_split_options.text(), "Split")
+            self.assertEqual(window.btn_compare_options.text(), "Compare")
             self.assertEqual(window.split_group.title(), "Split Test 파라미터")
             self.assertEqual(window.compare_group.title(), "Compare Test 파라미터")
             self.assertTrue(window.split_group.isHidden())
@@ -1479,6 +1485,15 @@ class SputterGaussianEditorTest(unittest.TestCase):
             self.assertEqual(window.view_tabs.currentIndex(), 3)
             self.assertEqual(window.workflow_tabs.currentIndex(), 3)
             self.assertFalse(window.result_controls_widget.isHidden())
+
+            window.btn_results_panel_next.click()
+            self.assertEqual(window.view_tabs.currentIndex(), 3)
+            self.assertEqual(window.workflow_tabs.currentIndex(), 4)
+            self.assertFalse(window.result_controls_widget.isHidden())
+
+            window.btn_options_panel_back.click()
+            self.assertEqual(window.view_tabs.currentIndex(), 3)
+            self.assertEqual(window.workflow_tabs.currentIndex(), 3)
 
             window.workflow_tabs.setCurrentIndex(0)
             self.assertEqual(window.view_tabs.currentIndex(), 0)
@@ -1514,10 +1529,11 @@ class SputterGaussianEditorTest(unittest.TestCase):
             )
 
             window.set_active_emulator_number(2, run=False)
-            self.assertEqual(tuple(window.current_config().points), ION_TRANSMISSION_STEPPED_TRENCH_POINTS)
+            self.assertEqual(window.active_emulator_number(), 0)
+            self.assertEqual(tuple(window.current_config().points), TrenchDepoConfig().points)
             self.assertAlmostEqual(
                 window.spin_depth_feature_depth.value(),
-                TrenchDepoWindow._geometry_depth_a(ION_TRANSMISSION_STEPPED_TRENCH_POINTS),
+                TrenchDepoWindow._geometry_depth_a(TrenchDepoConfig().points),
                 places=6,
             )
 
@@ -1550,19 +1566,20 @@ class SputterGaussianEditorTest(unittest.TestCase):
                 window.refresh_structure_library(show_status=False)
 
                 window.export_default_structures_to_library()
-                self.assertEqual(window.cmb_structure_library.count(), 4)
+                self.assertEqual(window.cmb_structure_library.count(), 1)
                 self.assertEqual(
                     [
                         window.cmb_structure_library.itemText(idx)
                         for idx in range(window.cmb_structure_library.count())
                     ],
-                    ["통합 트렌치", "기본 트렌치", "계단형 트렌치", "Bowed Jar 트렌치"],
+                    ["기본 트렌치"],
                 )
-                stepped_idx = window.cmb_structure_library.findData("em03_ion_transmission_etch")
-                self.assertGreaterEqual(stepped_idx, 0)
-                window.cmb_structure_library.setCurrentIndex(stepped_idx)
-                self.assertEqual(tuple(window.current_config().points), tuple(ION_TRANSMISSION_STEPPED_TRENCH_POINTS))
-                self.assertEqual(window.edit_structure_name.text(), "계단형 트렌치")
+                default_idx = window.cmb_structure_library.findData("em00_integrated_depo_etch_depth")
+                self.assertGreaterEqual(default_idx, 0)
+                window.cmb_structure_library.setCurrentIndex(default_idx)
+                window.load_selected_structure_from_library()
+                self.assertEqual(tuple(window.current_config().points), tuple(BOWED_JAR_TRENCH_POINTS))
+                self.assertEqual(window.edit_structure_name.text(), "기본 트렌치")
                 self.assertFalse(hasattr(window, "btn_load_structure"))
                 self.assertFalse(hasattr(window, "btn_load_structure_view"))
                 self.assertFalse(hasattr(window, "btn_save_structure_view"))
@@ -2204,7 +2221,7 @@ class SputterGaussianEditorTest(unittest.TestCase):
 
             window.set_active_emulator_number(2, run=False)
 
-            self.assertEqual(window.active_emulator_number(), 2)
+            self.assertEqual(window.active_emulator_number(), 0)
             self.assertEqual(tuple(window._structure_points), tuple(custom_points))
             self.assertEqual(tuple(window.current_config().points), tuple(custom_points))
             self.assertFalse(window._use_smoothed_geometry)
@@ -2240,7 +2257,7 @@ class SputterGaussianEditorTest(unittest.TestCase):
             self.assertEqual(window.view_tabs.currentIndex(), 3)
             window.set_active_emulator_number(5, run=False)
 
-            self.assertEqual(window.active_emulator_number(), 5)
+            self.assertEqual(window.active_emulator_number(), 0)
             self.assertEqual(window.view_tabs.currentIndex(), 3)
             self.assertTrue(window._use_smoothed_geometry)
             self.assertEqual(tuple(window._smoothed_points), smoothed_points)
@@ -2268,10 +2285,15 @@ class SputterGaussianEditorTest(unittest.TestCase):
         try:
             self.assertEqual(window.active_emulator_number(), 0)
             self.assertEqual(window._emulator_numbers, EXPECTED_EMULATOR_NUMBERS)
-            self.assertEqual(sorted(window._emulator_buttons), EXPECTED_EMULATOR_NUMBERS)
-            self.assertTrue(window._emulator_buttons[0].isChecked())
-            for number in EXPECTED_EMULATOR_NUMBERS[1:]:
-                self.assertFalse(window._emulator_buttons[number].isChecked())
+            self.assertFalse(hasattr(window, "_emulator_buttons"))
+            self.assertFalse(hasattr(window, "emulator_group"))
+            self.assertEqual(window.cmb_emulator_default_preset.count(), 1)
+            self.assertEqual(window.cmb_emulator_default_preset.itemText(0), "기본")
+            self.assertFalse(window.chk_sputter.isChecked())
+            self.assertFalse(window.chk_ion_transmission.isChecked())
+            self.assertFalse(window.chk_redepo.isChecked())
+            self.assertFalse(window.chk_depth_deposition.isChecked())
+            self.assertFalse(window.chk_inhibition_deposition.isChecked())
         finally:
             window.close()
 
@@ -2285,8 +2307,6 @@ class SputterGaussianEditorTest(unittest.TestCase):
         )
         with (
             mock.patch("gapsim.emulation.trench_depo_ui.run_trench_depo", return_value=result),
-            mock.patch("gapsim.emulation.trench_depo_ui.ensure_emulator_research_slot") as ensure_slot,
-            mock.patch("gapsim.emulation.trench_depo_ui.save_created_emulator_numbers") as save_numbers,
             mock.patch("gapsim.emulation.trench_depo_ui.QMessageBox.information") as info_box,
             mock.patch("gapsim.emulation.trench_depo_ui.QTimer.singleShot"),
         ):
@@ -2297,8 +2317,6 @@ class SputterGaussianEditorTest(unittest.TestCase):
 
                 self.assertEqual(window.active_emulator_number(), 0)
                 self.assertEqual(window._emulator_numbers, EXPECTED_EMULATOR_NUMBERS)
-                ensure_slot.assert_not_called()
-                save_numbers.assert_not_called()
                 info_box.assert_called_once()
             finally:
                 window.close()
@@ -2322,7 +2340,7 @@ class SputterGaussianEditorTest(unittest.TestCase):
 
                 window.set_active_emulator_number(1)
 
-                self.assertEqual(window.active_emulator_number(), 1)
+                self.assertEqual(window.active_emulator_number(), 0)
                 self.assertEqual(run_depo.call_count, 0)
                 self.assertFalse(window._emulator_run_timer.isActive())
 

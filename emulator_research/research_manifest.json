@@ -2,13 +2,7 @@
   "version": 1,
   "root": "emulator_research",
   "created_numbers": [
-    0,
-    1,
-    2,
-    3,
-    4,
-    5,
-    6
+    0
   ],
   "presentation_policy": "각 에뮬레이터별 PPTX를 분리하고, 의미 있는 업데이트마다 해당 PPT에 슬라이드 1장을 추가한다.",
   "source_policy": "관련 논문, 리뷰, 공식 문서가 있으면 제목/연도/출처를 기록하고 물리 해석에 반영한다.",
@@ -17,65 +11,11 @@
     {
       "number": 0,
       "slug": "integrated_depo_etch_depth_inhibition",
-      "title_ko": "통합 데포 에치 감쇠 인히비션",
-      "title_en": "Integrated Depo Etch Depth Inhibition",
-      "status_ko": "통합: conformal deposition + direct/ion etch + 6번 normal/specular lobe redepo + depth/inhibition deposition",
+      "title_ko": "기본 통합 모델",
+      "title_en": "Unified GFE Model",
+      "status_ko": "기본 통합 모델: 필요한 물리 스위치를 사용자가 켜서 조합",
       "module": "gapsim.emulation.trench_depo",
-      "presentation": "presentations/에뮬레이터00_통합_데포_에치_감쇠_인히비션.pptx"
-    },
-    {
-      "number": 1,
-      "slug": "conformal_depo_baseline",
-      "title_ko": "컨포멀 데포 기준",
-      "title_en": "Conformal Deposition Baseline",
-      "status_ko": "기준: etch/redepo 없이 sample trench conformal normal deposition",
-      "module": "gapsim.emulation.trench_depo",
-      "presentation": "presentations/에뮬레이터01_컨포멀_데포_기준.pptx"
-    },
-    {
-      "number": 2,
-      "slug": "direct_angle_sputter_etch",
-      "title_ko": "각도기반 직접 스퍼터 에치",
-      "title_en": "Direct Angle Sputter Etch",
-      "status_ko": "진행중: 55도 부근 peak를 설정 가능한 angle-dependent direct sputter",
-      "module": "gapsim.emulation.trench_depo",
-      "presentation": "presentations/에뮬레이터02_각도기반_직접_스퍼터_에치.pptx"
-    },
-    {
-      "number": 3,
-      "slug": "ion_transmission_shadowing",
-      "title_ko": "이온 도달률 섀도잉",
-      "title_en": "Ion Transmission Shadowing",
-      "status_ko": "진행중: direct sputter 출력에 depth/opening 기반 ion transmission 계수 결합",
-      "module": "gapsim.emulation.trench_depo",
-      "presentation": "presentations/에뮬레이터03_이온_도달률_섀도잉.pptx"
-    },
-    {
-      "number": 4,
-      "slug": "depth_dependent_depo_fill",
-      "title_ko": "깊이감쇠 데포 잔류충전",
-      "title_en": "Depth-Dependent Deposition Fill",
-      "status_ko": "진행중: redepo 없이 depth-dependent deposition과 closure 후 내부 잔류 fill 검증",
-      "module": "gapsim.emulation.trench_depo",
-      "presentation": "presentations/에뮬레이터04_깊이감쇠_데포_잔류충전.pptx"
-    },
-    {
-      "number": 5,
-      "slug": "inhibition_deposition_fill",
-      "title_ko": "인히비션 증착 필",
-      "title_en": "Inhibition Deposition Fill",
-      "status_ko": "진행중: PECVD/PEALD inhibition coverage field 기반 top/opening suppression fill",
-      "module": "gapsim.emulation.trench_depo",
-      "presentation": "presentations/에뮬레이터05_인히비션_증착_필.pptx"
-    },
-    {
-      "number": 6,
-      "slug": "normal_specular_lobe_redeposition",
-      "title_ko": "노멀 반사 로브 리데포",
-      "title_en": "Normal Specular Reflection Lobe Redeposition",
-      "status_ko": "진행중: etch source별 surface-normal/specular blend lobe를 LOS target에 부드럽게 분배",
-      "module": "gapsim.emulation.trench_depo",
-      "presentation": "presentations/에뮬레이터06_노멀_반사_로브_리데포.pptx"
+      "presentation": "presentations/에뮬레이터00_기본_통합_모델.pptx"
     }
   ]
 }
