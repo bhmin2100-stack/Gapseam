@@ -2046,9 +2046,13 @@ class SputterGaussianEditorTest(unittest.TestCase):
 
             self.assertEqual(view.selected_point_indices(), [1, 2, 3])
 
-            view._on_item_drag_start_raw(1, -120.0, 200.0)
-            view._point_items[1].setPos(QPointF(-100.0, 220.0))
-            view._on_item_drag_finish_raw(1, -100.0, 220.0)
+            with mock.patch(
+                "gapsim.ui_qt.views.structure_view.QApplication.keyboardModifiers",
+                return_value=Qt.KeyboardModifier.NoModifier,
+            ):
+                view._on_item_drag_start_raw(1, -120.0, 200.0)
+                view._point_items[1].setPos(QPointF(-100.0, 220.0))
+                view._on_item_drag_finish_raw(1, -100.0, 220.0)
             QApplication.processEvents()
 
             self.assertEqual(tuple(window._structure_points), tuple(moved_points))
@@ -2115,6 +2119,125 @@ class SputterGaussianEditorTest(unittest.TestCase):
 
             self.assertEqual(tuple(window._structure_points), tuple(moved_points))
             self.assertEqual(tuple(window.structure_points_model.get_points()), tuple(moved_points))
+        finally:
+            window.close()
+
+    def test_structure_multi_point_drag_uses_raw_delta_without_grid_snap(self) -> None:
+        result = TrenchDepoResult(
+            frame_steps=[0],
+            frame_profiles=[[(0.0, 0.0), (1.0, 0.0)]],
+            frame_voids=[[]],
+            final_profile=[(0.0, 0.0), (1.0, 0.0)],
+            meta={"cycles": 0},
+        )
+        with (
+            mock.patch("gapsim.emulation.trench_depo_ui.run_trench_depo", return_value=result),
+            mock.patch("gapsim.emulation.trench_depo_ui.QTimer.singleShot"),
+        ):
+            window = TrenchDepoWindow()
+
+        try:
+            raw_points = [
+                (-200.0, 0.0),
+                (-120.0, -200.0),
+                (0.0, -260.0),
+                (120.0, -200.0),
+                (200.0, 0.0),
+            ]
+            expected = [
+                (-200.0, 0.0),
+                (-99.3, -222.7),
+                (20.7, -282.7),
+                (140.7, -222.7),
+                (200.0, 0.0),
+            ]
+            window._set_workflow_step("structure")
+            window._set_structure_points(raw_points, fit=False)
+            window._clear_structure_undo_stack()
+            view = window.structure_view
+            view._selected_indices = {1, 2, 3}
+            view._sync_selected_point_items()
+
+            with mock.patch.object(view, "_snap", side_effect=AssertionError("multi drag should not snap")):
+                view._on_item_drag_start_raw(1, -120.0, 200.0)
+                view._point_items[1].setPos(QPointF(-99.3, 222.7))
+                view._on_item_drag_finish_raw(1, -99.3, 222.7)
+            QApplication.processEvents()
+
+            for actual, wanted in zip(window._structure_points, expected):
+                self.assertAlmostEqual(actual[0], wanted[0], places=6)
+                self.assertAlmostEqual(actual[1], wanted[1], places=6)
+        finally:
+            window.close()
+
+    def test_structure_shift_multi_point_drag_locks_to_dominant_axis(self) -> None:
+        result = TrenchDepoResult(
+            frame_steps=[0],
+            frame_profiles=[[(0.0, 0.0), (1.0, 0.0)]],
+            frame_voids=[[]],
+            final_profile=[(0.0, 0.0), (1.0, 0.0)],
+            meta={"cycles": 0},
+        )
+        with (
+            mock.patch("gapsim.emulation.trench_depo_ui.run_trench_depo", return_value=result),
+            mock.patch("gapsim.emulation.trench_depo_ui.QTimer.singleShot"),
+        ):
+            window = TrenchDepoWindow()
+
+        try:
+            raw_points = [
+                (-200.0, 0.0),
+                (-120.0, -200.0),
+                (0.0, -260.0),
+                (120.0, -200.0),
+                (200.0, 0.0),
+            ]
+            expected_horizontal = [
+                (-200.0, 0.0),
+                (-70.0, -200.0),
+                (50.0, -260.0),
+                (170.0, -200.0),
+                (200.0, 0.0),
+            ]
+            window._set_workflow_step("structure")
+            window._set_structure_points(raw_points, fit=False)
+            window._clear_structure_undo_stack()
+            view = window.structure_view
+            view._selected_indices = {1, 2, 3}
+            view._sync_selected_point_items()
+
+            with mock.patch(
+                "gapsim.ui_qt.views.structure_view.QApplication.keyboardModifiers",
+                return_value=Qt.KeyboardModifier.ShiftModifier,
+            ):
+                view._on_item_drag_start_raw(1, -120.0, 200.0)
+                view._point_items[1].setPos(QPointF(-70.0, 230.0))
+                view._on_item_drag_finish_raw(1, -70.0, 200.0)
+            QApplication.processEvents()
+
+            self.assertEqual(tuple(window._structure_points), tuple(expected_horizontal))
+
+            expected_vertical = [
+                (-200.0, 0.0),
+                (-120.0, -280.0),
+                (0.0, -340.0),
+                (120.0, -280.0),
+                (200.0, 0.0),
+            ]
+            window._set_structure_points(raw_points, fit=False)
+            window._clear_structure_undo_stack()
+            view._selected_indices = {1, 2, 3}
+            view._sync_selected_point_items()
+            with mock.patch(
+                "gapsim.ui_qt.views.structure_view.QApplication.keyboardModifiers",
+                return_value=Qt.KeyboardModifier.ShiftModifier,
+            ):
+                view._on_item_drag_start_raw(1, -120.0, 200.0)
+                view._point_items[1].setPos(QPointF(-100.0, 280.0))
+                view._on_item_drag_finish_raw(1, -120.0, 280.0)
+            QApplication.processEvents()
+
+            self.assertEqual(tuple(window._structure_points), tuple(expected_vertical))
         finally:
             window.close()
 

@@ -6,6 +6,7 @@ from typing import Callable, List, Optional, Tuple
 from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
+    QApplication,
     QGraphicsEllipseItem,
     QGraphicsItem,
     QGraphicsLineItem,
@@ -403,7 +404,6 @@ class StructureView(QGraphicsView):
             if 0 <= idx < len(self._pts):
                 return self._pts[idx]
             return float(x), float(y)
-        sx, sy = self._snap(x, y)
         if (
             self._multi_select_enabled
             and self._multi_drag_anchor_idx == idx
@@ -412,7 +412,13 @@ class StructureView(QGraphicsView):
             and 0 <= idx < len(self._multi_drag_start_pts)
         ):
             base_x, base_y = self._multi_drag_start_pts[idx]
-            dx, dy = sx - base_x, sy - base_y
+            dx, dy = float(x) - base_x, float(y) - base_y
+            if QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier:
+                if abs(dx) >= abs(dy):
+                    dy = 0.0
+                else:
+                    dx = 0.0
+            sx, sy = base_x + dx, base_y + dy
             moved: List[Tuple[int, float, float]] = []
             self._suppress_point_item_change = True
             try:
@@ -435,6 +441,7 @@ class StructureView(QGraphicsView):
             if moved:
                 self.pointsMoved.emit(moved)
             return sx, sy
+        sx, sy = self._snap(x, y)
         if 0 <= idx < len(self._pts):
             self._pts[idx] = (sx, sy)
             self._update_path_from_points()
@@ -844,9 +851,10 @@ class StructureView(QGraphicsView):
             and not (event.modifiers() & Qt.KeyboardModifier.ControlModifier)
         ):
             event_pos = self._mouse_event_pos(event)
-            self._start_box_selection(self.mapToScene(event_pos))
-            event.accept()
-            return
+            if self._find_point_near_click(self.mapToScene(event_pos)) is None:
+                self._start_box_selection(self.mapToScene(event_pos))
+                event.accept()
+                return
         if (event.modifiers() & Qt.KeyboardModifier.ControlModifier) and event.button() == Qt.MouseButton.LeftButton:
             self._panning = True
             self._pan_start = QPointF(self._mouse_event_pos(event))
