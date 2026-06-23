@@ -167,6 +167,26 @@ class ResultVectorViewTest(unittest.TestCase):
         view.set_etch_overlay_visible(False)
         self.assertFalse(view._etch_overlay_items)
 
+    def test_stage_ids_color_continued_depo_layers_by_stage(self) -> None:
+        frames = [
+            [(-10.0, 0.0), (10.0, 0.0)],
+            [(-11.0, -1.0), (11.0, -1.0)],
+            [(-12.0, -2.0), (12.0, -2.0)],
+            [(-13.0, -3.0), (13.0, -3.0)],
+        ]
+        view = ResultVectorView()
+        view.set_frames(frames, stage_ids=[1, 1, 2, 3])
+
+        self.assertEqual(view._frame_stage_ids, [1, 1, 2, 3])
+        self.assertEqual(len(view._layer_items), 3)
+        colors = [item.brush().color() for item in view._layer_items if item is not None]
+        self.assertEqual(len(colors), 3)
+        self.assertGreater(colors[0].blue(), colors[0].red())
+        self.assertGreater(colors[1].red(), colors[1].blue())
+        self.assertGreater(colors[2].green(), colors[2].red())
+        self.assertNotEqual(colors[0].getRgb(), colors[1].getRgb())
+        self.assertNotEqual(colors[1].getRgb(), colors[2].getRgb())
+
     def test_large_profiles_are_decimated_for_display(self) -> None:
         profile = [(float(i), math.sin(float(i) / 40.0)) for i in range(6000)]
         view = ResultVectorView()

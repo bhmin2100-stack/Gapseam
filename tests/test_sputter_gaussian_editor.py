@@ -919,6 +919,50 @@ class SputterGaussianEditorTest(unittest.TestCase):
             finally:
                 window.close()
 
+    def test_next_depo_stage_starts_from_previous_final_profile_and_colors_stage(self) -> None:
+        a = [(0.0, 0.0), (1.0, 0.0)]
+        b = [(0.0, -1.0), (1.0, -1.0)]
+        c = [(0.0, -2.0), (1.0, -2.0)]
+        first = TrenchDepoResult(
+            frame_steps=[0, 1],
+            frame_profiles=[a, b],
+            frame_voids=[[], []],
+            final_profile=b,
+            meta={"cycles": 1, "stage_index": 1},
+        )
+        second = TrenchDepoResult(
+            frame_steps=[0, 1],
+            frame_profiles=[b, c],
+            frame_voids=[[], []],
+            final_profile=c,
+            meta={"cycles": 1},
+        )
+        captured_configs = []
+
+        def fake_run(config, **_kwargs):
+            captured_configs.append(config)
+            return first if len(captured_configs) == 1 else second
+
+        with (
+            mock.patch("gapsim.emulation.trench_depo_ui.run_trench_depo", side_effect=fake_run),
+            mock.patch("gapsim.emulation.trench_depo_ui.QTimer.singleShot"),
+        ):
+            window = TrenchDepoWindow()
+            try:
+                window.set_active_emulator_number(0, run=False)
+
+                window.run_emulation(save_artifacts=False)
+                window.start_next_depo_stage()
+                window.run_emulation(save_artifacts=False)
+
+                self.assertEqual(len(captured_configs), 2)
+                self.assertEqual(list(captured_configs[1].points), b)
+                self.assertEqual(window._result.frame_profiles, [a, b, c])
+                self.assertEqual(window._result.meta["frame_stage_ids"], [1, 1, 2])
+                self.assertEqual(window.view._frame_stage_ids, [1, 1, 2])
+            finally:
+                window.close()
+
     def test_result_panel_shows_parameters_and_repeat_playback(self) -> None:
         result = TrenchDepoResult(
             frame_steps=[0, 1, 2],

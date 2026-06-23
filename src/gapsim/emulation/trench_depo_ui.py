@@ -272,6 +272,43 @@ def _result_frame_series(
     return [[] for _ in result.frame_profiles]
 
 
+def _result_frame_stage_ids(result: TrenchDepoResult) -> List[int]:
+    raw = result.meta.get("frame_stage_ids")
+    if isinstance(raw, list) and len(raw) == len(result.frame_profiles):
+        ids: List[int] = []
+        for value in raw:
+            try:
+                ids.append(max(1, int(value)))
+            except (TypeError, ValueError):
+                ids.append(1)
+        return ids
+
+    history = result.meta.get("stage_history")
+    if isinstance(history, list):
+        ids = []
+        for item in history:
+            if not isinstance(item, Mapping):
+                continue
+            try:
+                stage = max(1, int(item.get("stage", 1)))
+                frame_count = max(0, int(item.get("frames", 0)))
+            except (TypeError, ValueError):
+                continue
+            ids.extend([stage for _ in range(frame_count)])
+        if len(ids) == len(result.frame_profiles):
+            return ids
+
+    meta = dict(result.meta)
+    stage = 1
+    for key in ("stage_index", "stage_count"):
+        try:
+            stage = max(1, int(meta.get(key, stage) or stage))
+            break
+        except (TypeError, ValueError):
+            continue
+    return [stage for _ in result.frame_profiles]
+
+
 def merge_continued_trench_result(
     base_result: TrenchDepoResult,
     next_result: TrenchDepoResult,
@@ -311,6 +348,7 @@ def merge_continued_trench_result(
     )
     merged_frames = list(base_result.frame_profiles) + used_frames
     merged_voids = base_voids + used_voids
+    merged_stage_ids = _result_frame_stage_ids(base_result) + [stage_i for _ in used_frames]
 
     meta = dict(next_result.meta)
     base_meta = dict(base_result.meta)
@@ -351,6 +389,11 @@ def merge_continued_trench_result(
             "continued_from_run": "" if continued_from_run is None else str(Path(continued_from_run)),
             "history_self_contained": True,
             "stage_history": stage_history,
+            "frame_stage_ids": (
+                merged_stage_ids
+                if len(merged_stage_ids) == len(merged_frames)
+                else [1 for _ in merged_frames]
+            ),
             "initial_points": len(merged_frames[0]) if merged_frames else int(meta.get("initial_points", 0) or 0),
             "final_points": len(next_result.final_profile),
         }
@@ -2518,6 +2561,7 @@ class SplitTestWindow(QMainWindow):
                 redepo_overlays=case.result.meta.get("frame_redepo_overlays"),
                 etch_overlays=case.result.meta.get("frame_etch_overlays"),
                 transport_lines=case.result.meta.get("frame_transport_lines"),
+                stage_ids=_result_frame_stage_ids(case.result),
                 void_mode="current",
                 dynamic_substrate_fill=solid_playback,
                 history_mode="mixed_etch" if solid_playback else "film",
@@ -5736,6 +5780,7 @@ class TrenchDepoWindow(QMainWindow):
             redepo_overlays=[[]],
             etch_overlays=[[]],
             transport_lines=[[]],
+            stage_ids=[1],
             void_mode="current",
             dynamic_substrate_fill=False,
             history_mode="film",
@@ -8142,6 +8187,7 @@ class TrenchDepoWindow(QMainWindow):
             redepo_overlays=result.meta.get("frame_redepo_overlays"),
             etch_overlays=result.meta.get("frame_etch_overlays"),
             transport_lines=result.meta.get("frame_transport_lines"),
+            stage_ids=_result_frame_stage_ids(result),
             void_mode="current",
             dynamic_substrate_fill=solid_playback,
             history_mode="mixed_etch" if solid_playback else "film",
@@ -8784,6 +8830,7 @@ class TrenchDepoWindow(QMainWindow):
             redepo_overlays=result.meta.get("frame_redepo_overlays"),
             etch_overlays=result.meta.get("frame_etch_overlays"),
             transport_lines=result.meta.get("frame_transport_lines"),
+            stage_ids=_result_frame_stage_ids(result),
             void_mode="current",
             dynamic_substrate_fill=solid_playback,
             history_mode="mixed_etch" if solid_playback else "film",

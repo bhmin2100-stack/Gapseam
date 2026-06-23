@@ -175,6 +175,44 @@ class TrenchDepoEmulationTest(unittest.TestCase):
         self.assertEqual(merged.meta["stage_index"], 2)
         self.assertEqual(merged.meta["cycles"], 2)
         self.assertEqual([item["stage"] for item in merged.meta["stage_history"]], [1, 2])
+        self.assertEqual(merged.meta["frame_stage_ids"], [1, 1, 2])
+
+    def test_gfe_continued_depo_merge_tracks_stage_colors_through_fourth_stage(self) -> None:
+        a = [(-10.0, 0.0), (10.0, 0.0)]
+        b = [(-9.0, -1.0), (9.0, -1.0)]
+        c = [(-8.0, -2.0), (8.0, -2.0)]
+        d = [(-7.0, -3.0), (7.0, -3.0)]
+        e = [(-6.0, -4.0), (6.0, -4.0)]
+        base = TrenchDepoResult(
+            frame_steps=[0, 1],
+            frame_profiles=[a, b],
+            frame_voids=[[], []],
+            final_profile=b,
+            meta={"cycles": 1, "stage_index": 1},
+        )
+
+        merged = base
+        for stage_index, next_profile in ((2, c), (3, d), (4, e)):
+            next_result = TrenchDepoResult(
+                frame_steps=[0, 1],
+                frame_profiles=[merged.final_profile, next_profile],
+                frame_voids=[[], []],
+                final_profile=next_profile,
+                meta={"cycles": 1},
+            )
+            merged = merge_continued_trench_result(
+                merged,
+                next_result,
+                stage_index=stage_index,
+                continued_from_run=Path(f"runs/stage{stage_index - 1}"),
+            )
+
+        self.assertEqual(merged.frame_profiles, [a, b, c, d, e])
+        self.assertEqual(merged.frame_steps, [0, 1, 2, 3, 4])
+        self.assertEqual(merged.final_profile, e)
+        self.assertEqual(merged.meta["stage_index"], 4)
+        self.assertEqual(merged.meta["frame_stage_ids"], [1, 1, 2, 3, 4])
+        self.assertEqual([item["stage"] for item in merged.meta["stage_history"]], [1, 2, 3, 4])
 
     @unittest.skipIf(pyclipper is None, "pyclipper is not installed")
     def test_rebuilt_active_emulators_enable_redepo_only_for_integrated_and_model_six(self) -> None:
