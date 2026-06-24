@@ -8,6 +8,7 @@ import re
 import sys
 from typing import Any, Dict, List, Sequence, Tuple
 
+from gapsim.emulation.data_paths import configured_data_paths
 from gapsim.emulation.trench_depo import (
     DEFAULT_TRENCH_POINTS,
     SWEEP_PARAMETER_LABELS,
@@ -21,12 +22,18 @@ from gapsim.ui_qt.views.result_vector_view import ResultVectorView
 Point = Tuple[float, float]
 
 def _default_runs_root() -> Path:
+    data_paths = configured_data_paths()
+    if data_paths is not None:
+        return data_paths.runs_root
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent / "runs" / "trench_depo_emulation"
     return Path("runs") / "trench_depo_emulation"
 
 
 def _default_results_root() -> Path:
+    data_paths = configured_data_paths()
+    if data_paths is not None:
+        return data_paths.results_root
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent / "results" / "trench_depo_emulation"
     return Path("results") / "trench_depo_emulation"

@@ -7,7 +7,11 @@ cd /d "%~dp0"
 set "APP_NAME=GFE"
 set "APP_MODULE=gapsim.emulation.trench_depo_ui"
 set "PYTHON_EXE=%cd%\.venv\Scripts\python.exe"
-set "LOG_DIR=%cd%\runs\trench_depo_emulation"
+if defined LOCALAPPDATA (
+  set "LOG_DIR=%LOCALAPPDATA%\Gapseam\logs"
+) else (
+  set "LOG_DIR=%TEMP%\Gapseam\logs"
+)
 set "LOG_FILE=%LOG_DIR%\run_gfe_last.log"
 set "REBUILT_VENV=0"
 

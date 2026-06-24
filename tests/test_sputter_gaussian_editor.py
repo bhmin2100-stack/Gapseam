@@ -963,6 +963,49 @@ class SputterGaussianEditorTest(unittest.TestCase):
             finally:
                 window.close()
 
+    def test_window_routes_data_files_under_configured_data_root(self) -> None:
+        result = TrenchDepoResult(
+            frame_steps=[0],
+            frame_profiles=[[(0.0, 0.0), (1.0, 0.0)]],
+            frame_voids=[[]],
+            final_profile=[(0.0, 0.0), (1.0, 0.0)],
+            meta={"cycles": 0},
+        )
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            mock.patch.dict(
+                os.environ,
+                {
+                    "QT_QPA_PLATFORM": "offscreen",
+                    "GAPSIM_DATA_ROOT": str(Path(tmpdir) / "shared_data"),
+                },
+                clear=True,
+            ),
+            mock.patch("gapsim.emulation.trench_depo_ui.run_trench_depo", return_value=result),
+            mock.patch("gapsim.emulation.trench_depo_ui.QTimer.singleShot"),
+        ):
+            window = TrenchDepoWindow()
+            try:
+                data_root = Path(tmpdir) / "shared_data"
+
+                self.assertEqual(window._runs_root, data_root.resolve() / "runs" / "trench_depo_emulation")
+                self.assertEqual(window._results_root, data_root.resolve() / "results" / "trench_depo_emulation")
+                self.assertEqual(
+                    window._structure_library_path,
+                    data_root.resolve() / "emulator_research" / "structures.xlsx",
+                )
+                self.assertEqual(
+                    window._parameter_library_path,
+                    data_root.resolve() / "emulator_research" / "parameter_presets.json",
+                )
+                self.assertEqual(window._addon_manager.addons_dir, data_root.resolve() / "addons")
+                self.assertEqual(
+                    window._addon_manager.state_path,
+                    data_root.resolve() / "addons" / "addons_state.json",
+                )
+            finally:
+                window.close()
+
     def test_result_panel_shows_parameters_and_repeat_playback(self) -> None:
         result = TrenchDepoResult(
             frame_steps=[0, 1, 2],

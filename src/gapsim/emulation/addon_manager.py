@@ -8,6 +8,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Sequence
 
+from gapsim.emulation.data_paths import configured_data_paths
+
 
 ADDON_MANIFEST_FILENAME = "addon.json"
 ADDON_LIBRARY_VERSION = 1
@@ -17,6 +19,9 @@ _INVALID_ID_CHARS = re.compile(r"[^A-Za-z0-9_.-]+")
 def _default_addon_root() -> Path:
     import sys
 
+    data_paths = configured_data_paths()
+    if data_paths is not None:
+        return data_paths.addons_root
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent / "addons"
     return Path("addons")

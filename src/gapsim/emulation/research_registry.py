@@ -6,8 +6,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, Optional
 
+from gapsim.emulation.data_paths import configured_data_paths
+
 
 def _default_research_root() -> Path:
+    data_paths = configured_data_paths()
+    if data_paths is not None:
+        return data_paths.research_root
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent / "emulator_research"
     return Path("emulator_research")

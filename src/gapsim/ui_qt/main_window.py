@@ -46,6 +46,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from gapsim.emulation.data_paths import configured_data_paths
 from gapsim.prediction import auto_anchor_spec, sanitize_anchor_spec
 from gapsim.ui_qt.calibrate_dialog import CalibrateDialog
 from gapsim.ui_qt.controllers.smoothing_ctrl import SmoothingController
@@ -1437,11 +1438,17 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _runs_root_dir() -> Path:
+        data_paths = configured_data_paths()
+        if data_paths is not None:
+            return data_paths.root / "runs"
         if getattr(sys, "frozen", False):
             return MainWindow._app_root_dir() / "runs"
         return Path("runs")
 
     def _run_preset_store_path(self) -> Path:
+        data_paths = configured_data_paths()
+        if data_paths is not None:
+            return data_paths.root / "presets" / "run_presets.json"
         return self._app_root_dir() / "presets" / "run_presets.json"
 
     def _load_run_presets(self) -> Dict[str, Dict[str, Any]]:

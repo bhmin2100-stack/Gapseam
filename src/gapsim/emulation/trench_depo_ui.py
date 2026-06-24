@@ -74,6 +74,12 @@ from gapsim.emulation.addon_manager import (
     AddonManager,
 )
 from gapsim.emulation.addon_runtime import AddonLoadResult, load_enabled_addons
+from gapsim.emulation.data_paths import (
+    configure_data_root,
+    configured_data_paths,
+    default_data_root_candidate,
+    ensure_data_paths,
+)
 from gapsim.emulation.structure_library import (
     DEFAULT_EMULATOR_STRUCTURE_SHEETS,
     DEFAULT_STRUCTURE_LIBRARY_PATH,
@@ -2956,15 +2962,39 @@ class TrenchDepoWindow(QMainWindow):
         self._structure_drag_undo_snapshot: Optional[List[Tuple[float, float]]] = None
         self._structure_drag_changed = False
         self._applying_structure_undo = False
+        self._data_paths = configured_data_paths()
+        if self._data_paths is not None:
+            ensure_data_paths(self._data_paths)
+        self._data_root = self._data_paths.root if self._data_paths is not None else None
+        self._runs_root = self._data_paths.runs_root if self._data_paths is not None else Path(DEFAULT_RUNS_ROOT)
+        self._results_root = (
+            self._data_paths.results_root if self._data_paths is not None else Path(DEFAULT_RESULTS_ROOT)
+        )
+        default_structure_library = (
+            self._data_paths.structure_library_path
+            if self._data_paths is not None
+            else DEFAULT_STRUCTURE_LIBRARY_PATH
+        )
+        default_parameter_library = (
+            self._data_paths.parameter_library_path
+            if self._data_paths is not None
+            else DEFAULT_PARAMETER_LIBRARY_PATH
+        )
+        default_addon_root = self._data_paths.addons_root if self._data_paths is not None else DEFAULT_ADDON_ROOT
+        default_addon_state = (
+            self._data_paths.addon_state_path
+            if self._data_paths is not None
+            else DEFAULT_ADDON_STATE_PATH
+        )
         self._structure_library_path = Path(
-            os.environ.get("GAPSIM_STRUCTURE_LIBRARY", str(DEFAULT_STRUCTURE_LIBRARY_PATH))
+            os.environ.get("GAPSIM_STRUCTURE_LIBRARY") or str(default_structure_library)
         )
         self._parameter_library_path = Path(
-            os.environ.get("GAPSIM_PARAMETER_LIBRARY", str(DEFAULT_PARAMETER_LIBRARY_PATH))
+            os.environ.get("GAPSIM_PARAMETER_LIBRARY") or str(default_parameter_library)
         )
         self._addon_manager = AddonManager(
-            addons_dir=Path(os.environ.get("GAPSIM_ADDON_ROOT", str(DEFAULT_ADDON_ROOT))),
-            state_path=Path(os.environ.get("GAPSIM_ADDON_STATE", str(DEFAULT_ADDON_STATE_PATH))),
+            addons_dir=Path(os.environ.get("GAPSIM_ADDON_ROOT") or str(default_addon_root)),
+            state_path=Path(os.environ.get("GAPSIM_ADDON_STATE") or str(default_addon_state)),
         )
         self._addon_runtime_handles: List[Any] = []
         self._addon_load_results: List[AddonLoadResult] = []
@@ -8236,7 +8266,7 @@ class TrenchDepoWindow(QMainWindow):
                     config,
                     result,
                     request_note=str(request_note),
-                    runs_root=DEFAULT_RUNS_ROOT,
+                    runs_root=self._runs_root,
                 )
                 self._update_run_progress(1, 1, label="저장")
             except Exception as exc:  # noqa: BLE001
@@ -8381,7 +8411,7 @@ class TrenchDepoWindow(QMainWindow):
             saved_dirs = export_trench_depo_sweep_runs(
                 cases,
                 request_note=self.edit_request_note.toPlainText(),
-                runs_root=DEFAULT_RUNS_ROOT,
+                runs_root=self._runs_root,
             )
             self._update_run_progress(1, 1, label="저장")
             success = True
@@ -8865,7 +8895,7 @@ class TrenchDepoWindow(QMainWindow):
                 self._result_config,
                 self._result,
                 request_note=self.edit_request_note.toPlainText(),
-                results_root=DEFAULT_RESULTS_ROOT,
+                results_root=self._results_root,
             )
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "결과 JSON 저장", f"결과 저장 실패:\n{exc}")
@@ -8881,7 +8911,7 @@ class TrenchDepoWindow(QMainWindow):
         path, _ = QFileDialog.getOpenFileName(
             self,
             "저장된 Run 불러오기",
-            str(self._last_run_dir or DEFAULT_RUNS_ROOT),
+            str(self._last_run_dir or self._runs_root),
             "JSON (*.json);;All Files (*)",
         )
         if not path:
@@ -8921,8 +8951,51 @@ class TrenchDepoWindow(QMainWindow):
         super().closeEvent(event)
 
 
+def _ensure_startup_data_root() -> bool:
+    data_paths = configured_data_paths()
+    if data_paths is not None:
+        try:
+            ensure_data_paths(data_paths)
+            return True
+        except OSError as exc:
+            QMessageBox.warning(
+                None,
+                "데이터 저장 폴더",
+                f"기존 데이터 저장 폴더를 사용할 수 없습니다.\n{data_paths.root}\n\n{exc}",
+            )
+
+    QMessageBox.information(
+        None,
+        "데이터 저장 폴더 선택",
+        "GFE에서 생성하는 run, 결과 JSON, 구조/파라미터 라이브러리, 애드온 상태를 저장할 폴더를 선택하세요.\n"
+        "다른 버전의 GFE에서도 같은 폴더를 선택하면 저장된 데이터를 그대로 사용할 수 있습니다.",
+    )
+    start_dir = default_data_root_candidate()
+    while True:
+        selected = QFileDialog.getExistingDirectory(
+            None,
+            "GFE 데이터 저장 폴더 선택",
+            str(start_dir),
+            QFileDialog.Option.ShowDirsOnly,
+        )
+        if not selected:
+            return False
+        try:
+            configure_data_root(selected)
+            return True
+        except OSError as exc:
+            QMessageBox.critical(
+                None,
+                "데이터 저장 폴더",
+                f"선택한 폴더를 데이터 저장 폴더로 사용할 수 없습니다.\n{selected}\n\n{exc}",
+            )
+            start_dir = Path(selected)
+
+
 def main() -> int:
     app = QApplication(sys.argv)
+    if not _ensure_startup_data_root():
+        return 0
     window = TrenchDepoWindow()
     replay_arg: Optional[str] = None
     args = list(sys.argv[1:])
