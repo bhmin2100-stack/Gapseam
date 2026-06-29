@@ -6,6 +6,7 @@ from pathlib import Path
 
 from gapsim.emulation.structure_library import (
     DEFAULT_EMULATOR_STRUCTURE_SHEETS,
+    StructureLibraryError,
     delete_structure_sheet,
     ensure_default_structures,
     list_structure_names,
@@ -45,6 +46,18 @@ class StructureLibraryTest(unittest.TestCase):
     def test_sanitize_structure_name_for_excel_sheet_limits(self) -> None:
         self.assertEqual(sanitize_structure_name(" bad/name:*? "), "bad_name___")
         self.assertLessEqual(len(sanitize_structure_name("x" * 80)), 31)
+
+    def test_corrupt_xlsx_reports_structure_library_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "structures.xlsx"
+            path.write_text("not a zip workbook", encoding="utf-8")
+
+            with self.assertRaisesRegex(StructureLibraryError, "not a valid .xlsx"):
+                list_structure_names(path)
+            with self.assertRaisesRegex(StructureLibraryError, "not a valid .xlsx"):
+                read_structure_points(path, DEFAULT_EMULATOR_STRUCTURE_SHEETS[0])
+            with self.assertRaisesRegex(StructureLibraryError, "not a valid .xlsx"):
+                ensure_default_structures(path)
 
 
 if __name__ == "__main__":

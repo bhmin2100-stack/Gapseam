@@ -1006,6 +1006,29 @@ class SputterGaussianEditorTest(unittest.TestCase):
             finally:
                 window.close()
 
+    def test_window_starts_with_corrupt_structure_workbook_by_using_fallback(self) -> None:
+        result = TrenchDepoResult(
+            frame_steps=[0],
+            frame_profiles=[[(0.0, 0.0), (1.0, 0.0)]],
+            frame_voids=[[]],
+            final_profile=[(0.0, 0.0), (1.0, 0.0)],
+            meta={"cycles": 0},
+        )
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            mock.patch("gapsim.emulation.trench_depo_ui.run_trench_depo", return_value=result),
+            mock.patch("gapsim.emulation.trench_depo_ui.QTimer.singleShot"),
+        ):
+            corrupt_workbook = Path(tmpdir) / "structures.xlsx"
+            corrupt_workbook.write_text("not a zip workbook", encoding="utf-8")
+            with mock.patch.dict(os.environ, {"GAPSIM_STRUCTURE_LIBRARY": str(corrupt_workbook)}):
+                window = TrenchDepoWindow()
+            try:
+                self.assertGreaterEqual(len(window._structure_points), 2)
+                self.assertEqual(window._active_structure_sheet_name, "")
+            finally:
+                window.close()
+
     def test_result_panel_shows_parameters_and_repeat_playback(self) -> None:
         result = TrenchDepoResult(
             frame_steps=[0, 1, 2],

@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 from typing import Dict, List, Sequence, Tuple
+from zipfile import BadZipFile
 
 from openpyxl import Workbook, load_workbook
 
@@ -48,7 +49,10 @@ def _coerce_points(points: Sequence[Tuple[float, float]]) -> List[Point]:
 
 def _load_or_create_workbook(path: Path) -> Workbook:
     if path.exists():
-        return load_workbook(path)
+        try:
+            return load_workbook(path)
+        except BadZipFile as exc:
+            raise StructureLibraryError(f"Structure workbook is not a valid .xlsx file: {path}") from exc
     wb = Workbook()
     wb.remove(wb.active)
     return wb
@@ -58,7 +62,10 @@ def list_structure_names(path: Path = DEFAULT_STRUCTURE_LIBRARY_PATH) -> List[st
     workbook_path = Path(path)
     if not workbook_path.exists():
         return []
-    wb = load_workbook(workbook_path, read_only=True, data_only=True)
+    try:
+        wb = load_workbook(workbook_path, read_only=True, data_only=True)
+    except BadZipFile as exc:
+        raise StructureLibraryError(f"Structure workbook is not a valid .xlsx file: {workbook_path}") from exc
     try:
         return list(wb.sheetnames)
     finally:
@@ -69,7 +76,10 @@ def read_structure_points(path: Path, sheet_name: str) -> List[Point]:
     workbook_path = Path(path)
     if not workbook_path.exists():
         raise StructureLibraryError(f"Structure workbook does not exist: {workbook_path}")
-    wb = load_workbook(workbook_path, read_only=True, data_only=True)
+    try:
+        wb = load_workbook(workbook_path, read_only=True, data_only=True)
+    except BadZipFile as exc:
+        raise StructureLibraryError(f"Structure workbook is not a valid .xlsx file: {workbook_path}") from exc
     try:
         if sheet_name not in wb.sheetnames:
             raise StructureLibraryError(f"Structure sheet not found: {sheet_name}")
@@ -124,7 +134,10 @@ def delete_structure_sheet(path: Path, sheet_name: str) -> str:
     if not workbook_path.exists():
         raise StructureLibraryError(f"Structure workbook does not exist: {workbook_path}")
     safe_name = sanitize_structure_name(sheet_name)
-    wb = load_workbook(workbook_path)
+    try:
+        wb = load_workbook(workbook_path)
+    except BadZipFile as exc:
+        raise StructureLibraryError(f"Structure workbook is not a valid .xlsx file: {workbook_path}") from exc
     try:
         if safe_name not in wb.sheetnames:
             raise StructureLibraryError(f"Structure sheet not found: {safe_name}")

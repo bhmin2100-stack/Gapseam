@@ -4641,7 +4641,7 @@ class TrenchDepoWindow(QMainWindow):
         if sheet_name:
             try:
                 return read_structure_points(self._structure_library_path, sheet_name)
-            except StructureLibraryError:
+            except Exception:
                 pass
         return self._fallback_points_for_emulator(number)
 
@@ -5454,7 +5454,7 @@ class TrenchDepoWindow(QMainWindow):
             try:
                 read_structure_points(self._structure_library_path, default_sheet)
                 self._active_structure_sheet_name = default_sheet
-            except StructureLibraryError:
+            except Exception:
                 self._active_structure_sheet_name = ""
         else:
             self._active_structure_sheet_name = ""
