@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from datetime import datetime
 import re
 from pathlib import Path
 from typing import Dict, List, Sequence, Tuple
+from uuid import uuid4
 from zipfile import BadZipFile
 
 from openpyxl import Workbook, load_workbook
@@ -58,6 +60,50 @@ def _load_or_create_workbook(path: Path) -> Workbook:
     return wb
 
 
+def _new_empty_workbook() -> Workbook:
+    wb = Workbook()
+    wb.remove(wb.active)
+    return wb
+
+
+def _backup_invalid_workbook(path: Path) -> Path:
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup = path.with_name(f"{path.stem}.invalid_{ts}{path.suffix}")
+    for idx in range(1000):
+        candidate = backup if idx == 0 else path.with_name(f"{path.stem}.invalid_{ts}_{idx:03d}{path.suffix}")
+        if candidate.exists():
+            continue
+        path.replace(candidate)
+        return candidate
+    raise StructureLibraryError(f"Could not create backup for invalid structure workbook: {path}")
+
+
+def _load_or_create_workbook_for_write(path: Path) -> Workbook:
+    if not path.exists():
+        return _new_empty_workbook()
+    try:
+        return load_workbook(path)
+    except BadZipFile:
+        _backup_invalid_workbook(path)
+        return _new_empty_workbook()
+
+
+def _save_workbook_atomic(wb: Workbook, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.stem}.{uuid4().hex}.tmp{path.suffix}")
+    try:
+        wb.save(tmp_path)
+        try:
+            check = load_workbook(tmp_path, read_only=True, data_only=True)
+        except BadZipFile as exc:
+            raise StructureLibraryError(f"Saved structure workbook failed validation: {path}") from exc
+        else:
+            check.close()
+        tmp_path.replace(path)
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
 def list_structure_names(path: Path = DEFAULT_STRUCTURE_LIBRARY_PATH) -> List[str]:
     workbook_path = Path(path)
     if not workbook_path.exists():
@@ -111,21 +157,23 @@ def save_structure_points(
     workbook_path.parent.mkdir(parents=True, exist_ok=True)
     safe_name = sanitize_structure_name(sheet_name)
     coerced = _coerce_points(points)
-    wb = _load_or_create_workbook(workbook_path)
-    if safe_name in wb.sheetnames:
-        index = wb.sheetnames.index(safe_name)
-        del wb[safe_name]
-        ws = wb.create_sheet(safe_name, index)
-    else:
-        ws = wb.create_sheet(safe_name)
-    ws.append(["x", "y"])
-    for x, y in coerced:
-        ws.append([float(x), float(y)])
-    ws.freeze_panes = "A2"
-    ws.column_dimensions["A"].width = 16
-    ws.column_dimensions["B"].width = 16
-    wb.save(workbook_path)
-    wb.close()
+    wb = _load_or_create_workbook_for_write(workbook_path)
+    try:
+        if safe_name in wb.sheetnames:
+            index = wb.sheetnames.index(safe_name)
+            del wb[safe_name]
+            ws = wb.create_sheet(safe_name, index)
+        else:
+            ws = wb.create_sheet(safe_name)
+        ws.append(["x", "y"])
+        for x, y in coerced:
+            ws.append([float(x), float(y)])
+        ws.freeze_panes = "A2"
+        ws.column_dimensions["A"].width = 16
+        ws.column_dimensions["B"].width = 16
+        _save_workbook_atomic(wb, workbook_path)
+    finally:
+        wb.close()
     return safe_name
 
 
@@ -143,7 +191,7 @@ def delete_structure_sheet(path: Path, sheet_name: str) -> str:
             raise StructureLibraryError(f"Structure sheet not found: {safe_name}")
         del wb[safe_name]
         if wb.sheetnames:
-            wb.save(workbook_path)
+            _save_workbook_atomic(wb, workbook_path)
         else:
             wb.close()
             workbook_path.unlink(missing_ok=True)
@@ -160,7 +208,7 @@ def ensure_default_structures(
 ) -> List[str]:
     workbook_path = Path(path)
     workbook_path.parent.mkdir(parents=True, exist_ok=True)
-    wb = _load_or_create_workbook(workbook_path)
+    wb = _load_or_create_workbook_for_write(workbook_path)
     written: List[str] = []
     try:
         for sheet_name, points in default_emulator_structures().items():
@@ -180,7 +228,8 @@ def ensure_default_structures(
             ws.column_dimensions["A"].width = 16
             ws.column_dimensions["B"].width = 16
             written.append(safe_name)
-        wb.save(workbook_path)
+        if written or not workbook_path.exists():
+            _save_workbook_atomic(wb, workbook_path)
     finally:
         wb.close()
     return written

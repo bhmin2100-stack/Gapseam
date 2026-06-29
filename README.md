@@ -21,6 +21,8 @@ GFE(Gap Fill Emulator)는 Gap Fill 공정 아이디어를 빠르게 실험하기
 
 실패 화면에는 마지막 로그 80줄도 같이 표시됩니다. `BadZipFile` 또는 `File is not a zip file`이 보이면 데이터 폴더의 `emulator_research\structures.xlsx`가 손상됐거나, pip가 받은 wheel/cache 파일이 손상된 경우입니다.
 
+구조 저장 Excel은 프로그램 폴더가 아니라 처음 선택한 GFE 데이터 폴더의 `emulator_research\structures.xlsx`에 저장됩니다. 구조를 저장할 때는 임시 `.xlsx` 파일을 먼저 만들고 열기 검증 후 원본을 교체하므로 저장 중 실패해도 기존 파일이 최대한 보존됩니다. 기존 `structures.xlsx`가 이미 손상된 경우에는 `structures.invalid_YYYYMMDD_HHMMSS.xlsx`로 백업하고 새 구조 워크북을 만듭니다.
+
 `.venv` 삭제가 실패했다는 메시지가 나오면 열려 있는 GFE/Python 창을 모두 닫고 `run_gfe.bat`를 다시 실행하세요.
 
 ## Python 없이 실행하는 배포 ZIP

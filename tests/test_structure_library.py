@@ -47,7 +47,7 @@ class StructureLibraryTest(unittest.TestCase):
         self.assertEqual(sanitize_structure_name(" bad/name:*? "), "bad_name___")
         self.assertLessEqual(len(sanitize_structure_name("x" * 80)), 31)
 
-    def test_corrupt_xlsx_reports_structure_library_error(self) -> None:
+    def test_corrupt_xlsx_reports_structure_library_error_for_read(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "structures.xlsx"
             path.write_text("not a zip workbook", encoding="utf-8")
@@ -56,8 +56,31 @@ class StructureLibraryTest(unittest.TestCase):
                 list_structure_names(path)
             with self.assertRaisesRegex(StructureLibraryError, "not a valid .xlsx"):
                 read_structure_points(path, DEFAULT_EMULATOR_STRUCTURE_SHEETS[0])
-            with self.assertRaisesRegex(StructureLibraryError, "not a valid .xlsx"):
-                ensure_default_structures(path)
+
+    def test_save_structure_recovers_corrupt_workbook_with_backup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "structures.xlsx"
+            path.write_text("not a zip workbook", encoding="utf-8")
+
+            saved_name = save_structure_points(path, "Recovered", [(-1.0, 0.0), (1.0, -2.0)])
+
+            self.assertEqual(saved_name, "Recovered")
+            self.assertEqual(list_structure_names(path), ["Recovered"])
+            self.assertEqual(read_structure_points(path, "Recovered"), [(-1.0, 0.0), (1.0, -2.0)])
+            backups = list(Path(tmp).glob("structures.invalid_*.xlsx"))
+            self.assertEqual(len(backups), 1)
+            self.assertEqual(backups[0].read_text(encoding="utf-8"), "not a zip workbook")
+
+    def test_export_default_structures_recovers_corrupt_workbook_with_backup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "structures.xlsx"
+            path.write_text("not a zip workbook", encoding="utf-8")
+
+            written = ensure_default_structures(path)
+
+            self.assertEqual(written, [DEFAULT_EMULATOR_STRUCTURE_SHEETS[0]])
+            self.assertEqual(list_structure_names(path), [DEFAULT_EMULATOR_STRUCTURE_SHEETS[0]])
+            self.assertEqual(len(list(Path(tmp).glob("structures.invalid_*.xlsx"))), 1)
 
 
 if __name__ == "__main__":
