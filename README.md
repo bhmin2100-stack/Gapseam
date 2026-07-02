@@ -11,15 +11,15 @@ GFE(Gap Fill Emulator)는 Gap Fill 공정 아이디어를 빠르게 실험하기
 3. ZIP 압축을 풉니다.
 4. 압축을 푼 폴더 안의 `run_gfe.bat`를 더블클릭합니다.
 
-처음 실행하면 `.venv` 가상환경과 필요한 Python 패키지를 자동으로 준비합니다. 소스 ZIP 방식은 PC에 Python 3.10 이상이 설치되어 있어야 합니다.
+처음 실행하면 `.venv` 가상환경과 필요한 Python 패키지를 자동으로 준비합니다. 소스 ZIP 방식은 PC에 Python 3.10 이상이 설치되어 있어야 합니다. Python이 없으면 `run_gfe.bat`가 설치 상태를 진단하고, Windows `winget`이 사용 가능한 PC에서는 Python 3.11 설치를 물어본 뒤 시도합니다. 회사 보안 정책이 소프트웨어 설치나 pip 접속을 막는 PC에서는 아래의 portable ZIP 방식을 쓰는 편이 안정적입니다.
 
-`run_gfe.bat`는 기존 `.venv`가 깨졌거나 Python 경로가 바뀐 경우 자동으로 `.venv`를 다시 만들고 재시도합니다. 그래도 실행이 실패하면 아래 파일에 마지막 실행 로그가 남습니다.
+`run_gfe.bat`는 기존 `.venv`가 깨졌거나 Python 경로가 바뀐 경우 자동으로 `.venv`를 다시 만들고 재시도합니다. pip 캐시 문제를 줄이기 위해 dependency 설치 실패 시 캐시 없이 한 번 더 재시도합니다. 그래도 실행이 실패하면 아래 파일에 마지막 실행 로그와 Python/pip 진단 내용이 남습니다.
 
 ```text
 %LOCALAPPDATA%\Gapseam\logs\run_gfe_last.log
 ```
 
-실패 화면에는 마지막 로그 80줄도 같이 표시됩니다. `BadZipFile` 또는 `File is not a zip file`이 보이면 데이터 폴더의 `emulator_research\structures.xlsx`가 손상됐거나, pip가 받은 wheel/cache 파일이 손상된 경우입니다.
+실패 화면에는 마지막 로그 80줄도 같이 표시됩니다. `Failed to install Python dependencies`가 보이면 Python 자체는 잡혔지만 회사 proxy/security가 pip 다운로드를 막았거나, 인터넷 연결이 없거나, pip cache가 손상된 경우가 많습니다. `BadZipFile` 또는 `File is not a zip file`이 보이면 데이터 폴더의 `emulator_research\structures.xlsx`가 손상됐거나, pip가 받은 wheel/cache 파일이 손상된 경우입니다.
 
 구조 저장 Excel은 프로그램 폴더가 아니라 처음 선택한 GFE 데이터 폴더의 `emulator_research\structures.xlsx`에 저장됩니다. 구조를 저장할 때는 임시 `.xlsx` 파일을 먼저 만들고 열기 검증 후 원본을 교체하므로 저장 중 실패해도 기존 파일이 최대한 보존됩니다. 기존 `structures.xlsx`가 이미 손상된 경우에는 `structures.invalid_YYYYMMDD_HHMMSS.xlsx`로 백업하고 새 구조 워크북을 만듭니다.
 
@@ -46,6 +46,8 @@ build_gfe_portable.bat
 ```
 
 빌드가 끝나면 `dist/GFE_portable_*.zip`이 생성됩니다.
+
+이 빌드 방식도 Python 3.10 이상과 pip 다운로드가 필요합니다. Python이 없으면 `build_gfe_portable.bat`도 `winget` 설치를 물어본 뒤 시도하지만, 회사 PC에서 막히면 GitHub Actions가 만든 `GFE-windows-portable` artifact를 사용하는 것이 좋습니다.
 
 ## Addon 폴더
 

@@ -16,6 +16,8 @@ from PySide6.QtWidgets import (
     QGraphicsView,
 )
 
+from gapsim.ui_qt.views.watermark import draw_viewport_watermark
+
 Point = Tuple[float, float]  # USER coords (x, y_user)
 FieldOverlaySample = Tuple[float, float, float]
 TransportLineSample = Tuple[float, float, float, float, float]
@@ -1043,6 +1045,7 @@ class ResultVectorView(QGraphicsView):
             x_axis_scene_y=x_axis_scene_y,
             y_axis_scene_x=y_axis_scene_x,
         )
+        draw_viewport_watermark(painter, self.viewport().rect())
 
     def _draw_axis_labels(
         self,

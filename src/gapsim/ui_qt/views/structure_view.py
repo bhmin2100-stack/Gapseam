@@ -18,6 +18,8 @@ from PySide6.QtWidgets import (
     QGraphicsView,
 )
 
+from gapsim.ui_qt.views.watermark import draw_viewport_watermark
+
 Point = Tuple[float, float]  # USER coords (x, y_user), depth is negative
 
 
@@ -800,6 +802,10 @@ class StructureView(QGraphicsView):
             y += major_step
 
         painter.restore()
+
+    def drawForeground(self, painter, rect) -> None:
+        super().drawForeground(painter, rect)
+        draw_viewport_watermark(painter, self.viewport().rect())
 
     def wheelEvent(self, event) -> None:
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
