@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import replace
 import math
@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from PySide6.QtCore import QObject, QEvent, QMimeData, QPointF, QRectF, Qt, QThread, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import (
+    QAction,
     QColor,
     QBrush,
     QDesktopServices,
@@ -46,6 +47,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
+    QProgressDialog,
     QProgressBar,
     QPushButton,
     QScrollArea,
@@ -54,10 +56,12 @@ from PySide6.QtWidgets import (
     QStatusBar,
     QSplitter,
     QTabWidget,
+    QToolBar,
     QVBoxLayout,
     QWidget,
 )
 
+from gapsim import updater
 from gapsim.emulation.research_registry import MAX_EMULATOR_NUMBER
 from gapsim.emulation.parameter_library import (
     DEFAULT_PARAMETER_LIBRARY_PATH,
@@ -2717,6 +2721,41 @@ class SplitTestWindow(QMainWindow):
         super().closeEvent(event)
 
 
+class UpdateCheckWorker(QObject):
+    finished = Signal(object, object, bool)
+
+    def __init__(self, manual: bool) -> None:
+        super().__init__()
+        self._manual = bool(manual)
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            self.finished.emit(updater.fetch_update_info(), None, self._manual)
+        except Exception as exc:  # noqa: BLE001
+            self.finished.emit(None, exc, self._manual)
+
+
+class UpdateDownloadWorker(QObject):
+    progress = Signal(int, int)
+    finished = Signal(object, object)
+
+    def __init__(self, info: updater.UpdateInfo) -> None:
+        super().__init__()
+        self._info = info
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            staged_root = updater.download_update(
+                self._info,
+                progress=lambda done, total: self.progress.emit(int(done), int(total)),
+            )
+            self.finished.emit(staged_root, None)
+        except Exception as exc:  # noqa: BLE001
+            self.finished.emit(None, exc)
+
+
 class _EmulationRunWorker(QObject):
     progress = Signal(int, int, str)
     finished = Signal(object, object, bool, object, bool, str)
@@ -2917,6 +2956,11 @@ class TrenchDepoWindow(QMainWindow):
         self._preview_result_cache: dict[tuple[object, ...], TrenchDepoResult] = {}
         self._emulation_thread: Optional[QThread] = None
         self._emulation_worker: Optional[_EmulationRunWorker] = None
+        self._update_check_thread: Optional[QThread] = None
+        self._update_check_worker: Optional[UpdateCheckWorker] = None
+        self._update_download_thread: Optional[QThread] = None
+        self._update_download_worker: Optional[UpdateDownloadWorker] = None
+        self._update_progress_dialog: Optional[QProgressDialog] = None
         self._emulator_run_timer = QTimer(self)
         self._emulator_run_timer.setSingleShot(True)
         self._emulator_run_timer.setInterval(150)
@@ -4435,6 +4479,12 @@ class TrenchDepoWindow(QMainWindow):
         central = QWidget()
         central.setLayout(root)
         self.setCentralWidget(central)
+        toolbar = QToolBar("GFE")
+        toolbar.setMovable(False)
+        self.addToolBar(toolbar)
+        self.action_check_updates = QAction("업데이트 확인", self)
+        self.action_check_updates.triggered.connect(self.check_updates_manually)
+        toolbar.addAction(self.action_check_updates)
         self._install_value_control_wheel_guards()
 
         self.btn_run.clicked.connect(self.run_emulation)
@@ -4561,6 +4611,7 @@ class TrenchDepoWindow(QMainWindow):
         self.sync_inhibition_profile_from_spins()
         self._sync_field_overlay_toggles()
         self._set_workflow_step("structure")
+        QTimer.singleShot(1500, self.check_updates_on_startup)
 
     def _install_value_control_wheel_guards(self) -> None:
         for widget in [
@@ -8940,6 +8991,166 @@ class TrenchDepoWindow(QMainWindow):
         ok = QDesktopServices.openUrl(QUrl.fromLocalFile(str(run_dir)))
         if not ok:
             QMessageBox.warning(self, "트렌치 Depo 에뮬레이션", f"저장 폴더 열기 실패:\n{run_dir}")
+
+    def check_updates_on_startup(self) -> None:
+        self.start_update_check(manual=False)
+
+    def check_updates_manually(self) -> None:
+        self.start_update_check(manual=True)
+
+    def start_update_check(self, *, manual: bool) -> None:
+        if self._update_check_thread is not None:
+            if manual:
+                self.statusBar().showMessage("업데이트 확인이 이미 진행 중입니다.", 3000)
+            return
+        if not manual and not updater.is_packaged_app():
+            return
+        if manual:
+            self.statusBar().showMessage("업데이트 확인 중...", 4000)
+
+        thread = QThread(self)
+        worker = UpdateCheckWorker(manual)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self.on_update_check_finished)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(lambda t=thread: self.cleanup_update_check_thread(t))
+        self._update_check_thread = thread
+        self._update_check_worker = worker
+        thread.start()
+
+    def cleanup_update_check_thread(self, thread: QThread) -> None:
+        if self._update_check_thread is thread:
+            self._update_check_thread = None
+            self._update_check_worker = None
+
+    def on_update_check_finished(self, info: object, error: object, manual: bool) -> None:
+        if error:
+            if manual:
+                QMessageBox.warning(self, "업데이트 확인", str(error))
+            return
+        if not isinstance(info, updater.UpdateInfo):
+            return
+        if not info.is_available:
+            if manual:
+                QMessageBox.information(self, "업데이트 확인", f"현재 최신 버전입니다.\n\n현재: {info.current_label}")
+            return
+        if not updater.is_packaged_app():
+            if manual:
+                QMessageBox.information(
+                    self,
+                    "업데이트 확인",
+                    "새 배포 버전은 있지만 현재는 소스 실행 상태입니다.\n"
+                    "자동 교체는 패키징된 GFE.exe에서만 수행합니다.",
+                )
+            return
+        self.show_update_prompt(info)
+
+    def show_update_prompt(self, info: updater.UpdateInfo) -> None:
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("업데이트")
+        notes = f"\n\n변경 내용:\n{info.notes}" if info.notes else ""
+        dialog.setText(
+            "새 버전이 있습니다.\n\n"
+            f"현재: {info.current_label}\n"
+            f"최신: {info.latest_label}{notes}\n\n"
+            "업데이트하면 GFE가 종료된 뒤 전체 GFE 폴더가 새 버전으로 교체되고 다시 실행됩니다.\n"
+            "%APPDATA%\\Gapseam 설정과 Documents\\GapseamData 사용자 데이터는 변경하지 않습니다."
+        )
+        update_button = dialog.addButton("지금 업데이트", QMessageBox.ButtonRole.AcceptRole)
+        dialog.addButton("나중에", QMessageBox.ButtonRole.RejectRole)
+        dialog.exec()
+        if dialog.clickedButton() is update_button:
+            self.start_update_download(info)
+
+    def start_update_download(self, info: updater.UpdateInfo) -> None:
+        if install_error := updater.update_install_error():
+            QMessageBox.warning(self, "업데이트", install_error)
+            return
+        if self._update_download_thread is not None:
+            self.statusBar().showMessage("업데이트 다운로드가 이미 진행 중입니다.", 3000)
+            return
+
+        dialog = QProgressDialog("업데이트 ZIP 다운로드 중...", "", 0, 100, self)
+        dialog.setWindowTitle("업데이트")
+        dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        dialog.setMinimumDuration(0)
+        dialog.setAutoClose(False)
+        dialog.setCancelButton(None)
+        dialog.setValue(0)
+        dialog.show()
+
+        thread = QThread(self)
+        worker = UpdateDownloadWorker(info)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progress.connect(self.on_update_download_progress)
+        worker.finished.connect(self.on_update_download_finished)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(lambda t=thread: self.cleanup_update_download_thread(t))
+        self._update_progress_dialog = dialog
+        self._update_download_thread = thread
+        self._update_download_worker = worker
+        thread.start()
+
+    def cleanup_update_download_thread(self, thread: QThread) -> None:
+        if self._update_download_thread is thread:
+            self._update_download_thread = None
+            self._update_download_worker = None
+
+    def on_update_download_progress(self, downloaded: int, total: int) -> None:
+        dialog = self._update_progress_dialog
+        if dialog is None:
+            return
+        if total > 0:
+            percent = max(0, min(100, int(downloaded * 100 / total)))
+            dialog.setRange(0, 100)
+            dialog.setValue(percent)
+            dialog.setLabelText(
+                f"업데이트 ZIP 다운로드 중... {self.format_bytes(downloaded)} / {self.format_bytes(total)}"
+            )
+        else:
+            dialog.setRange(0, 0)
+            dialog.setLabelText(f"업데이트 ZIP 다운로드 중... {self.format_bytes(downloaded)}")
+
+    def on_update_download_finished(self, staged_root: object, error: object) -> None:
+        dialog = self._update_progress_dialog
+        self._update_progress_dialog = None
+        if dialog is not None:
+            dialog.close()
+        if error:
+            QMessageBox.warning(
+                self,
+                "업데이트",
+                "업데이트 ZIP 다운로드 또는 검증에 실패했습니다.\n\n"
+                f"{error}\n\n"
+                f"Release: {updater.selected_channel().release_page_url}",
+            )
+            return
+        if not isinstance(staged_root, Path):
+            QMessageBox.warning(self, "업데이트", "업데이트 staging 폴더를 확인할 수 없습니다.")
+            return
+        try:
+            updater.launch_self_update(staged_root)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "업데이트", f"업데이트 적용을 시작하지 못했습니다.\n\n{exc}")
+            return
+        app = QApplication.instance()
+        if app:
+            app.quit()
+
+    @staticmethod
+    def format_bytes(value: int) -> str:
+        size = float(max(0, int(value)))
+        for unit in ("B", "KB", "MB", "GB"):
+            if size < 1024 or unit == "GB":
+                return f"{size:.1f} {unit}" if unit != "B" else f"{int(size)} {unit}"
+            size /= 1024
+        return f"{int(size)} B"
 
     def closeEvent(self, event) -> None:  # noqa: N802, ANN001
         if self._emulation_thread is not None and self._emulation_thread.isRunning():
