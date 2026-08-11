@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 from dataclasses import replace
+import json
 import math
 import os
 import platform
@@ -9204,6 +9205,13 @@ def _ensure_startup_data_root() -> bool:
 
 
 def main() -> int:
+    if len(sys.argv) >= 3 and sys.argv[1] == "--build-info-json":
+        Path(sys.argv[2]).write_text(
+            json.dumps(updater.build_info_dict(), ensure_ascii=False),
+            encoding="utf-8",
+        )
+        return 0
+
     app = QApplication(sys.argv)
     if not _ensure_startup_data_root():
         return 0

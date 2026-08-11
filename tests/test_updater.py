@@ -85,6 +85,23 @@ class UpdaterTests(unittest.TestCase):
         self.assertEqual(info.latest_label, "0.1.2 (build-7)")
         self.assertEqual(info.notes, "Line 1")
 
+    def test_same_company_version_detects_new_company_build_id(self) -> None:
+        info = updater.UpdateInfo(
+            "0.1.1", "company-old", "", "0.1.1", "company-new", "", "", "", "",
+            channel="company", build_id_updates=True,
+        )
+        self.assertTrue(info.is_available)
+
+    def test_company_channel_uses_actual_enterprise_repository(self) -> None:
+        self.assertEqual(
+            updater.COMPANY_CHANNEL.release_api_url,
+            "http://github.samsungds.net/api/v3/repos/bh2-min/Gapseam/releases/latest",
+        )
+        self.assertEqual(
+            updater.COMPANY_CHANNEL.release_page_url,
+            "http://github.samsungds.net/bh2-min/Gapseam/releases",
+        )
+
     def test_sha256_mismatch_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "bad.zip"
@@ -172,6 +189,8 @@ class UpdaterTests(unittest.TestCase):
         self.assertIn('UPDATE_CHANNEL = "company"', text)
         self.assertIn("GFE.spec", text)
         self.assertIn("Gapseam.zip", text)
+        self.assertIn("--build-info-json", text)
+        self.assertIn("Remove-BuildInfoBytecode", text)
 
     def test_download_update_stages_verified_zip(self) -> None:
         payload = _zip_bytes({"GFE/GFE.exe": b"exe"})

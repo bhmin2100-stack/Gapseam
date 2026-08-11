@@ -35,8 +35,8 @@ APP_EXE_NAME = "GFE.exe"
 APP_FOLDER_NAME = "GFE"
 PERSONAL_RELEASE_API_URL = "https://api.github.com/repos/bhmin2100-stack/Gapseam/releases/latest"
 PERSONAL_RELEASE_PAGE_URL = "https://github.com/bhmin2100-stack/Gapseam/releases"
-COMPANY_RELEASE_API_URL = "https://github.samsungds.net/api/v3/repos/bh2-min/Gapseam/releases/latest"
-COMPANY_RELEASE_PAGE_URL = "https://github.samsungds.net/bh2-min/Gapseam/releases"
+COMPANY_RELEASE_API_URL = "http://github.samsungds.net/api/v3/repos/bh2-min/Gapseam/releases/latest"
+COMPANY_RELEASE_PAGE_URL = "http://github.samsungds.net/bh2-min/Gapseam/releases"
 USER_AGENT = f"Gapseam-GFE/{__version__}"
 
 
@@ -49,10 +49,11 @@ class UpdateChannel:
     name: str
     release_api_url: str
     release_page_url: str
+    build_id_updates: bool = False
 
 
 PERSONAL_CHANNEL = UpdateChannel("personal", PERSONAL_RELEASE_API_URL, PERSONAL_RELEASE_PAGE_URL)
-COMPANY_CHANNEL = UpdateChannel("company", COMPANY_RELEASE_API_URL, COMPANY_RELEASE_PAGE_URL)
+COMPANY_CHANNEL = UpdateChannel("company", COMPANY_RELEASE_API_URL, COMPANY_RELEASE_PAGE_URL, build_id_updates=True)
 
 
 @dataclass(frozen=True)
@@ -71,10 +72,16 @@ class UpdateInfo:
     size: int = 0
     notes: str = ""
     channel: str = "personal"
+    build_id_updates: bool = False
 
     @property
     def is_available(self) -> bool:
-        return compare_versions(self.latest_version, self.current_version) > 0
+        version_cmp = compare_versions(self.latest_version, self.current_version)
+        if version_cmp != 0:
+            return version_cmp > 0
+        if not self.build_id_updates or self.current_build_id in ("", "local"):
+            return False
+        return bool(self.latest_build_id and self.latest_build_id != self.current_build_id)
 
     @property
     def current_label(self) -> str:
@@ -103,6 +110,17 @@ def current_version() -> str:
 
 def current_build_id() -> str:
     return str(BUILD_ID or "local")
+
+
+def build_info_dict() -> dict[str, str]:
+    return {
+        "package_version": __version__,
+        "app_version": current_version(),
+        "build_commit": str(BUILD_COMMIT),
+        "build_id": current_build_id(),
+        "build_date": str(BUILD_DATE),
+        "update_channel": str(UPDATE_CHANNEL),
+    }
 
 
 def compare_versions(left: str, right: str) -> int:
@@ -165,6 +183,7 @@ def _update_info_from_release(channel: UpdateChannel, release: dict, manifest: d
         size=int(manifest.get("size") or (zip_asset or {}).get("size") or 0),
         notes=str(manifest.get("notes") or release.get("body") or "").strip(),
         channel=channel.name,
+        build_id_updates=channel.build_id_updates,
     )
 
 
