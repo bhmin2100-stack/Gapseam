@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -29,6 +30,10 @@ from gapsim.emulation.model4_redeposition import (
     compute_arc_weights,
     compute_redeposition,
 )
+from gapsim.engine.segment_index import SegmentIndex
+from gapsim.engine.profile_regularization import fair_profile_implicit
+from gapsim.engine.incident_ions import source_integral, validate_incident_parameters
+from gapsim.engine import typical_cvd
 
 Point = Tuple[float, float]
 
@@ -105,6 +110,9 @@ class TrenchDepoConfig:
     reflected_ion_microtrench_weight: float = 1.0
     reflected_ion_range_a: float = 1600.0
     redepo_enabled: bool = False
+    redepo_incident_los_enabled: bool = False
+    redepo_incident_sigma_deg: float = 10.0
+    redepo_incident_ray_count: int = 25
     redepo_source_model: str = "model2"
     redepo_efficiency_pct: float = 25.0
     redepo_emit_power: float = 1.0
@@ -129,6 +137,12 @@ class TrenchDepoConfig:
     closure_redepo_survival_penalty: float = 0.85
     closure_redepo_smoothing_a: float = 160.0
     deposition_depth_enabled: bool = False
+    cvd_enabled: bool = False
+    cvd_overhang_pct: float = 30.0
+    cvd_cusping_pct: float = 20.0
+    cvd_bottom_ratio_pct: float = 50.0
+    cvd_upper_length_a: float = 200.0
+    cvd_depth_power: float = 1.2
     deposition_feature_type: str = "hole"
     deposition_feature_width_a: float = 240.0
     deposition_feature_depth_a: float = 4700.0
@@ -197,6 +211,11 @@ class _ConstantFluxModel(FluxModel):
 
 
 SWEEP_PARAMETER_LABELS: Dict[str, str] = {
+    "cvd_overhang_pct": "CVD Overhang %",
+    "cvd_cusping_pct": "CVD Cusping %",
+    "cvd_bottom_ratio_pct": "CVD bottom growth %",
+    "cvd_upper_length_a": "CVD upper length A",
+    "cvd_depth_power": "CVD depth curve",
     "cycles": "Cycles",
     "angstrom_per_cycle": "Depo A/CYC",
     "sputter_strength_a_per_cycle": "Etch A/CYC",
@@ -1237,6 +1256,25 @@ def _apply_depth_post_closure_fill(
     state.meta["depth_post_closure_last_fill_area_a2"] = float(filled_area)
 
 
+def _apply_typical_cvd_step(state, cfg, *, deposition_a, reparam_ds_a, inhibition_flux=None):
+    pts = normalize_surface_order(state.surface.points)
+    if len(pts) < 2 or deposition_a <= 0:
+        return
+    flux = typical_cvd.growth_ratios(pts, cfg)
+    if inhibition_flux is not None:
+        flux = [a*b for a, b in zip(flux, inhibition_flux)]
+    trapped = OffsetBoolean.collect_void_air(state)
+    proposed = VertexNormalPropagator().advance(pts, flux, deposition_a)
+    cleaned, solid = TopologyCleanup().cleanup(proposed, state, solid_merge_mode="union")
+    if trapped:
+        solid = _clip_difference(solid, trapped)
+        cleaned = _extract_surface_from_solid(state, solid, cleaned)
+    if solid:
+        state.solid_paths_i = solid
+    state.surface.points = equal_arc_resample(cleaned, reparam_ds_a)
+    state.meta["typical_cvd_flux_range_last"] = [min(flux), max(flux)]
+
+
 def _apply_depth_deposition_step(
     state: SimulationState,
     cfg: TrenchDepoConfig,
@@ -1247,6 +1285,9 @@ def _apply_depth_deposition_step(
 ) -> None:
     state.meta["dr"] = float(deposition_a)
     state.meta["reparam_ds"] = float(reparam_ds_a)
+    if cfg.cvd_enabled:
+        _apply_typical_cvd_step(state, cfg, deposition_a=deposition_a, reparam_ds_a=reparam_ds_a)
+        return
     model = _DepthDependentDepositionFluxModel(
         feature_type=cfg.deposition_feature_type,
         feature_width_a=cfg.deposition_feature_width_a,
@@ -1317,7 +1358,7 @@ def _apply_inhibition_deposition_step(
         inhibition_peald_recombination_pct=cfg.inhibition_peald_recombination_pct,
         inhibition_smoothing_a=cfg.inhibition_smoothing_a,
         reparam_ds_a=reparam_ds_a,
-        include_depth_depletion=include_depth_depletion,
+        include_depth_depletion=include_depth_depletion and not cfg.cvd_enabled,
     )
     pts = normalize_surface_order(state.surface.points)
     if len(pts) < 2 or deposition_a <= 0.0:
@@ -1326,6 +1367,10 @@ def _apply_inhibition_deposition_step(
     flux = model.compute_flux(state)
     if len(flux) != len(pts):
         flux = [1.0 for _ in pts]
+    if cfg.cvd_enabled:
+        _apply_typical_cvd_step(state, cfg, deposition_a=deposition_a,
+                               reparam_ds_a=reparam_ds_a, inhibition_flux=flux)
+        return
     proposed = VertexNormalPropagator().advance(pts, flux, deposition_a)
     positive = [max(0.0, float(v)) for v in flux]
     mean_flux = sum(positive) / float(len(positive)) if positive else 1.0
@@ -1723,6 +1768,7 @@ def _apply_direct_sputter_step(
     sputter_width_deg: float,
     sputter_smoothing_a: float,
     reparam_ds_a: float,
+    regularization_step_fraction: float = 1.0,
     ion_transmission_enabled: bool = False,
     ion_transmission_override: Optional[float] = None,
     ion_transmission_start_depth_pct: float = 0.0,
@@ -1738,14 +1784,26 @@ def _apply_direct_sputter_step(
     reflected_ion_bowing_weight: float = 0.75,
     reflected_ion_microtrench_weight: float = 1.0,
     reflected_ion_range_a: float = 1600.0,
+    prepared_geometry=None,
+    fields_only: bool = False,
+    incident_los_enabled: bool = False,
+    incident_sigma_deg: float = 10.0,
+    incident_ray_count: int = 25,
 ) -> Tuple[List[float], List[float], float]:
-    grown_solid = OffsetBoolean.grow_solid_external_air_limited(state, dr_ref=deposition_a)
-    grown_surface = _extract_surface_from_solid(state, grown_solid, state.surface.points)
-    grown_surface = equal_arc_resample(grown_surface, reparam_ds_a)
+    if prepared_geometry is None:
+        grown_solid = OffsetBoolean.grow_solid_external_air_limited(state, dr_ref=deposition_a)
+        grown_surface = _extract_surface_from_solid(state, grown_solid, state.surface.points)
+        grown_surface = equal_arc_resample(grown_surface, reparam_ds_a)
+    else:
+        grown_solid, grown_surface = prepared_geometry
     smooth_radius = max(0, int(round(float(sputter_smoothing_a) / max(float(reparam_ds_a), 1e-9))))
     raw_normals = vertex_air_normals(grown_surface)
     normals = _smooth_unit_vectors(raw_normals, smooth_radius)
-    angles = _incident_angles_from_normals_deg(raw_normals)
+    # Use the same resolved surface orientation for yield and displacement.
+    # Raw polygon tangents fluctuate after Boolean cleanup/resampling; applying
+    # their nonlinear yield to a separately smoothed displacement normal feeds
+    # grid-scale oscillations back into the next cycle.
+    angles = _incident_angles_from_normals_deg(normals)
     responses = [
         direct_sputter_angle_response(
             angle,
@@ -1782,6 +1840,16 @@ def _apply_direct_sputter_step(
         float(etch_a) * _clamp01(float(factor))
         for etch_a, factor in zip(etch_values, ion_factors)
     ]
+    if incident_los_enabled:
+        raw, exposed, _flux = source_integral(
+            grown_surface, normals, sigma=incident_sigma_deg, rays=incident_ray_count,
+            peak=sputter_peak_angle_deg, width=sputter_width_deg, amplitude=sputter_peak_pct / 100.0,
+        )
+        # Replace the heuristic source, including its cutoff/smoothing, rather
+        # than attenuating it twice. Preserve the research runner's arithmetic.
+        etch_values = (raw * sputter_strength_a).tolist()
+        effective_etch_values = (exposed * sputter_strength_a).tolist()
+        ion_factors = [e / r if r > 1e-12 else 0.0 for e, r in zip(effective_etch_values, etch_values)]
     reflected_active = bool(reflected_ion_enabled) and float(reflected_ion_strength_pct) > 0.0
     if reflected_active:
         reflection_source_values, reflected_ion_values = compute_reflected_ion_fields(
@@ -1818,15 +1886,20 @@ def _apply_direct_sputter_step(
             x2 = float(x)
         proposed.append((x2, y2))
 
-    clean_surface, clean_solid = TopologyCleanup().cleanup(
-        proposed,
-        state,
-        solid_ref_paths_i=grown_solid,
-        solid_merge_mode=("candidate" if has_negative_net else "union"),
-    )
-    state.surface.points = equal_arc_resample(clean_surface, reparam_ds_a)
-    if clean_solid:
-        state.solid_paths_i = clean_solid
+    if not fields_only:
+        if sputter_smoothing_a > 0:
+            proposed = fair_profile_implicit(
+                proposed, length_a=0.8 * sputter_smoothing_a * regularization_step_fraction**0.25,
+                fixed_mask=[v <= 1e-12 for v in total_etch_values])
+        clean_surface, clean_solid = TopologyCleanup().cleanup(
+            proposed,
+            state,
+            solid_ref_paths_i=grown_solid,
+            solid_merge_mode=("candidate" if has_negative_net else "union"),
+        )
+        state.surface.points = equal_arc_resample(clean_surface, reparam_ds_a)
+        if clean_solid:
+            state.solid_paths_i = clean_solid
     state.meta["direct_sputter_debug_fields_last"] = _debug_field_payload(
         grown_surface,
         deposition_a=deposition_a,
@@ -1960,8 +2033,9 @@ def _model6_first_opposite_reflection_hit(
     center_x: float,
     neighbor_exclusion: int,
     max_distance_a: float,
+    segment_index: Optional[SegmentIndex] = None,
 ) -> Optional[Tuple[int, float, float, Point, Point]]:
-    pts = [(float(x), float(y)) for x, y in points]
+    pts = points
     if len(pts) < 2 or source_index < 0 or source_index >= len(pts):
         return None
     sx, sy = pts[source_index]
@@ -1969,7 +2043,9 @@ def _model6_first_opposite_reflection_hit(
     best: Optional[Tuple[int, float, float, Point, Point]] = None
     max_dist = max(1e-9, float(max_distance_a))
     skip = max(0, int(neighbor_exclusion))
-    for seg_idx in range(len(pts) - 1):
+    candidates = (segment_index.ray_candidates(pts[source_index], direction, max_dist)
+                  if segment_index is not None else range(len(pts)-1))
+    for seg_idx in candidates:
         if abs(seg_idx - source_index) <= skip or abs((seg_idx + 1) - source_index) <= skip:
             continue
         hit = _model6_ray_segment_intersection(pts[source_index], direction, pts[seg_idx], pts[seg_idx + 1])
@@ -2007,6 +2083,10 @@ def _apply_model6_reflection_gaussian_redepo_step(
     sputter_width_deg: float,
     sputter_smoothing_a: float,
     reparam_ds_a: float,
+    regularization_step_fraction: float = 1.0,
+    incident_los_enabled: bool = False,
+    incident_sigma_deg: float = 10.0,
+    incident_ray_count: int = 25,
     ion_transmission_enabled: bool = False,
     ion_transmission_override: Optional[float] = None,
     ion_transmission_start_depth_pct: float = 0.0,
@@ -2023,6 +2103,9 @@ def _apply_model6_reflection_gaussian_redepo_step(
     redepo_neighbor_exclusion: int = 2,
     redepo_max_distance_a: float = 1800.0,
 ) -> Tuple[List[float], List[float], float]:
+    grown_solid = OffsetBoolean.grow_solid_external_air_limited(state, dr_ref=deposition_a)
+    grown_surface = _extract_surface_from_solid(state, grown_solid, state.surface.points)
+    grown_surface = equal_arc_resample(grown_surface, reparam_ds_a)
     source_state = _clone_simulation_state(state)
     angles, responses, etch_clamp_a = _apply_direct_sputter_step(
         source_state,
@@ -2045,12 +2128,13 @@ def _apply_model6_reflection_gaussian_redepo_step(
         ion_transmission_edge_shadow_pct=ion_transmission_edge_shadow_pct,
         reflected_ion_enabled=False,
         reflected_ion_strength_pct=0.0,
+        prepared_geometry=(grown_solid, grown_surface),
+        fields_only=bool(grown_surface),
+        incident_los_enabled=incident_los_enabled,
+        incident_sigma_deg=incident_sigma_deg,
+        incident_ray_count=incident_ray_count,
     )
     source_fields = dict(source_state.meta.get("direct_sputter_debug_fields_last", {}))
-
-    grown_solid = OffsetBoolean.grow_solid_external_air_limited(state, dr_ref=deposition_a)
-    grown_surface = _extract_surface_from_solid(state, grown_solid, state.surface.points)
-    grown_surface = equal_arc_resample(grown_surface, reparam_ds_a)
     if not grown_surface:
         state.surface.points = [(float(x), float(y)) for x, y in source_state.surface.points]
         state.solid_paths_i = [list(path) for path in source_state.solid_paths_i]
@@ -2086,6 +2170,7 @@ def _apply_model6_reflection_gaussian_redepo_step(
     hit_source_removed_mass = 0.0
     escaped_mass = 0.0
     raw_hit_mass = 0.0
+    segment_index = SegmentIndex(grown_surface)
     for idx, mass in enumerate(removed_mass):
         if mass <= source_cutoff:
             continue
@@ -2102,6 +2187,7 @@ def _apply_model6_reflection_gaussian_redepo_step(
             center_x=center_x,
             neighbor_exclusion=redepo_neighbor_exclusion,
             max_distance_a=max_distance,
+            segment_index=segment_index,
         )
         if hit is None:
             escaped_mass += float(mass)
@@ -2147,7 +2233,10 @@ def _apply_model6_reflection_gaussian_redepo_step(
         )
         footprint_radius = max(float(reparam_ds_a) * 2.0, footprint_sigma * 3.0)
         target_weights: List[Tuple[int, float]] = []
-        for target_idx, (tx, _ty) in enumerate(grown_surface):
+        left = bisect_left(arc_s, hit_s-footprint_radius)
+        right = bisect_right(arc_s, hit_s+footprint_radius)
+        for target_idx in range(left, right):
+            tx, _ty = grown_surface[target_idx]
             if target_idx >= len(arc_s):
                 continue
             if (-1 if float(tx) < center_x else 1) != hit_side:
@@ -2221,6 +2310,13 @@ def _apply_model6_reflection_gaussian_redepo_step(
             x2 = float(x)
         proposed.append((x2, y2))
 
+    if sputter_smoothing_a > 0:
+        # Fourth-order coefficient is proportional to elapsed cycle fraction:
+        # refining internal time steps must not multiply smoothing strength.
+        # Source removal, ray transport, and capture budgets above are unchanged.
+        proposed = fair_profile_implicit(
+            proposed, length_a=0.8 * sputter_smoothing_a * regularization_step_fraction**0.25,
+            fixed_mask=[e <= 1e-12 and r <= 1e-12 for e, r in zip(dh_etch, dh_redepo)])
     clean_surface, clean_solid = TopologyCleanup().cleanup(
         proposed,
         state,
@@ -3918,11 +4014,11 @@ def _direct_sputter_internal_substeps(deposition_a: float, sputter_strength_a: f
 
 
 def _model4_redepo_internal_substeps(deposition_a: float, sputter_strength_a: float, reparam_ds_a: float) -> int:
-    target_a = max(16.0, float(reparam_ds_a) * 6.0)
+    target_a = max(1.0, float(reparam_ds_a) * 0.75)
     max_move_a = max(abs(float(deposition_a)), abs(float(sputter_strength_a)))
     if max_move_a <= target_a:
         return 1
-    return max(1, min(12, int(math.ceil(max_move_a / target_a))))
+    return max(1, min(64, int(math.ceil(max_move_a / target_a))))
 
 
 def _sweep_values(start: float, stop: float, step: float, *, max_cases: int) -> List[float]:
@@ -4086,12 +4182,18 @@ def _validate_sweep_value(parameter: str, value: float) -> float:
         return ratio
     if parameter == "inhibition_smoothing_a":
         return _coerce_non_negative_float(value, name=parameter)
+    if parameter in typical_cvd.DEFAULTS and parameter != "cvd_enabled":
+        value = _coerce_finite_float(value, name=parameter)
+        typical_cvd.validate(replace(TrenchDepoConfig(), **{parameter: value}))
+        return value
     raise ValueError(f"unsupported sweep parameter: {parameter}")
 
 
 def _replace_sweep_config(base_config: TrenchDepoConfig, parameter: str, value: float) -> TrenchDepoConfig:
     value = _validate_sweep_value(parameter, value)
     kwargs: Dict[str, Any] = {}
+    if parameter in typical_cvd.DEFAULTS and parameter != "cvd_enabled":
+        kwargs["cvd_enabled"] = True
     if parameter == "cycles":
         kwargs[parameter] = int(value)
     else:
@@ -4316,6 +4418,9 @@ def run_trench_depo(
     )
     reflected_ion_range_a = _coerce_positive_float(cfg.reflected_ion_range_a, name="reflected_ion_range_a")
     redepo_source_model = _redepo_source_model_key(cfg.redepo_source_model)
+    incident_los_enabled = bool(allowed_reflection_redepo and cfg.redepo_incident_los_enabled)
+    if incident_los_enabled:
+        validate_incident_parameters(cfg.redepo_incident_sigma_deg, cfg.redepo_incident_ray_count)
     redepo_efficiency_pct = max(
         0.0,
         min(100.0, _coerce_finite_float(cfg.redepo_efficiency_pct, name="redepo_efficiency_pct")),
@@ -4489,7 +4594,7 @@ def run_trench_depo(
     sputter_active = bool(allowed_sputter and cfg.sputter_enabled) and sputter_strength_a > 0.0
     reflected_ion_requested = False
     model6_redepo_requested = bool(allowed_reflection_redepo and cfg.redepo_enabled)
-    model6_redepo_active = bool(model6_redepo_requested and sputter_active and redepo_efficiency_pct > 0.0)
+    model6_redepo_active = bool(model6_redepo_requested and sputter_active and (redepo_efficiency_pct > 0.0 or incident_los_enabled))
     redepo_active = bool(model6_redepo_active)
     lf_overhang_requested = False
     lf_overhang_active = bool(lf_overhang_requested and lf_overhang_dose > 0.0 and lf_overhang_sputter_gain > 0.0)
@@ -4497,10 +4602,13 @@ def run_trench_depo(
     closure_redepo_active = bool(closure_redepo_requested and closure_redepo_efficiency_pct > 0.0)
     inhibition_active = bool(allowed_inhibition and cfg.inhibition_enabled) and angstrom_per_cycle > 0.0
     depth_deposition_active = (
-        bool(allowed_depth_deposition and cfg.deposition_depth_enabled)
+        bool(allowed_depth_deposition and (cfg.deposition_depth_enabled or cfg.cvd_enabled))
         and angstrom_per_cycle > 0.0
     )
     depth_inhibition_active = bool(depth_deposition_active and inhibition_active)
+    if cfg.cvd_enabled:
+        typical_cvd.validate(cfg)
+    cvd_growth_bound = typical_cvd.growth_bound(cfg) if cfg.cvd_enabled else 1.0
     initial_points = _coerce_points(cfg.points)
     depth_cfg = replace(
         cfg,
@@ -4602,6 +4710,9 @@ def run_trench_depo(
                         reparam_ds_a,
                     ),
                 )
+            if cfg.cvd_enabled:
+                substeps = max(substeps, _depth_depo_internal_substeps(
+                    angstrom_per_cycle * cvd_growth_bound, reparam_ds_a))
             state.meta["direct_sputter_internal_substeps"] = int(substeps)
             deposition_sub_a = angstrom_per_cycle / float(substeps)
             sputter_sub_a = sputter_strength_a / float(substeps)
@@ -4778,6 +4889,10 @@ def run_trench_depo(
                         sputter_width_deg=sputter_width_deg,
                         sputter_smoothing_a=sputter_smoothing_a,
                         reparam_ds_a=reparam_ds_a,
+                        regularization_step_fraction=(angstrom_per_cycle / 3.0 if incident_los_enabled else 1.0) / substeps,
+                        incident_los_enabled=incident_los_enabled,
+                        incident_sigma_deg=cfg.redepo_incident_sigma_deg,
+                        incident_ray_count=cfg.redepo_incident_ray_count,
                         ion_transmission_enabled=ion_transmission_enabled,
                         ion_transmission_override=ion_transmission_override,
                         ion_transmission_start_depth_pct=ion_transmission_start_depth_pct,
@@ -4839,6 +4954,7 @@ def run_trench_depo(
                         sputter_width_deg=sputter_width_deg,
                         sputter_smoothing_a=sputter_smoothing_a,
                         reparam_ds_a=reparam_ds_a,
+                        regularization_step_fraction=1.0 / substeps,
                         ion_transmission_enabled=ion_transmission_enabled,
                         ion_transmission_override=ion_transmission_override,
                         ion_transmission_start_depth_pct=ion_transmission_start_depth_pct,
@@ -4878,7 +4994,7 @@ def run_trench_depo(
             pending_transport_lines = cycle_transport_lines
         else:
             if inhibition_active:
-                substeps = _depth_depo_internal_substeps(angstrom_per_cycle, reparam_ds_a)
+                substeps = _depth_depo_internal_substeps(angstrom_per_cycle * cvd_growth_bound, reparam_ds_a)
                 state.meta["inhibition_internal_substeps"] = int(substeps)
                 if depth_deposition_active:
                     state.meta["depth_deposition_internal_substeps"] = int(substeps)
@@ -4905,7 +5021,7 @@ def run_trench_depo(
                             }
                         )
             elif depth_deposition_active:
-                substeps = _depth_depo_internal_substeps(angstrom_per_cycle, reparam_ds_a)
+                substeps = _depth_depo_internal_substeps(angstrom_per_cycle * cvd_growth_bound, reparam_ds_a)
                 state.meta["depth_deposition_internal_substeps"] = int(substeps)
                 deposition_sub_a = angstrom_per_cycle / float(substeps)
                 for substep_idx in range(substeps):
@@ -5117,6 +5233,10 @@ def run_trench_depo(
             "version": 1,
             "units": {"length": "A", "y_down_is_negative": True},
             "growth_model": growth_model,
+            "redepo_incident_los_enabled": bool(model6_redepo_active and incident_los_enabled),
+            "redepo_incident_sigma_deg": float(cfg.redepo_incident_sigma_deg),
+            "redepo_incident_ray_count": int(cfg.redepo_incident_ray_count),
+            "incident_source_model": "gaussian_cosine_yield_geometric_visibility" if model6_redepo_active and incident_los_enabled else "legacy",
             "propagation": propagation,
             "cycles": int(cycles),
             "emulator_number": int(emulator_number),
@@ -5130,6 +5250,11 @@ def run_trench_depo(
             "sputter_peak_angle_deg": float(sputter_peak_angle_deg),
             "sputter_width_deg": float(sputter_width_deg),
             "sputter_smoothing_a": float(sputter_smoothing_a),
+            "profile_regularization": (
+                "area_constrained_implicit_biharmonic" if sputter_active and sputter_smoothing_a > 0
+                and (model6_redepo_active or not redepo_active) else "off_or_legacy"
+            ),
+            "profile_regularization_cycle_length_a": float(0.8 * sputter_smoothing_a),
             "ion_transmission_enabled": bool(reported_ion_transmission_enabled),
             "ion_transmission_override": (
                 None if ion_transmission_override is None else float(ion_transmission_override)
@@ -5282,6 +5407,8 @@ def run_trench_depo(
             "closure_redepo_closure_probe_last": dict(
                 state.meta.get("model8_closure_redepo_closure_probe_last", {})
             ),
+            **typical_cvd.config_values(cfg),
+            "cvd_model": "empirical_upper_growth_and_bottom_depletion" if cfg.cvd_enabled else "off",
             "deposition_depth_enabled": bool(allowed_depth_deposition and cfg.deposition_depth_enabled),
             "deposition_depth_active": bool(depth_deposition_active),
             "deposition_feature_type": str(deposition_feature_type),

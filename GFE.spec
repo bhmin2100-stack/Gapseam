@@ -1,6 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 from pathlib import Path
+import sys
 
 ROOT = Path(SPECPATH).resolve()
 HIDDEN_IMPORTS = [
@@ -21,7 +22,8 @@ emulator = Analysis(
     [str(ROOT / 'src' / 'gapsim' / 'emulation' / 'trench_depo_ui.py')],
     pathex=[str(ROOT / 'src')],
     binaries=[],
-    datas=[],
+    datas=[(str(ROOT / 'src' / 'gapsim' / 'emulation' / 'help_trench_examples.json.gz'), 'gapsim/emulation'),
+           (str(ROOT / 'src' / 'gapsim' / 'emulation' / 'assets' / 'gfe.ico'), 'gapsim/emulation/assets')],
     hiddenimports=HIDDEN_IMPORTS,
     hookspath=[],
     hooksconfig={},
@@ -30,6 +32,14 @@ emulator = Analysis(
     noarchive=False,
     optimize=0,
 )
+# Qt uses the Windows ICU API (unversioned ucnv_* exports). An unrelated
+# Poppler/Conda ICU on PATH may also be named icuuc.dll, but exports ucnv_*_78.
+# Never shadow the OS-provided ICU with that incompatible build dependency.
+if sys.platform == 'win32':
+    emulator.binaries = [
+        entry for entry in emulator.binaries
+        if Path(entry[0]).name.lower() != 'icuuc.dll'
+    ]
 emulator_pyz = PYZ(emulator.pure)
 
 emulator_exe = EXE(
@@ -38,6 +48,7 @@ emulator_exe = EXE(
     [],
     exclude_binaries=True,
     name='GFE',
+    icon=str(ROOT / 'src' / 'gapsim' / 'emulation' / 'assets' / 'gfe.ico'),
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

@@ -99,7 +99,10 @@ def _profile_to_scene(profile: Sequence[Point]) -> List[QPointF]:
 
 
 def _decimate_profile(profile: Sequence[Point], stride: int) -> List[Point]:
-    if stride <= 1 or len(profile) <= 2:
+    # The stride is selected from the densest frame. Applying it to sparse
+    # geometry (e.g. the six original trench vertices) removes actual corners
+    # and turns the substrate into a diagonal wedge. Only decimate dense data.
+    if stride <= 1 or len(profile) <= _AUTO_DECIMATION_TARGET_POINTS:
         return [(float(x), float(y)) for x, y in profile]
     out: List[Point] = [(float(profile[0][0]), float(profile[0][1]))]
     for i in range(1, len(profile) - 1):

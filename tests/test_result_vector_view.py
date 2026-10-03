@@ -196,6 +196,20 @@ class ResultVectorViewTest(unittest.TestCase):
         scene_points = view._cache_get_profile_scene(0)
         self.assertLessEqual(len(scene_points), 2202)
 
+    def test_sparse_trench_corners_survive_dense_frame_decimation(self) -> None:
+        trench = [(5000., 0.), (250., 0.), (250., -2200.),
+                  (-250., -2200.), (-250., 0.), (-5000., 0.)]
+        dense = [(5000. - i * 2., 10.) for i in range(5001)]
+        view = ResultVectorView()
+        view.set_frames([trench, dense])
+        self.assertGreater(view._decimation_stride, 1)
+        self.assertEqual(len(view._cache_get_profile_scene(0)), 6)
+        substrate = view._substrate_item.path()
+        # Scene y points downward: the shelf is solid, the trench is empty.
+        self.assertTrue(substrate.contains(QPointF(-1000., 100.)))
+        self.assertTrue(substrate.contains(QPointF(1000., 100.)))
+        self.assertFalse(substrate.contains(QPointF(0., 100.)))
+
     def test_zoom_helper_can_zoom_in_and_out(self) -> None:
         view = ResultVectorView()
         view.resize(400, 300)

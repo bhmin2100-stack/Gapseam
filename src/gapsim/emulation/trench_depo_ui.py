@@ -1,6 +1,6 @@
 ﻿from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import asdict, replace
 import json
 import math
 import os
@@ -64,6 +64,10 @@ from PySide6.QtWidgets import (
 
 from gapsim import updater
 from gapsim.emulation.research_registry import MAX_EMULATOR_NUMBER
+from gapsim.emulation.incident_presets import SFO31_PRESET_NAME, ensure_sfo31_preset
+from gapsim.emulation.app_icon import gfe_icon, set_taskbar_identity
+from gapsim.emulation.process_parameters import init_cvd_controls, cvd_values, apply_cvd_values, ProcessParameterPanel
+from gapsim.engine import typical_cvd
 from gapsim.emulation.parameter_library import (
     DEFAULT_PARAMETER_LIBRARY_PATH,
     delete_parameter_preset,
@@ -2611,6 +2615,8 @@ class SplitTestWindow(QMainWindow):
         self._install_slider_wheel_guards()
 
         self.show_frame(0)
+        from gapsim.emulation.parameter_help_all import install_extended_help
+        install_extended_help(self)
         QTimer.singleShot(0, self.fit_all_views)
         if max_idx > 0:
             self._timer.start()
@@ -2937,6 +2943,7 @@ class TrenchDepoWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("GFE - 트렌치 Depo 에뮬레이터")
+        self.setWindowIcon(gfe_icon())
         self.resize(1280, 820)
 
         self._result: Optional[TrenchDepoResult] = None
@@ -3051,6 +3058,7 @@ class TrenchDepoWindow(QMainWindow):
         self._overlay_scale_a_per_px = 1.0
 
         self.spin_cycles = QSpinBox()
+        init_cvd_controls(self)
         self.spin_cycles.setRange(0, 10000)
         self.spin_cycles.setValue(20)
 
@@ -3139,6 +3147,16 @@ class TrenchDepoWindow(QMainWindow):
         self.spin_reflected_range.setValue(1600.0)
         self.chk_redepo = QCheckBox("Redepo enabled")
         self.chk_redepo.setChecked(False)
+        self.chk_incident_los = QCheckBox("입사 이온 가림 계산 (연구 모델)")
+        self.chk_incident_los.setToolTip("열린 입사 방향의 이온량 × 입사 코사인 × 수율을 적분합니다. 기존 깊이 감쇠를 대체하며 LF 전력/에너지 보정은 아닙니다.")
+        self.spin_incident_sigma = QDoubleSpinBox()
+        self.spin_incident_sigma.setRange(0.1, 20.0)
+        self.spin_incident_sigma.setValue(10.0)
+        self.spin_incident_sigma.setSuffix(" °")
+        self.spin_incident_rays = QSpinBox()
+        self.spin_incident_rays.setRange(3, 101)
+        self.spin_incident_rays.setSingleStep(2)
+        self.spin_incident_rays.setValue(25)
         self.cmb_redepo_source_model = QComboBox()
         self.cmb_redepo_source_model.addItem("Model2 ion source", "model2")
         self.cmb_redepo_source_model.setCurrentIndex(0)
@@ -3346,7 +3364,7 @@ class TrenchDepoWindow(QMainWindow):
         )
         self.spin_sputter_strength = QDoubleSpinBox()
         self.spin_sputter_strength.setRange(0.0, 100.0)
-        self.spin_sputter_strength.setDecimals(3)
+        self.spin_sputter_strength.setDecimals(12)
         self.spin_sputter_strength.setSingleStep(0.5)
         self.spin_sputter_strength.setValue(4.0)
         self.spin_sputter_peak_pct = QDoubleSpinBox()
@@ -3369,6 +3387,10 @@ class TrenchDepoWindow(QMainWindow):
         self.spin_sputter_smoothing.setDecimals(1)
         self.spin_sputter_smoothing.setSingleStep(2.5)
         self.spin_sputter_smoothing.setValue(40.0)
+        self.spin_sputter_smoothing.setToolTip(
+            "각도/식각장의 평활화와 면적 보존형 프로파일 요철 억제 길이입니다. "
+            "0 Å는 요철 보정을 끕니다. 재증착 수송은 유지되지만 큰 값은 형상과 폐쇄 시점을 바꿀 수 있습니다."
+        )
         self.sputter_curve_editor = SputterGaussianEditor()
         self.sputter_curve_editor.set_parameters(
             float(self.spin_sputter_peak_pct.value()),
@@ -4362,6 +4384,29 @@ class TrenchDepoWindow(QMainWindow):
         progress_panel_layout.setContentsMargins(0, 0, 0, 0)
         progress_panel_layout.setSpacing(8)
         progress_panel_layout.addWidget(action_group)
+        self.incident_model_group = QGroupBox("입사 이온 공급")
+        incident_layout = QGridLayout(self.incident_model_group)
+        incident_layout.addWidget(self.chk_incident_los, 0, 0, 1, 2)
+        incident_layout.addWidget(QLabel("입사 각도 분포 σ"), 1, 0)
+        incident_layout.addWidget(self.spin_incident_sigma, 1, 1)
+        incident_layout.addWidget(QLabel("입사 방향 수 (홀수)"), 2, 0)
+        incident_layout.addWidget(self.spin_incident_rays, 2, 1)
+        incident_note = QLabel("ON: 기존 경험적 깊이 감쇠를 대체합니다.\n재증착 OFF 비교는 Redepo 유지 + 효율 0%로 설정하세요.\n평활화 시간량은 누적 증착 3Å를 기준으로 계산합니다.")
+        incident_note.setWordWrap(True)
+        incident_layout.addWidget(incident_note, 3, 0, 1, 2)
+        progress_panel_layout.addWidget(self.incident_model_group)
+        self.parameter_preset_group = QGroupBox("내 공정 프리셋 · 구조는 유지")
+        saved_layout = QVBoxLayout(self.parameter_preset_group)
+        saved_layout.addWidget(self.cmb_parameter_preset)
+        saved_row = QHBoxLayout()
+        saved_row.addWidget(self.btn_apply_parameter_preset)
+        saved_row.addWidget(self.btn_reload_parameter_presets)
+        saved_row.addWidget(self.btn_delete_parameter_preset)
+        saved_layout.addLayout(saved_row)
+        saved_layout.addWidget(self.edit_parameter_preset_name)
+        saved_layout.addWidget(self.btn_save_parameter_preset)
+        saved_layout.addWidget(self.lbl_parameter_preset_active)
+        progress_panel_layout.addWidget(self.parameter_preset_group)
         progress_panel_layout.addWidget(params_group)
         progress_panel_layout.addWidget(gaussian_group)
         progress_panel_layout.addWidget(ion_map_group)
@@ -4378,6 +4423,8 @@ class TrenchDepoWindow(QMainWindow):
         progress_panel_layout.addLayout(progress_panel_nav)
         progress_panel_layout.addStretch(1)
         self.progress_panel_content.setLayout(progress_panel_layout)
+        self.process_parameter_panel = ProcessParameterPanel(self, params_group, progress_panel_layout)
+        progress_panel_layout.insertWidget(1, self.process_parameter_panel)
 
         self.result_panel_content = QWidget()
         result_panel_layout = QVBoxLayout()
@@ -4486,6 +4533,8 @@ class TrenchDepoWindow(QMainWindow):
         self.action_check_updates = QAction("업데이트 확인", self)
         self.action_check_updates.triggered.connect(self.check_updates_manually)
         toolbar.addAction(self.action_check_updates)
+        from gapsim.emulation.help_preferences import install_help_settings
+        install_help_settings(self, toolbar)
         self._install_value_control_wheel_guards()
 
         self.btn_run.clicked.connect(self.run_emulation)
@@ -4588,6 +4637,13 @@ class TrenchDepoWindow(QMainWindow):
         self.btn_open_addon_folder.clicked.connect(self.open_addon_folder)
         self.addon_list.itemChanged.connect(self._on_addon_item_changed)
         self.btn_reload_parameter_presets.clicked.connect(self.refresh_parameter_presets)
+        self.chk_incident_los.toggled.connect(self.sync_etch_control_availability)
+        self.chk_incident_los.toggled.connect(self._invalidate_result_for_input_change)
+        self.spin_incident_sigma.valueChanged.connect(self._invalidate_result_for_input_change)
+        self.spin_incident_rays.valueChanged.connect(self._invalidate_result_for_input_change)
+        self.spin_incident_rays.valueChanged.connect(
+            lambda value: self.spin_incident_rays.setValue(value + 1) if value % 2 == 0 else None
+        )
         self.cmb_parameter_preset.currentIndexChanged.connect(self._on_parameter_preset_selected)
         self.btn_apply_parameter_preset.clicked.connect(self.apply_selected_parameter_preset)
         self.btn_save_parameter_preset.clicked.connect(self.save_current_parameter_preset)
@@ -4603,6 +4659,10 @@ class TrenchDepoWindow(QMainWindow):
         self.spin_ion_end_depth.valueChanged.connect(self.sync_ion_transmission_editor_from_spins)
 
         self.refresh_structure_library(show_status=False)
+        try:
+            ensure_sfo31_preset(self._parameter_library_path)
+        except Exception as exc:  # noqa: BLE001
+            self.statusBar().showMessage(f"SFO3.1 프리셋 등록 실패: {exc}", 5000)
         self.refresh_parameter_presets(show_status=False)
         self.refresh_addons(show_status=False)
         self.apply_emulator_mode(run=False)
@@ -4612,6 +4672,10 @@ class TrenchDepoWindow(QMainWindow):
         self.sync_inhibition_profile_from_spins()
         self._sync_field_overlay_toggles()
         self._set_workflow_step("structure")
+        from gapsim.emulation.workflow_layout import install_workflow_layout
+        install_workflow_layout(self)
+        from gapsim.emulation.parameter_help_all import install_extended_help
+        install_extended_help(self,self.process_parameter_panel.help_manager)
         QTimer.singleShot(1500, self.check_updates_on_startup)
 
     def _install_value_control_wheel_guards(self) -> None:
@@ -5088,6 +5152,7 @@ class TrenchDepoWindow(QMainWindow):
             return bool(default if raw is None else raw)
 
         self.spin_cycles.setValue(i("cycles", int(self.spin_cycles.value())))
+        apply_cvd_values(self, values)
         self.spin_angstrom_per_cycle.setValue(f("angstrom_per_cycle", float(self.spin_angstrom_per_cycle.value())))
         self._set_quality_mode_for_ds(f("reparam_ds_a", float(self.spin_reparam_ds.value())))
         self.chk_sputter.setChecked(bool(supports_sputter and b("sputter_enabled", self.chk_sputter.isChecked())))
@@ -5098,6 +5163,9 @@ class TrenchDepoWindow(QMainWindow):
             bool(supports_reflected and b("reflected_ion_enabled", self.chk_reflected_ion.isChecked()))
         )
         self.chk_redepo.setChecked(bool(supports_redepo and b("redepo_enabled", self.chk_redepo.isChecked())))
+        self.chk_incident_los.setChecked(bool(supports_redepo and values.get("redepo_incident_los_enabled", False)))
+        self.spin_incident_sigma.setValue(f("redepo_incident_sigma_deg", 10.0))
+        self.spin_incident_rays.setValue(i("redepo_incident_ray_count", 25))
         self.chk_depth_deposition.setChecked(
             bool(supports_depth and b("deposition_depth_enabled", self.chk_depth_deposition.isChecked()))
         )
@@ -5235,6 +5303,8 @@ class TrenchDepoWindow(QMainWindow):
         self.set_active_emulator_number(target_emulator, run=False)
         self._apply_parameter_config_values(config_values)
         self._active_parameter_preset_name = sanitize_parameter_preset_name(name)
+        if self._active_parameter_preset_name == SFO31_PRESET_NAME:
+            self.btn_split_options.setChecked(False)
         self.edit_parameter_preset_name.setText(self._active_parameter_preset_name)
         self._update_parameter_preset_active_label()
         self.statusBar().showMessage(f"공정 파라미터 적용됨: {self._active_parameter_preset_name}", 2200)
@@ -6058,6 +6128,8 @@ class TrenchDepoWindow(QMainWindow):
         finally:
             self._syncing_workflow_tabs = False
         self._sync_result_controls_visibility(view_index)
+        from gapsim.emulation.workflow_layout import sync_workflow_layout
+        sync_workflow_layout(self, workflow_index)
         if view_index == 2:
             self._sync_progress_geometry_view(fit=True)
         if view_index == 3:
@@ -6218,6 +6290,9 @@ class TrenchDepoWindow(QMainWindow):
         self._apply_model_parameter_section_order()
 
     def _apply_model_parameter_section_order(self) -> None:
+        if hasattr(self, "process_parameter_panel"):
+            self.process_parameter_panel.reorder(self._model_parameter_section_order)
+            return
         grid = getattr(self, "params_grid", None)
         if grid is None:
             return
@@ -6393,6 +6468,9 @@ class TrenchDepoWindow(QMainWindow):
     def _populate_split_parameters(self) -> None:
         previous = self.cmb_split_parameter.currentData()
         options = [
+            ("CVD Overhang %", "cvd_overhang_pct"),
+            ("CVD Cusping %", "cvd_cusping_pct"),
+            ("CVD Bottom 성장 %", "cvd_bottom_ratio_pct"),
             ("Depo A/CYC", "angstrom_per_cycle"),
             ("Cycles", "cycles"),
         ]
@@ -6509,6 +6587,7 @@ class TrenchDepoWindow(QMainWindow):
         )
 
     def _apply_emulator_preset(self, settings: dict[str, object]) -> None:
+        self.chk_incident_los.setChecked(False)
         supports_sputter = self._active_emulator_supports_sputter()
         supports_ion = self._active_emulator_supports_ion_transmission()
         supports_reflected = self._active_emulator_supports_reflected_ion()
@@ -7216,6 +7295,10 @@ class TrenchDepoWindow(QMainWindow):
         )
 
         self.chk_redepo.setEnabled(etch_enabled and supports_redeposition)
+        self.incident_model_group.setVisible(supports_redeposition)
+        self.chk_incident_los.setEnabled(etch_enabled and supports_redeposition and self.chk_redepo.isChecked())
+        self.spin_incident_sigma.setEnabled(self.chk_incident_los.isEnabled() and self.chk_incident_los.isChecked())
+        self.spin_incident_rays.setEnabled(self.chk_incident_los.isEnabled() and self.chk_incident_los.isChecked())
         redepo_enabled = bool(
             etch_enabled
             and supports_redeposition
@@ -7420,8 +7503,11 @@ class TrenchDepoWindow(QMainWindow):
         self.spin_depth_feature_length.setVisible(line_geometry_visible)
         self.lbl_depth_feature_length.setEnabled(line_geometry_visible)
         self.spin_depth_feature_length.setEnabled(line_geometry_visible)
+        if hasattr(self, "process_parameter_panel"):
+            self.process_parameter_panel.sync()
 
     def reset_defaults(self) -> None:
+        apply_cvd_values(self, {})
         self._clear_continuation_context()
         supports_sputter = self._active_emulator_supports_sputter()
         supports_ion_transmission = self._active_emulator_supports_ion_transmission()
@@ -7517,7 +7603,11 @@ class TrenchDepoWindow(QMainWindow):
 
     def apply_split_parameter_defaults(self, _index: int = 0) -> None:
         parameter = str(self.cmb_split_parameter.currentData())
-        if parameter == "cycles":
+        if parameter in ("cvd_overhang_pct", "cvd_cusping_pct"):
+            values = (0.0, 100.0, 25.0, 1, 0.0, 200.0)
+        elif parameter == "cvd_bottom_ratio_pct":
+            values = (20.0, 100.0, 20.0, 1, 0.0, 100.0)
+        elif parameter == "cycles":
             values = (5.0, 30.0, 5.0, 0, 0.0, 10000.0)
         elif parameter == "angstrom_per_cycle":
             values = (0.0, 20.0, 5.0, 3, 0.0, 10000.0)
@@ -7694,6 +7784,9 @@ class TrenchDepoWindow(QMainWindow):
                 etch_enabled and supports_redeposition and self.chk_redepo.isChecked()
             ),
             redepo_source_model=str(self.cmb_redepo_source_model.currentData() or "model2"),
+            redepo_incident_los_enabled=bool(etch_enabled and supports_redeposition and self.chk_redepo.isChecked() and self.chk_incident_los.isChecked()),
+            redepo_incident_sigma_deg=float(self.spin_incident_sigma.value()),
+            redepo_incident_ray_count=int(self.spin_incident_rays.value()),
             redepo_efficiency_pct=(
                 float(self.spin_redepo_efficiency.value()) if supports_redeposition else 0.0
             ),
@@ -7741,6 +7834,7 @@ class TrenchDepoWindow(QMainWindow):
             inhibition_enabled=bool(
                 supports_inhibition and self.chk_inhibition_deposition.isChecked()
             ),
+            **cvd_values(self),
             inhibition_process_model="hybrid",
             inhibition_strength_pct=float(self.spin_inhibition_strength.value()),
             inhibition_penetration_depth_a=float(self.spin_inhibition_penetration.value()),
@@ -7778,6 +7872,9 @@ class TrenchDepoWindow(QMainWindow):
         stage_cycles = int(meta.get("stage_cycles", config.cycles) or config.cycles)
 
         lines = [
+            f"Typical CVD (경험식): {'ON' if config.cvd_enabled else 'OFF'}",
+            f"Overhang/Cusping/Bottom: {config.cvd_overhang_pct:g}% / {config.cvd_cusping_pct:g}% / {config.cvd_bottom_ratio_pct:g}%",
+            f"CVD upper length/depth power: {config.cvd_upper_length_a:g} Å / {config.cvd_depth_power:g}",
             f"모델: {title}",
             f"상태: {'실행 결과' if result is not None else '입력 미리보기'}",
             f"구조 입력: {geometry_source} | {len(config.points)}점",
@@ -7906,6 +8003,11 @@ class TrenchDepoWindow(QMainWindow):
                     f"Closure: step {meta.get('deposition_closure_step')} | depth {float(meta.get('deposition_closure_depth_a') or 0.0):.3f} A"
                 )
 
+        if config.redepo_incident_los_enabled:
+            lines.extend(["", "[입사 이온 가림 연구 모델]",
+                f"각도 σ: {config.redepo_incident_sigma_deg:g}° / 방향 수: {config.redepo_incident_ray_count}",
+                f"누적 증착량 (식각 전): {config.cycles * config.angstrom_per_cycle:g} A",
+                "기존 경험적 깊이 감쇠 대체 / 실제 LF·이온 에너지 미보정"])
         return "\n".join(lines)
 
     def _update_result_parameter_summary(
@@ -7960,6 +8062,9 @@ class TrenchDepoWindow(QMainWindow):
             redepo_neighbor_exclusion=cfg.redepo_neighbor_exclusion,
             redepo_max_distance_a=cfg.redepo_max_distance_a,
             redepo_soft_los_radius_points=cfg.redepo_soft_los_radius_points,
+            redepo_incident_los_enabled=cfg.redepo_incident_los_enabled,
+            redepo_incident_sigma_deg=cfg.redepo_incident_sigma_deg,
+            redepo_incident_ray_count=cfg.redepo_incident_ray_count,
             redepo_transport_model=cfg.redepo_transport_model,
             redepo_ray_count=cfg.redepo_ray_count,
             redepo_footprint_sigma_a=cfg.redepo_footprint_sigma_a,
@@ -8096,6 +8201,7 @@ class TrenchDepoWindow(QMainWindow):
 
     def _preview_cache_key(self, config: TrenchDepoConfig) -> tuple[object, ...]:
         return (
+            tuple(typical_cvd.config_values(config).values()),
             tuple((float(x), float(y)) for x, y in config.points),
             int(config.cycles),
             int(getattr(config, "emulator_number", 0) or 0),
@@ -8127,6 +8233,9 @@ class TrenchDepoWindow(QMainWindow):
             float(config.reflected_ion_microtrench_weight),
             float(config.reflected_ion_range_a),
             bool(config.redepo_enabled),
+            bool(config.redepo_incident_los_enabled),
+            float(config.redepo_incident_sigma_deg),
+            int(config.redepo_incident_ray_count),
             str(config.redepo_source_model),
             float(config.redepo_efficiency_pct),
             float(config.redepo_emit_power),
@@ -8822,6 +8931,7 @@ class TrenchDepoWindow(QMainWindow):
         else:
             replay_emulator = 1
         self.set_active_emulator_number(replay_emulator, run=False)
+        apply_cvd_values(self, typical_cvd.config_values(config))
         self._set_structure_points(config.points, preserve_on_emulator_switch=True)
         self._clear_structure_undo_stack()
         self.spin_cycles.setValue(int(config.cycles))
@@ -8834,7 +8944,9 @@ class TrenchDepoWindow(QMainWindow):
             bool(self._active_emulator_supports_ion_transmission() and config.ion_transmission_enabled)
         )
         self.chk_reflected_ion.setChecked(False)
-        self.chk_redepo.setChecked(False)
+        self.chk_redepo.setChecked(
+            bool(self._active_emulator_supports_redeposition() and config.redepo_enabled)
+        )
         self.chk_lf_overhang.setChecked(False)
         self.chk_closure_redepo.setChecked(False)
         self.spin_ion_start_depth.setValue(float(config.ion_transmission_start_depth_pct))
@@ -8853,6 +8965,9 @@ class TrenchDepoWindow(QMainWindow):
         source_index = self.cmb_redepo_source_model.findData(str(config.redepo_source_model))
         self.cmb_redepo_source_model.setCurrentIndex(source_index if source_index >= 0 else 0)
         self.spin_redepo_efficiency.setValue(float(config.redepo_efficiency_pct))
+        self.chk_incident_los.setChecked(bool(config.redepo_incident_los_enabled))
+        self.spin_incident_sigma.setValue(float(config.redepo_incident_sigma_deg))
+        self.spin_incident_rays.setValue(int(config.redepo_incident_ray_count))
         self.spin_redepo_emit_power.setValue(float(config.redepo_emit_power))
         self.spin_redepo_distance_power.setValue(float(config.redepo_distance_power))
         self.spin_redepo_soft_los.setValue(int(config.redepo_soft_los_radius_points))
@@ -9212,7 +9327,9 @@ def main() -> int:
         )
         return 0
 
+    set_taskbar_identity()
     app = QApplication(sys.argv)
+    app.setWindowIcon(gfe_icon())
     if not _ensure_startup_data_root():
         return 0
     window = TrenchDepoWindow()

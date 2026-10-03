@@ -17,6 +17,7 @@ from gapsim.emulation.trench_depo import (
     TrenchSweepResult,
 )
 from gapsim.engine.run_logger import write_json
+from gapsim.engine import typical_cvd
 from gapsim.ui_qt.views.result_vector_view import ResultVectorView
 
 Point = Tuple[float, float]
@@ -113,6 +114,7 @@ def result_to_payload(
         "kind": "trench_depo_emulation",
         "request_note_ko": _coerce_note(request_note),
         "config": {
+            **typical_cvd.config_values(config),
             "points": [[float(x), float(y)] for x, y in config.points],
             "cycles": int(config.cycles),
             "emulator_number": int(getattr(config, "emulator_number", 0) or 0),
@@ -144,6 +146,9 @@ def result_to_payload(
             "reflected_ion_microtrench_weight": float(config.reflected_ion_microtrench_weight),
             "reflected_ion_range_a": float(config.reflected_ion_range_a),
             "redepo_enabled": bool(config.redepo_enabled),
+            "redepo_incident_los_enabled": bool(config.redepo_incident_los_enabled),
+            "redepo_incident_sigma_deg": float(config.redepo_incident_sigma_deg),
+            "redepo_incident_ray_count": int(config.redepo_incident_ray_count),
             "redepo_source_model": str(config.redepo_source_model),
             "redepo_efficiency_pct": float(config.redepo_efficiency_pct),
             "redepo_emit_power": float(config.redepo_emit_power),
@@ -272,6 +277,9 @@ def payload_to_trench_run(payload: Dict[str, Any]) -> Tuple[TrenchDepoConfig, Tr
     note = _coerce_note(str(payload.get("request_note_ko", "")))
 
     config = TrenchDepoConfig(
+        **{name: (bool(config_raw.get(name, default)) if isinstance(default, bool)
+                  else float(config_raw.get(name, default)))
+           for name, default in typical_cvd.DEFAULTS.items()},
         points=points,
         cycles=int(config_raw.get("cycles", max(0, len(frame_profiles) - 1))),
         emulator_number=int(config_raw.get("emulator_number") or meta.get("emulator_number") or 0),
@@ -315,6 +323,9 @@ def payload_to_trench_run(payload: Dict[str, Any]) -> Tuple[TrenchDepoConfig, Tr
         reflected_ion_microtrench_weight=float(config_raw.get("reflected_ion_microtrench_weight", 1.0)),
         reflected_ion_range_a=float(config_raw.get("reflected_ion_range_a", 1600.0)),
         redepo_enabled=bool(config_raw.get("redepo_enabled", False)),
+        redepo_incident_los_enabled=bool(config_raw.get("redepo_incident_los_enabled", False)),
+        redepo_incident_sigma_deg=float(config_raw.get("redepo_incident_sigma_deg", 10.0)),
+        redepo_incident_ray_count=int(config_raw.get("redepo_incident_ray_count", 25)),
         redepo_source_model=str(config_raw.get("redepo_source_model", "model2")),
         redepo_efficiency_pct=float(config_raw.get("redepo_efficiency_pct", 25.0)),
         redepo_emit_power=float(config_raw.get("redepo_emit_power", 1.0)),

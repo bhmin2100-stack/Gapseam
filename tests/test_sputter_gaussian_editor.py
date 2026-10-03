@@ -600,8 +600,8 @@ class SputterGaussianEditorTest(unittest.TestCase):
             self.assertTrue(window._active_emulator_supports_sputter())
             self.assertTrue(window._active_emulator_supports_ion_transmission())
             self.assertFalse(window._active_emulator_supports_reflected_ion())
-            self.assertEqual(window.chk_sputter.text(), "Etch enabled")
-            self.assertEqual(window.lbl_etch_section.text(), "Direct angle sputter etch (통합 source)")
+            self.assertEqual(window.chk_sputter.text(), "식각 사용")
+            self.assertEqual(window.lbl_etch_section.text(), "식각 · 통합 모델")
             self.assertFalse(window.ion_map_group.isHidden())
             self.assertTrue(all(not widget.isHidden() for widget in window._ion_transmission_widgets))
             self.assertEqual(tuple(window.ion_transmission_editor._points), tuple(window._current_geometry_points()))
@@ -1218,12 +1218,12 @@ class SputterGaussianEditorTest(unittest.TestCase):
             self.assertIs(window.smoothing_controls_group.parent(), window.smoothing_panel_content)
             self.assertIs(window.smoothed_points_group.parent(), window.smoothing_panel_content)
             self.assertFalse(hasattr(window, "emulator_group"))
-            self.assertFalse(hasattr(window, "parameter_preset_group"))
-            self.assertIs(window.params_group.parent(), window.progress_panel_content)
-            self.assertIs(window.gaussian_group.parent(), window.progress_panel_content)
-            self.assertIs(window.ion_map_group.parent(), window.progress_panel_content)
-            self.assertIs(window.redepo_lobe_group.parent(), window.progress_panel_content)
-            self.assertIs(window.depth_profile_group.parent(), window.progress_panel_content)
+            self.assertTrue(window.process_presets_fold.isAncestorOf(window.parameter_preset_group))
+            self.assertIs(window.params_group.parent(), window.process_parameter_panel)
+            self.assertTrue(window.process_parameter_panel.pages[2].isAncestorOf(window.gaussian_group))
+            self.assertTrue(window.process_parameter_panel.pages[2].isAncestorOf(window.ion_map_group))
+            self.assertTrue(window.process_parameter_panel.pages[2].isAncestorOf(window.redepo_lobe_group))
+            self.assertTrue(window.process_parameter_panel.pages[1].isAncestorOf(window.depth_profile_group))
             self.assertIs(window.result_summary_group.parent(), window.result_panel_content)
             self.assertFalse(hasattr(window, "btn_new_emulator"))
             self.assertEqual(
@@ -1254,6 +1254,7 @@ class SputterGaussianEditorTest(unittest.TestCase):
             self.assertAlmostEqual(window.current_config().deposition_depth_decay_k, 0.12345, places=6)
             self.assertIn("K=0.12345", window.lbl_depth_formula.text())
 
+            window.process_geometry_fold.setChecked(True)
             line_idx = window.cmb_depth_feature_type.findData("line")
             window.cmb_depth_feature_type.setCurrentIndex(line_idx)
             window.spin_depth_feature_length.setValue(2500.0)
@@ -1350,8 +1351,8 @@ class SputterGaussianEditorTest(unittest.TestCase):
             self.assertTrue(window.depth_profile_group.isHidden())
             self.assertTrue(all(widget.isHidden() for widget in window._reflected_ion_widgets))
             self.assertIn("통합", window.lbl_etch_section.text())
-            self.assertEqual(window.chk_depth_deposition.text(), "Depth depletion")
-            self.assertEqual(window.chk_inhibition_deposition.text(), "Inhibition deposition")
+            self.assertEqual(window.chk_depth_deposition.text(), "기존 증착 감쇠")
+            self.assertEqual(window.chk_inhibition_deposition.text(), "증착 억제 사용")
             self.assertFalse(window.chk_inhibition_deposition.isHidden())
             self.assertEqual(window.cmb_compare_target.currentData(), "legacy_gapsim_angle")
             self.assertFalse(window.chk_sputter.isChecked())
@@ -1428,10 +1429,12 @@ class SputterGaussianEditorTest(unittest.TestCase):
             window = TrenchDepoWindow()
 
         def grid_row(widget):
-            index = window.params_grid.indexOf(widget)
+            panel = window.process_parameter_panel
+            key = next(k for k, rows in window._model_parameter_section_rows.items()
+                       if any(w is widget for w, _c, _s in rows))
+            index = panel.layouts[2].indexOf(panel.section_containers.get(key, panel.sections[key]))
             self.assertGreaterEqual(index, 0)
-            row, _column, _row_span, _column_span = window.params_grid.getItemPosition(index)
-            return row
+            return index
 
         try:
             top_titles = [
@@ -1442,13 +1445,16 @@ class SputterGaussianEditorTest(unittest.TestCase):
                 window.lbl_inhibition_section.text(),
             ]
             self.assertTrue(all("번" not in title for title in top_titles))
-            self.assertLess(grid_row(window.lbl_etch_section), grid_row(window.lbl_depth_depo_section))
+            self.assertLess(grid_row(window.lbl_etch_section), grid_row(window.lbl_ion_depth_section))
 
             window._move_model_parameter_section("depth", "direct")
 
             self.assertEqual(window._model_parameter_section_order[0], "depth")
-            self.assertLess(grid_row(window.lbl_depth_depo_section), grid_row(window.lbl_etch_section))
+            self.assertTrue(window.process_parameter_panel.pages[1].isAncestorOf(
+                window.process_parameter_panel.sections['depth']))
             self.assertLess(grid_row(window.lbl_etch_section), grid_row(window.lbl_ion_depth_section))
+            window._move_model_parameter_section('redepo', 'direct')
+            self.assertLess(grid_row(window.lbl_redepo_section), grid_row(window.lbl_etch_section))
         finally:
             window.close()
 
@@ -1478,15 +1484,17 @@ class SputterGaussianEditorTest(unittest.TestCase):
             self.assertTrue(window._active_emulator_supports_depth_deposition())
             self.assertEqual(window.cmb_compare_target.currentData(), "legacy_gapsim_angle")
             self.assertIn("통합", window.lbl_etch_section.text())
-            self.assertIn("reflection", window.lbl_redepo_section.text())
-            self.assertEqual(window.lbl_redepo_emit_power.text(), "Angular spread deg")
-            self.assertEqual(window.lbl_redepo_distance_power.text(), "Specular bias %")
+            self.assertEqual(window.lbl_redepo_section.text(), "재증착")
+            self.assertEqual(window.lbl_redepo_emit_power.text(), "재증착 분포 폭 (°)")
+            self.assertEqual(window.lbl_redepo_distance_power.text(), "재증착 방향 (%)")
             self.assertGreaterEqual(window.spin_redepo_emit_power.maximum(), 80.0)
             self.assertLessEqual(window.spin_redepo_distance_power.minimum(), -100.0)
             self.assertGreaterEqual(window.spin_redepo_distance_power.maximum(), 100.0)
             self.assertFalse(window.lbl_redepo_efficiency.isHidden())
             self.assertTrue(window.cmb_redepo_source_model.isHidden())
             self.assertFalse(window.redepo_lobe_group.isHidden())
+            window.process_parameter_panel.advanced_folds['redepo'].setChecked(True)
+            window.process_parameter_panel.curve_folds[window.redepo_lobe_group].setChecked(True)
             self.assertTrue(window.redepo_lobe_group.isEnabled())
             self.assertEqual(window.redepo_lobe_editor.parameters(), (25.0, 22.0, 25.0))
             self.assertFalse(window.chk_show_redepo_overlay.isHidden())
@@ -1554,23 +1562,24 @@ class SputterGaussianEditorTest(unittest.TestCase):
             self.assertEqual(window.workflow_tabs.currentIndex(), 0)
             self.assertTrue(window.result_controls_widget.isHidden())
             self.assertFalse(hasattr(window, "emulator_group"))
-            self.assertFalse(hasattr(window, "parameter_preset_group"))
+            self.assertTrue(window.process_presets_fold.isAncestorOf(window.parameter_preset_group))
             self.assertFalse(hasattr(window, "btn_new_emulator"))
             self.assertIs(window.structure_library_group.parent(), window.structure_panel_content)
             self.assertIs(window.smoothing_controls_group.parent(), window.smoothing_panel_content)
-            self.assertIs(window.params_group.parent(), window.progress_panel_content)
-            self.assertIs(window.action_group.parent(), window.progress_panel_content)
+            self.assertIs(window.params_group.parent(), window.process_parameter_panel)
+            self.assertTrue(window.process_actions_fold.isAncestorOf(window.action_group))
             self.assertIs(window.split_group.parent(), window.action_group)
             self.assertIs(window.compare_group.parent(), window.action_group)
             self.assertIs(window.addon_group.parent(), window.options_panel_content)
             self.assertIs(window.addon_extension_group.parent(), window.progress_panel_content)
-            self.assertEqual(window.btn_split_options.text(), "Split")
-            self.assertEqual(window.btn_compare_options.text(), "Compare")
-            self.assertEqual(window.split_group.title(), "Split Test 파라미터")
-            self.assertEqual(window.compare_group.title(), "Compare Test 파라미터")
+            self.assertEqual(window.btn_split_options.text(), "조건 비교 (Split)")
+            self.assertEqual(window.btn_compare_options.text(), "모델 비교")
+            self.assertEqual(window.split_group.title(), "비교할 조건 범위")
+            self.assertEqual(window.compare_group.title(), "비교할 모델")
             self.assertTrue(window.split_group.isHidden())
             self.assertTrue(window.compare_group.isHidden())
 
+            window.process_actions_fold.setChecked(True)
             window.btn_split_options.click()
             self.assertFalse(window.split_group.isHidden())
             self.assertTrue(window.compare_group.isHidden())
@@ -2640,6 +2649,35 @@ class SputterGaussianEditorTest(unittest.TestCase):
 
                 self.assertEqual(len(window._split_windows), 1)
                 self.assertEqual(len(window._split_windows[0]._cases), 2)
+            finally:
+                window.close()
+
+    def test_redeposition_replay_preserves_settings_for_a_fresh_run(self) -> None:
+        from gapsim.emulation.trench_depo_export import result_to_payload
+
+        config = TrenchDepoConfig(
+            emulator_number=0, cycles=90, angstrom_per_cycle=3.0,
+            reparam_ds_a=5.0, sputter_enabled=True,
+            sputter_strength_a_per_cycle=8.0, sputter_smoothing_a=20.0,
+            redepo_enabled=True, redepo_efficiency_pct=90.0,
+            redepo_emit_power=10.0, redepo_distance_power=100.0,
+        )
+        result = TrenchDepoResult([0], [list(config.points)], [[]], list(config.points), {"cycles": 90})
+        with tempfile.TemporaryDirectory() as tmp, mock.patch(
+            "gapsim.emulation.trench_depo_ui.QTimer.singleShot"
+        ):
+            path = Path(tmp) / "redeposition.json"
+            path.write_text(json.dumps(result_to_payload(config, result, request_note="regression")), encoding="utf-8")
+            window = TrenchDepoWindow()
+            try:
+                window.load_replay_json(path)
+                actual = window.current_config()
+                for field in (
+                    "cycles", "angstrom_per_cycle", "reparam_ds_a", "sputter_enabled",
+                    "sputter_strength_a_per_cycle", "sputter_smoothing_a", "redepo_enabled",
+                    "redepo_efficiency_pct", "redepo_emit_power", "redepo_distance_power",
+                ):
+                    self.assertEqual(getattr(actual, field), getattr(config, field), field)
             finally:
                 window.close()
 

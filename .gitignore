@@ -28,3 +28,13 @@ GFS.spec
 # OS files
 .DS_Store
 Thumbs.db
+
+# Generated research/report outputs stay local; keep reproducible Python sources.
+experiments/all-parameter-split-*/
+experiments/help-trench-review/
+experiments/redeposition/*.json
+experiments/redeposition/*.html
+experiments/redeposition/*.png
+experiments/redeposition/*.csv
+docs/process-menu-audit-*/
+docs/usability-audit-*/
