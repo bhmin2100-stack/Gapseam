@@ -2,6 +2,7 @@
 import argparse
 import hashlib
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from zipfile import ZipFile, ZIP_DEFLATED
 from gapsim import __version__
@@ -22,7 +23,7 @@ def package(built,output,commit):
         assert all(n.startswith('GFE/GFE.exe') or n.startswith('GFE/_internal/') for n in zipfile.namelist())
     digest=hashlib.file_digest(archive.open('rb'),'sha256').hexdigest()
     metadata=dict(version=__version__,asset='Gapseam.zip',sha256=digest,size=archive.stat().st_size,
-        buildCommit=commit,buildId=commit[:12],updateChannel='personal',
+        commit=commit,build_id=commit[:12],publishedAtUtc=datetime.now(timezone.utc).isoformat(),updateChannel='personal',
         downloadUrl=f'https://github.com/bhmin2100-stack/Gapseam/releases/download/v{__version__}/Gapseam.zip')
     (output/'version.json').write_text(json.dumps(metadata,indent=2),encoding='utf-8')
     print(json.dumps(metadata,indent=2))
