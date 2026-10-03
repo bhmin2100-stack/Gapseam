@@ -28,7 +28,9 @@ def engine_fingerprint():
     h = hashlib.sha256()
     for path in paths:
         h.update(str(path.relative_to(ROOT)).replace('\\', '/').encode())
-        h.update(path.read_bytes())
+        # Git may check identical source out with CRLF on Windows or LF elsewhere.
+        # Fingerprint code content, not the checkout's newline representation.
+        h.update(path.read_bytes().replace(b'\r\n', b'\n'))
     return h.hexdigest()
 
 

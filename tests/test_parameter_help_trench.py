@@ -26,6 +26,17 @@ def test_asset_fingerprint_matches_current_engine():
     assert movie_catalog()['engine_sha256']==module.engine_fingerprint()
 
 
+def test_engine_fingerprint_ignores_git_checkout_line_endings(monkeypatch):
+    builder=Path(__file__).resolve().parents[1]/'experiments/build_help_trench_movies.py'
+    spec=importlib.util.spec_from_file_location('help_movie_newline_check',builder)
+    module=importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    expected=module.engine_fingerprint()
+    read=Path.read_bytes
+    monkeypatch.setattr(Path,'read_bytes',lambda p:read(p).replace(b'\r\n',b'\n').replace(b'\n',b'\r\n'))
+    assert module.engine_fingerprint()==expected
+
+
 @pytest.mark.parametrize('key', list(examples()))
 def test_movies_have_exact_recipes_and_calculated_frame_sequences(key):
     movie=load_movie(key)
@@ -56,7 +67,8 @@ def test_packaged_coordinates_and_voids_match_fresh_actual_simulation(key):
         for f in run['frames']:
             assert f['profile']==[list(p) for p in actual.frame_profiles[f['step']]]
             assert f['voids']==[[list(p) for p in loop] for loop in actual.frame_voids[f['step']]]
-        assert run['captured_mass']==actual.meta.get('redepo_total_mass_last',0.)
+        # Python 3.11/3.13 and CPU reductions differ in the last floating-point bit.
+        assert run['captured_mass']==pytest.approx(actual.meta.get('redepo_total_mass_last',0.),rel=1e-12,abs=1e-10)
 
 
 def test_redirection_data_really_contains_sources_targets_and_small_geometry_difference():
