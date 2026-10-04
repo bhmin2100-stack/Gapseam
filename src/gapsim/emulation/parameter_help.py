@@ -30,18 +30,29 @@ def spec(title, meaning, low, high, kind='growth', caution=''):
 
 # Keys are the existing authoritative widget attributes; no duplicate parameters.
 HELP = {
- 'spin_cycles': spec('계산 Step 수', '증착과 식각 계산을 몇 번 반복할지 정합니다.', '계산 반복 감소', '계산 반복 증가', 'growth', '실제 시간이나 ALD cycle 수가 아닙니다. 식각·닫힘 때문에 Step이 늘어도 순 막두께가 계속 증가하지는 않습니다.'),
- 'spin_angstrom_per_cycle': spec('기본 증착량 · Å/step', '한 Step에 더하는 기본 막 두께입니다. 10 Å = 1 nm입니다.', '한 번에 얇게 증착', '한 번에 두껍게 증착', 'growth', '0이면 증착은 없고 켜진 식각만 진행합니다. 실제 순 두께는 CVD·식각·억제에 따라 달라집니다.'),
+ 'cmb_recipe_model': spec('성장 모델', 'Conformal은 노출면의 균일 법선 성장, 수송·표면 반응은 구조별 공급과 반응, 기존 보정은 저장된 형상 계수를 적용합니다.', 'Conformal: 균일 성장 기준', '수송·반응 또는 기존 보정 조건 선택', 'recipe_model', 'ALD와 CVD 모두 성장 모델을 선택할 수 있습니다. SFO3.1은 기존 보정 모델의 ALD 프리셋 하나입니다. 모델 변경 후 다른 구조·두께에서 검증하세요.'),
+ 'cmb_process_type': spec('공정 · ALD / CVD', 'ALD는 GPC와 실제 cycle 수, CVD는 증착속도 D/R과 시간으로 실행합니다.', 'ALD: cycle마다 표면 반응이 다시 시작', 'CVD: 지정 시간 동안 연속 성장', 'process_type', 'D/R은 Deposition Rate(증착속도)입니다. 식각·재부착은 각각의 공정에서 선택할 수 있습니다.'),
+ 'cmb_growth_basis': spec('성장량 기준', '입력한 GPC 또는 D/R이 식각 전 성장량인지, 식각 후 평탄면 순성장량인지 지정합니다.', '식각 전: 입력 성장량에서 실제 식각을 차감', '순성장: 기준 평탄면 식각량을 한 번 보상', 'growth_basis', '평탄면 순성장을 선택해도 트랜치 모든 위치가 같은 두께로 자라지는 않습니다. 실제 측정값의 기준에 맞추세요.'),
+ 'spin_cvd_rate': spec('D/R · 증착속도', '기준 평탄면의 증착속도입니다. Å/s 단위이며 1 Å/s = 6 nm/min입니다.', '같은 시간에 공급되는 기준 성장량 감소', '같은 시간에 공급되는 기준 성장량 증가', 'cvd_rate', 'CVD에서 적용합니다. 최종 국소 막두께는 수송·반응·식각·재부착에 따라 달라집니다.'),
+ 'spin_cvd_duration': spec('CVD 시간', 'CVD 공정을 진행하는 실제 시간입니다. 기준 증착량은 D/R × 시간입니다.', '공정 진행 시간 감소', '공정 진행 시간 증가', 'cvd_time', '초 단위입니다. 내부 계산 횟수와는 다르며, 식각을 켜면 같은 시간 동안 식각도 진행됩니다.'),
+ 'spin_precursor_sticking': spec('전구체 반응확률', '도착한 중성 전구체가 반응 가능한 표면에서 소모될 확률입니다. 반응하지 않은 원료는 다시 이동할 수 있습니다.', '재방출이 늘어 깊은 곳으로 전달되기 쉬움', '먼저 만난 표면에서 소모되기 쉬움', 'sticking', '재증착 원료의 부착확률과 다른 값입니다. ALD에서는 이미 반응한 표면의 추가 반응이 줄어듭니다. 특정 장비·재료 조건에서 보정하는 유효 계수입니다.'),
+ 'spin_ald_exposure': spec('ALD 노출량', '반응 가능한 평탄면에 공급되는 유효 노출량입니다. 모델의 평탄면 포화율은 1−exp(−노출량)입니다.', '깊은 곳까지 포화시키기 어려움', '더 깊은 표면도 포화에 가까워짐', 'exposure', '초 단위 pulse 시간이 아닙니다. GPC는 선택한 노출 조건의 평탄면 성장량으로 유지하고, 깊이별 상대 포화도를 계산합니다.'),
+ 'spin_transport_rays': spec('수송 방향 수', '중성 원료와 재부착 원료의 이동 방향을 몇 개로 나누어 적분할지 정합니다.', '계산은 빠르지만 방향 근사가 거침', '방향 분포를 더 세밀하게 근사', 'rays', '원료량이나 실제 입자 수가 아닌 계산 정확도 설정입니다. 값을 높여 결과가 수렴하는지 확인하세요.'),
+ 'spin_numerical_step': spec('내부 계산 간격', '표면이 한 번에 이동하는 기준 두께를 제한하여 실제 cycle 또는 시간을 더 작은 단계로 나눕니다.', '작게 나누어 형상 변화를 세밀하게 추적', '적게 나누어 계산 시간이 줄어듦', 'mesh', 'Å 단위의 수치 설정입니다. 실제 ALD cycle 수·GPC·CVD 시간·D/R을 바꾸는 값이 아닙니다.'),
+ 'spin_inhibitor_sticking': spec('억제제 흡착확률', '빈 표면 자리에 도달한 억제제가 흡착할 유효 확률입니다. 억제제가 덮은 자리는 성장에 덜 참여합니다.', '입구에서 덜 소모되어 더 깊이 전달될 수 있음', '먼저 만난 표면에서 흡착되기 쉬움', 'inhibitor_sticking', '깊이별 억제 분포를 만드는 수송·흡착 계수입니다. 실제 화학종·탈착 반응·회복 시간을 예측하는 값은 아닙니다.'),
+ 'spin_inhibitor_exposure': spec('억제제 노출량', '구조 안으로 공급하는 억제제의 무차원 유효 노출량입니다.', '표면 피복과 성장 억제 감소', '더 넓은 표면에서 억제 피복 증가', 'inhibitor_exposure', 'pulse 시간이나 유량의 직접 입력이 아닙니다. 입력한 GPC/D/R은 억제 조건의 평탄면 기준이며, 깊이별 상대 성장량을 계산합니다.'),
+ 'spin_cycles': spec('ALD cycle 수', '실제 ALD 공정을 몇 cycle 진행할지 정합니다. 기준 성장량은 GPC × cycle 수입니다.', '공정 반복과 기준 성장량 감소', '공정 반복과 기준 성장량 증가', 'ald_cycles', '내부 계산 횟수와 다릅니다. 식각·닫힘 때문에 cycle이 늘어도 트랜치 모든 위치의 막두께가 계속 증가하지는 않습니다.'),
+ 'spin_angstrom_per_cycle': spec('GPC · Å/cycle', '선택한 ALD 조건에서 기준 평탄면이 한 cycle에 성장하는 두께입니다. 10 Å = 1 nm입니다.', '같은 cycle 수에서 기준 성장량 감소', '같은 cycle 수에서 기준 성장량 증가', 'ald_gpc', '식각 전/평탄면 순성장 중 선택한 기준을 따릅니다. 실제 트랜치 내부 성장량은 공급·반응·포화·식각에 따라 달라집니다.'),
  'spin_reparam_ds': spec('표면 점 간격 · 계산 해상도', '단면 곡선을 얼마나 촘촘한 점으로 나눌지 정합니다.', '촘촘한 점: 정밀하지만 느림', '성긴 점: 빠르지만 세부 형상 손실', 'mesh', '막질을 바꾸는 공정 조건이 아닙니다. 그림의 점 개수만 비교하세요.'),
  'cmb_quality_mode': spec('계산 품질', '표면 점 간격을 묶어서 선택하는 설정입니다.', '빠른 모드: 성긴 표면 점', '정밀 모드: 촘촘한 표면 점', 'quality', '공정 효과가 아닌 수치 설정입니다. 정밀도를 올려도 실측 정확도가 보장되지는 않습니다.'),
- 'chk_typical_cvd': spec('Typical CVD 켜기', '상부 측벽·모서리 성장 강화와 깊이에 따른 성장 감소를 조합합니다.', 'OFF: 다른 활성 증착 모델 사용', 'ON: CVD 형상 계수 적용', 'overhang', '실제 온도·압력으로 보정된 해석이 아닌 경험식입니다. 기존 깊이 감쇠와 중복 적용하지 않습니다.'),
+ 'chk_typical_cvd': spec('CVD 형상 보정', '기존 모델에서 상부 측벽·모서리 성장 강화와 깊이에 따른 성장 감소를 조합합니다.', 'OFF: 다른 활성 증착 모델 사용', 'ON: 경험적 형상 계수 적용', 'overhang', 'ALD/CVD 공정 종류를 바꾸는 스위치가 아닙니다. 실제 온도·압력으로 보정된 해석이 아닌 경험식이며 기존 깊이 감쇠와 중복 적용하지 않습니다.'),
  'cvd_overhang_pct': spec('Overhang · 입구 측벽 성장', '트랜치 입구 근처 측벽에 막이 더 자라도록 합니다.', '추가 강화가 작아 입구가 덜 좁아짐', '상부 측벽 성장이 커져 입구가 더 좁아짐', 'overhang'),
  'cvd_cusping_pct': spec('Cusping · 어깨 성장 집중', '평탄부와 벽이 만나는 경사진 모서리 주변의 성장을 강화합니다.', '모서리의 추가 성장이 적음', '모서리 부근에 성장이 더 집중', 'cusp', '최종 뾰족함이나 패임 깊이를 직접 지정하는 값은 아닙니다.'),
  'cvd_bottom_ratio_pct': spec('Bottom 성장률', '기준 깊이에서 평탄부 대비 기본 성장률을 정합니다.', '바닥 성장이 작아 depletion 증가', '바닥 성장이 커져 depletion 감소', 'bottom', '100%는 기본 깊이 감쇠 없음. 0%는 기준 깊이의 기본 성장 없음. 억제·상부 강화 적용 전 값입니다.'),
  'cvd_upper_length_a': spec('상부 영향 길이', 'Overhang과 Cusping 강화의 깊이 범위, Cusping의 좌우 범위를 함께 정합니다.', '입구·모서리 가까이에 집중', '입구 아래와 모서리 주변 더 넓게 영향', 'length', 'Å 단위입니다. 강화 계수가 0이면 이 길이를 바꿔도 강화 효과는 없습니다.'),
  'cvd_depth_power': spec('Depletion 곡선 지수', '입구에서 바닥까지 성장률이 감소하는 곡선 모양입니다.', '입구부터 비교적 빨리 감소', '상부 성장을 유지하다 깊은 곳에서 감소', 'power', '기준 깊이의 Bottom 비율 자체는 바꾸지 않습니다. Bottom 100%이면 영향이 없습니다.'),
  'chk_sputter': spec('Etch · 식각 켜기', '입사 각도에 따른 수율로 표면의 물질을 제거합니다.', 'OFF: 직접 식각과 재증착 원료 없음', 'ON: 식각 및 재증착 원료 생성 가능', 'etch'),
- 'spin_sputter_strength': spec('식각량 · Å/step', '한 Step의 식각 기준 크기입니다. 각도 응답과 가림이 이를 조절합니다.', '덜 깎임, 재증착 원료도 줄 수 있음', '더 깎임, 재증착 원료도 늘 수 있음', 'etch', 'Etch ON에서 적용. 많이 깎는다고 모든 위치의 최종 막이 얇아지는 것은 아닙니다.'),
+ 'spin_sputter_strength': spec('기준 식각량', 'ALD는 cycle당 제거량, CVD는 초당 제거량을 입력합니다. 각도 응답과 가림이 국소 제거량을 조절합니다.', '덜 깎임, 재부착 원료도 줄 수 있음', '더 깎임, 재부착 원료도 늘 수 있음', 'etch', '식각 ON에서 적용. 많이 깎는다고 모든 위치의 최종 막이 얇아지는 것은 아닙니다.'),
  'spin_sputter_peak_pct': spec('식각 수율 높이 · Peak %', '각도별 식각 응답 곡선의 전체 높이를 바꿉니다.', '모든 각도의 식각 응답 감소', '모든 각도의 식각 응답 증가', 'amplitude'),
  'spin_sputter_peak': spec('최대 식각 각도 · Peak', '표면 법선과 입사 방향 사이에서 식각이 가장 강한 각도입니다.', '법선에 가까운 입사에서 최대', '더 비스듬한 입사에서 최대', 'angle', '각도를 옮기는 설정입니다. 전체 식각량이 무조건 증가하는 것은 아닙니다.'),
  'spin_sputter_width': spec('식각 각도 폭 · Width', '최대 수율 주위에서 식각이 유효한 각도 범위입니다.', '좁은 각도 범위에 집중', '넓은 각도 범위에서 식각', 'spread'),
@@ -88,12 +99,17 @@ HELP = {
 
 # Keep the visible names short; technical terms belong in the explanation.
 SHORT_NAMES = {
- 'spin_cycles':'Step 수', 'spin_angstrom_per_cycle':'증착량 (Å/step)',
+ 'cmb_recipe_model':'성장 모델', 'cmb_process_type':'공정', 'cmb_growth_basis':'성장량 기준',
+ 'spin_cvd_rate':'D/R (Å/s)', 'spin_cvd_duration':'시간 (s)',
+ 'spin_precursor_sticking':'전구체 반응확률', 'spin_ald_exposure':'ALD 노출량',
+ 'spin_transport_rays':'수송 방향 수', 'spin_numerical_step':'내부 계산 간격 (Å)',
+ 'spin_inhibitor_sticking':'억제제 흡착확률', 'spin_inhibitor_exposure':'억제제 노출량',
+ 'spin_cycles':'ALD cycle 수', 'spin_angstrom_per_cycle':'GPC (Å/cycle)',
  'cmb_quality_mode':'계산 품질', 'spin_reparam_ds':'점 간격',
  'cvd_overhang_pct':'상부 성장', 'cvd_cusping_pct':'모서리 성장',
  'cvd_bottom_ratio_pct':'바닥 성장률', 'cvd_upper_length_a':'상부 영향 길이',
  'cvd_depth_power':'깊이 감쇠 지수',
- 'spin_sputter_strength':'식각량 (Å/step)', 'spin_sputter_peak_pct':'식각 세기 (%)',
+ 'spin_sputter_strength':'식각량', 'spin_sputter_peak_pct':'식각 세기 (%)',
  'spin_sputter_peak':'최대 식각 각도 (°)', 'spin_sputter_width':'식각 각도 폭 (°)',
  'spin_sputter_smoothing':'식각 평활화 (Å)',
  'spin_incident_sigma':'이온 각도 폭', 'spin_incident_rays':'계산 방향 수',
@@ -117,10 +133,45 @@ SHORT_NAMES = {
 }
 
 
+def effective_help(key, entry, config):
+    """Resolve units and mechanism descriptions from the actual selected model."""
+    process = getattr(config, 'process_type', 'ald')
+    physical = getattr(config, 'recipe_model', 'legacy_calibrated_v1') in ('physical_transport_v1', 'ideal_conformal_v1')
+    if key == 'spin_angstrom_per_cycle' and getattr(config, 'recipe_model', '') == 'ideal_conformal_v1':
+        return spec('GPC · Å/cycle', '한 ALD cycle의 기준 법선 성장 두께입니다. Conformal에서 추가 효과가 없으면 노출면 전체가 이 두께만큼 자랍니다.',
+                    '같은 cycle 수에서 더 얇게 성장', '같은 cycle 수에서 더 두껍게 성장', 'ald_gpc',
+                    '10 Å = 1 nm. 식각·재부착·억제를 켜면 최종 국소 두께는 달라질 수 있습니다. 내부 계산 간격과 구분하세요.')
+    if key == 'spin_sputter_strength':
+        unit = 'Å/s' if process == 'cvd' else 'Å/cycle'
+        basis = '기준 평탄면의 제거량' if physical else '기존 각도 응답의 최대 제거량 기준'
+        return spec('식각속도 · '+unit if process == 'cvd' else 'cycle당 식각량 · '+unit,
+                    basis+'입니다. 입사각과 기하학적 가림에 따라 국소 제거량이 달라집니다.',
+                    '제거량과 재부착 원료 감소', '제거량과 재부착 원료 증가', 'etch',
+                    '식각을 켰을 때 적용합니다. 실제 평탄면 순성장 기준에서는 평탄면 제거량을 한 번 보상합니다.' if physical else
+                    '기존 보정 모델의 각도 응답 기준입니다. 평탄면 제거량과 같다고 해석하지 마세요.')
+    if physical and key == 'chk_incident_los':
+        return spec('입사 이온 가림', '물리 수송 모델은 실제 구조에서 열린 입사 방향으로 도달하는 이온만 식각에 반영합니다.',
+                    '물리 수송에서는 항상 계산', '물리 수송에서는 항상 계산', 'shadow',
+                    '재부착을 꺼도 이온 가림은 유지됩니다. 이 스위치는 기존 보정 모델에서만 선택할 수 있습니다.')
+    if physical and key == 'chk_redepo':
+        return spec('재부착 사용', '이온 식각으로 제거된 원료를 방향별로 추적하여 처음 도착한 노출 표면에 붙입니다.',
+                    '제거된 원료가 막으로 돌아오지 않음', '도착 원료 중 부착 가능한 양이 다시 막으로 돌아옴', 'redepo',
+                    '꺼도 직접 식각과 이온 가림은 유지됩니다. 탈출하거나 붙지 않은 원료는 증착량에 더하지 않습니다.')
+    if physical and key == 'spin_redepo_efficiency':
+        return spec('재부착 확률', '식각으로 방출되어 다른 표면에 도착한 원료가 붙을 확률입니다.',
+                    '도착한 원료 중 붙는 양 감소', '도착한 원료 중 붙는 양 증가', 'redepo',
+                    '전체 제거량에 대한 회수율이 아닙니다. 구조 밖으로 탈출하는 양은 별도로 계산하며, 중성 전구체 반응확률과 구분합니다.')
+    if physical and key == 'chk_inhibition_deposition':
+        return spec('증착 억제 사용', '억제제 수송과 흡착 피복을 계산하여 반응 가능한 표면 자리의 비율을 줄입니다.',
+                    '억제제 피복에 따른 성장 조절 없음', '억제제 피복에 따른 깊이별 상대 성장 계산', 'inhibit',
+                    '기준 평탄면 GPC/D/R은 유지합니다. 특정 화학종의 탈착·분해·회복 시간은 계산하지 않는 유효 피복 모델입니다.')
+    return entry
+
+
 def apply_simple_names(owner,panel):
     if owner.active_emulator_number()!=0:return
     for attr,title in {
-        'chk_typical_cvd':'CVD 사용', 'chk_sputter':'식각 사용', 'chk_redepo':'재증착 사용',
+        'chk_typical_cvd':'CVD 형상 보정', 'chk_sputter':'식각 사용', 'chk_redepo':'재증착 사용',
         'chk_incident_los':'이온 가림 사용', 'chk_inhibition_deposition':'증착 억제 사용',
         'chk_depth_deposition':'기존 증착 감쇠', 'chk_ion_transmission':'기존 이온 감쇠',
         'lbl_etch_section':'식각 · 통합 모델', 'lbl_sputter_section':'식각 각도',
@@ -321,6 +372,16 @@ class ParameterHelp(QObject):
         self.delay.stop()
         self.dismiss.stop()
         entry,control=self.bindings[anchor]
+        key=control.property('helpParameterKey') or ''
+        config=None
+        config_error=''
+        if hasattr(self.owner,'current_config'):
+            try:
+                config=self.owner.current_config()
+            except (ValueError, TypeError) as error:
+                config_error='현재 입력을 확인하세요: '+str(error)
+        if config is not None:
+            entry=effective_help(key,entry,config)
         # The same legacy fields have different semantics in older emulator modes.
         mode=getattr(self.owner,'active_emulator_number',lambda:0)()
         if control is getattr(self.owner,'spin_redepo_emit_power',None) and mode not in (0,6):
@@ -330,6 +391,8 @@ class ParameterHelp(QObject):
         self.anchor=anchor
         b=self.bubble
         short=control.property('helpShortName') if mode==0 else None
+        if key == 'spin_sputter_strength':
+            short=None  # Actual process-dependent unit is resolved above.
         b.title.setText(short or entry.title)
         if isinstance(control,QAbstractSpinBox):value=control.text()
         elif isinstance(control,QComboBox):value=control.currentText()
@@ -345,16 +408,16 @@ class ParameterHelp(QObject):
         b.high.setText(('ON   ' if toggle else '↑ 높이면 / 이후   ')+entry.high)
         from .parameter_help_response import application_note
         from .parameter_help_trench import load_movie, recipe_note
-        key=control.property('helpParameterKey') or ''
-        status=''
+        status=config_error
         movie=None
         try:
-            if hasattr(self.owner,'current_config'):
-                status=application_note(key,self.owner.current_config())
+            if config is not None:
+                status=application_note(key,config)
             if mode in (0,6):
-                movie=load_movie(key)
+                movie=load_movie(key, getattr(config,'recipe_model','legacy_calibrated_v1'),
+                                 getattr(config,'process_type','ald'))
         except (OSError, ValueError, KeyError) as error:
-            status='예시 단면 자료를 읽을 수 없습니다: '+str(error)
+            status=(status+'\n' if status else '')+'예시 단면 자료를 읽을 수 없습니다: '+str(error)
         b.caution.setText((status+'\n' if status else '')+entry.caution)
         b.animation.configure(movie,key,entry.kind,getattr(self.owner,'_result',None))
         b.animation.set_view('auto')

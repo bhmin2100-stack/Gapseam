@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 from datetime import datetime
 from io import BytesIO
 import json
@@ -17,7 +18,6 @@ from gapsim.emulation.trench_depo import (
     TrenchSweepResult,
 )
 from gapsim.engine.run_logger import write_json
-from gapsim.engine import typical_cvd
 from gapsim.ui_qt.views.result_vector_view import ResultVectorView
 
 Point = Tuple[float, float]
@@ -70,13 +70,19 @@ def create_trench_run_dir(
     cycles: int,
     angstrom_per_cycle: float,
     request_note: str,
+    process_type: str = "ald",
+    cvd_rate_a_per_s: float = 1.0,
+    cvd_duration_s: float = 0.0,
 ) -> Path:
     root = Path(runs_root)
     root.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     note_slug = _safe_korean_slug(request_note)
     acyc = f"{float(angstrom_per_cycle):.3f}".rstrip("0").rstrip(".")
-    base_name = f"{ts}_트렌치증착_{int(cycles)}사이클_{acyc}A_{note_slug}"
+    if process_type == "cvd":
+        base_name = f"{ts}_CVD_{float(cvd_duration_s):g}초_{float(cvd_rate_a_per_s):g}A초_{note_slug}"
+    else:
+        base_name = f"{ts}_트렌치증착_{int(cycles)}사이클_{acyc}A_{note_slug}"
     for idx in range(1000):
         suffix = "" if idx == 0 else f"_{idx:03d}"
         run_dir = root / f"{base_name}{suffix}"
@@ -114,93 +120,8 @@ def result_to_payload(
         "kind": "trench_depo_emulation",
         "request_note_ko": _coerce_note(request_note),
         "config": {
-            **typical_cvd.config_values(config),
+            **asdict(config),
             "points": [[float(x), float(y)] for x, y in config.points],
-            "cycles": int(config.cycles),
-            "emulator_number": int(getattr(config, "emulator_number", 0) or 0),
-            "angstrom_per_cycle": float(config.angstrom_per_cycle),
-            "reparam_ds_a": float(config.reparam_ds_a),
-            "sputter_enabled": bool(config.sputter_enabled),
-            "sputter_strength_a_per_cycle": float(config.sputter_strength_a_per_cycle),
-            "sputter_peak_pct": float(config.sputter_peak_pct),
-            "sputter_peak_angle_deg": float(config.sputter_peak_angle_deg),
-            "sputter_width_deg": float(config.sputter_width_deg),
-            "sputter_smoothing_a": float(config.sputter_smoothing_a),
-            "ion_transmission_enabled": bool(config.ion_transmission_enabled),
-            "ion_transmission_override": (
-                None
-                if config.ion_transmission_override is None
-                else float(config.ion_transmission_override)
-            ),
-            "ion_transmission_start_depth_pct": float(config.ion_transmission_start_depth_pct),
-            "ion_transmission_end_depth_pct": float(config.ion_transmission_end_depth_pct),
-            "ion_transmission_decay_strength_pct": float(config.ion_transmission_decay_strength_pct),
-            "ion_transmission_floor_pct": float(config.ion_transmission_floor_pct),
-            "ion_transmission_curve_power": float(config.ion_transmission_curve_power),
-            "ion_transmission_aperture_shadow_pct": float(config.ion_transmission_aperture_shadow_pct),
-            "ion_transmission_lateral_shadow_pct": float(config.ion_transmission_lateral_shadow_pct),
-            "ion_transmission_edge_shadow_pct": float(config.ion_transmission_edge_shadow_pct),
-            "reflected_ion_enabled": bool(config.reflected_ion_enabled),
-            "reflected_ion_strength_pct": float(config.reflected_ion_strength_pct),
-            "reflected_ion_bowing_weight": float(config.reflected_ion_bowing_weight),
-            "reflected_ion_microtrench_weight": float(config.reflected_ion_microtrench_weight),
-            "reflected_ion_range_a": float(config.reflected_ion_range_a),
-            "redepo_enabled": bool(config.redepo_enabled),
-            "redepo_incident_los_enabled": bool(config.redepo_incident_los_enabled),
-            "redepo_incident_sigma_deg": float(config.redepo_incident_sigma_deg),
-            "redepo_incident_ray_count": int(config.redepo_incident_ray_count),
-            "redepo_source_model": str(config.redepo_source_model),
-            "redepo_efficiency_pct": float(config.redepo_efficiency_pct),
-            "redepo_emit_power": float(config.redepo_emit_power),
-            "redepo_distance_power": float(config.redepo_distance_power),
-            "redepo_neighbor_exclusion": int(config.redepo_neighbor_exclusion),
-            "redepo_max_distance_a": float(config.redepo_max_distance_a),
-            "redepo_soft_los_radius_points": int(config.redepo_soft_los_radius_points),
-            "redepo_transport_model": str(config.redepo_transport_model),
-            "redepo_ray_count": int(config.redepo_ray_count),
-            "redepo_footprint_sigma_a": float(config.redepo_footprint_sigma_a),
-            "redepo_footprint_radius_sigma": float(config.redepo_footprint_radius_sigma),
-            "lf_overhang_enabled": bool(config.lf_overhang_enabled),
-            "lf_overhang_dose": float(config.lf_overhang_dose),
-            "lf_overhang_sputter_gain": float(config.lf_overhang_sputter_gain),
-            "lf_overhang_redepo_fraction_pct": float(config.lf_overhang_redepo_fraction_pct),
-            "lf_overhang_survival_penalty": float(config.lf_overhang_survival_penalty),
-            "lf_overhang_width_a": float(config.lf_overhang_width_a),
-            "deposition_depth_enabled": bool(config.deposition_depth_enabled),
-            "deposition_feature_type": str(config.deposition_feature_type),
-            "deposition_feature_width_a": float(config.deposition_feature_width_a),
-            "deposition_feature_depth_a": float(config.deposition_feature_depth_a),
-            "deposition_feature_length_a": (
-                None
-                if config.deposition_feature_length_a is None
-                else float(config.deposition_feature_length_a)
-            ),
-            "deposition_attenuation_model": str(config.deposition_attenuation_model),
-            "deposition_depth_decay_k": float(config.deposition_depth_decay_k),
-            "deposition_depth_decay_power": float(config.deposition_depth_decay_power),
-            "deposition_min_ratio": float(config.deposition_min_ratio),
-            "deposition_use_equivalent_ar": bool(config.deposition_use_equivalent_ar),
-            "deposition_closure_threshold_a": float(config.deposition_closure_threshold_a),
-            "deposition_post_closure_fill_pct_hole": float(config.deposition_post_closure_fill_pct_hole),
-            "deposition_post_closure_fill_pct_line": float(config.deposition_post_closure_fill_pct_line),
-            "deposition_line_open_path_factor": float(config.deposition_line_open_path_factor),
-            "deposition_residual_fill_decay_length_a": float(config.deposition_residual_fill_decay_length_a),
-            "deposition_residual_fill_distribution": str(config.deposition_residual_fill_distribution),
-            "deposition_max_depo_per_cell_a": (
-                None
-                if config.deposition_max_depo_per_cell_a is None
-                else float(config.deposition_max_depo_per_cell_a)
-            ),
-            "deposition_conserve_volume": bool(config.deposition_conserve_volume),
-            "inhibition_enabled": bool(config.inhibition_enabled),
-            "inhibition_process_model": str(config.inhibition_process_model),
-            "inhibition_strength_pct": float(config.inhibition_strength_pct),
-            "inhibition_penetration_depth_a": float(config.inhibition_penetration_depth_a),
-            "inhibition_decay_power": float(config.inhibition_decay_power),
-            "inhibition_min_growth_ratio": float(config.inhibition_min_growth_ratio),
-            "inhibition_bottom_boost_pct": float(config.inhibition_bottom_boost_pct),
-            "inhibition_peald_recombination_pct": float(config.inhibition_peald_recombination_pct),
-            "inhibition_smoothing_a": float(config.inhibition_smoothing_a),
         },
         "result": {
             "frame_steps": [int(v) for v in result.frame_steps],
@@ -232,7 +153,7 @@ def payload_to_trench_run(payload: Dict[str, Any]) -> Tuple[TrenchDepoConfig, Tr
     if not isinstance(config_raw, dict) or not isinstance(result_raw, dict):
         raise ValueError("Invalid replay payload: missing config/result.")
 
-    points_raw = config_raw.get("points", DEFAULT_TRENCH_POINTS)
+    points_raw = config_raw.get("points", list(DEFAULT_TRENCH_POINTS))
     frame_profiles_raw = result_raw.get("frame_profiles", [])
     frame_voids_raw = result_raw.get("frame_voids", [])
     frame_steps_raw = result_raw.get("frame_steps", [])
@@ -272,121 +193,40 @@ def payload_to_trench_run(payload: Dict[str, Any]) -> Tuple[TrenchDepoConfig, Tr
     if len(frame_steps) != len(frame_profiles):
         frame_steps = list(range(len(frame_profiles)))
 
+    if not final_profile_raw and not frame_profiles:
+        raise ValueError("Invalid replay payload: no final profile or frames.")
     final_profile = _load_points(final_profile_raw, min_count=2) if final_profile_raw else list(frame_profiles[-1])
     meta = dict(meta_raw) if isinstance(meta_raw, dict) else {}
     note = _coerce_note(str(payload.get("request_note_ko", "")))
 
-    config = TrenchDepoConfig(
-        **{name: (bool(config_raw.get(name, default)) if isinstance(default, bool)
-                  else float(config_raw.get(name, default)))
-           for name, default in typical_cvd.DEFAULTS.items()},
-        points=points,
-        cycles=int(config_raw.get("cycles", max(0, len(frame_profiles) - 1))),
-        emulator_number=int(config_raw.get("emulator_number") or meta.get("emulator_number") or 0),
-        angstrom_per_cycle=float(config_raw.get("angstrom_per_cycle", 10.0)),
-        reparam_ds_a=float(config_raw.get("reparam_ds_a", 2.5)),
-        sputter_enabled=bool(config_raw.get("sputter_enabled", False)),
-        sputter_strength_a_per_cycle=float(config_raw.get("sputter_strength_a_per_cycle", 4.0)),
-        sputter_peak_pct=float(config_raw.get("sputter_peak_pct", 100.0)),
-        sputter_peak_angle_deg=float(config_raw.get("sputter_peak_angle_deg", 55.0)),
-        sputter_width_deg=float(config_raw.get("sputter_width_deg", 14.0)),
-        sputter_smoothing_a=float(config_raw.get("sputter_smoothing_a", 40.0)),
-        ion_transmission_enabled=bool(config_raw.get("ion_transmission_enabled", False)),
-        ion_transmission_override=(
-            None
-            if config_raw.get("ion_transmission_override", None) is None
-            else float(config_raw.get("ion_transmission_override"))
-        ),
-        ion_transmission_start_depth_pct=float(
-            config_raw.get("ion_transmission_start_depth_pct", 0.0)
-        ),
-        ion_transmission_end_depth_pct=float(
-            config_raw.get("ion_transmission_end_depth_pct", 100.0)
-        ),
-        ion_transmission_decay_strength_pct=float(
-            config_raw.get("ion_transmission_decay_strength_pct", 100.0)
-        ),
-        ion_transmission_floor_pct=float(config_raw.get("ion_transmission_floor_pct", 0.0)),
-        ion_transmission_curve_power=float(config_raw.get("ion_transmission_curve_power", 1.0)),
-        ion_transmission_aperture_shadow_pct=float(
-            config_raw.get("ion_transmission_aperture_shadow_pct", 100.0)
-        ),
-        ion_transmission_lateral_shadow_pct=float(
-            config_raw.get("ion_transmission_lateral_shadow_pct", 100.0)
-        ),
-        ion_transmission_edge_shadow_pct=float(
-            config_raw.get("ion_transmission_edge_shadow_pct", 100.0)
-        ),
-        reflected_ion_enabled=bool(config_raw.get("reflected_ion_enabled", False)),
-        reflected_ion_strength_pct=float(config_raw.get("reflected_ion_strength_pct", 0.0)),
-        reflected_ion_bowing_weight=float(config_raw.get("reflected_ion_bowing_weight", 0.75)),
-        reflected_ion_microtrench_weight=float(config_raw.get("reflected_ion_microtrench_weight", 1.0)),
-        reflected_ion_range_a=float(config_raw.get("reflected_ion_range_a", 1600.0)),
-        redepo_enabled=bool(config_raw.get("redepo_enabled", False)),
-        redepo_incident_los_enabled=bool(config_raw.get("redepo_incident_los_enabled", False)),
-        redepo_incident_sigma_deg=float(config_raw.get("redepo_incident_sigma_deg", 10.0)),
-        redepo_incident_ray_count=int(config_raw.get("redepo_incident_ray_count", 25)),
-        redepo_source_model=str(config_raw.get("redepo_source_model", "model2")),
-        redepo_efficiency_pct=float(config_raw.get("redepo_efficiency_pct", 25.0)),
-        redepo_emit_power=float(config_raw.get("redepo_emit_power", 1.0)),
-        redepo_distance_power=float(config_raw.get("redepo_distance_power", 1.0)),
-        redepo_neighbor_exclusion=int(config_raw.get("redepo_neighbor_exclusion", 2)),
-        redepo_max_distance_a=float(config_raw.get("redepo_max_distance_a", 1800.0)),
-        redepo_soft_los_radius_points=int(config_raw.get("redepo_soft_los_radius_points", 0)),
-        redepo_transport_model=str(config_raw.get("redepo_transport_model", "gapsim_binned_lobe_los")),
-        redepo_ray_count=int(config_raw.get("redepo_ray_count", 7)),
-        redepo_footprint_sigma_a=float(config_raw.get("redepo_footprint_sigma_a", 55.0)),
-        redepo_footprint_radius_sigma=float(config_raw.get("redepo_footprint_radius_sigma", 3.0)),
-        lf_overhang_enabled=bool(config_raw.get("lf_overhang_enabled", False)),
-        lf_overhang_dose=float(config_raw.get("lf_overhang_dose", 1.0)),
-        lf_overhang_sputter_gain=float(config_raw.get("lf_overhang_sputter_gain", 1.0)),
-        lf_overhang_redepo_fraction_pct=float(config_raw.get("lf_overhang_redepo_fraction_pct", 30.0)),
-        lf_overhang_survival_penalty=float(config_raw.get("lf_overhang_survival_penalty", 0.75)),
-        lf_overhang_width_a=float(config_raw.get("lf_overhang_width_a", 180.0)),
-        deposition_depth_enabled=bool(config_raw.get("deposition_depth_enabled", False)),
-        deposition_feature_type=str(config_raw.get("deposition_feature_type", "hole")),
-        deposition_feature_width_a=float(config_raw.get("deposition_feature_width_a", 240.0)),
-        deposition_feature_depth_a=float(config_raw.get("deposition_feature_depth_a", 4700.0)),
-        deposition_feature_length_a=(
-            None
-            if config_raw.get("deposition_feature_length_a", None) is None
-            else float(config_raw.get("deposition_feature_length_a"))
-        ),
-        deposition_attenuation_model=str(config_raw.get("deposition_attenuation_model", "exponential")),
-        deposition_depth_decay_k=float(config_raw.get("deposition_depth_decay_k", 0.8)),
-        deposition_depth_decay_power=float(config_raw.get("deposition_depth_decay_power", 1.2)),
-        deposition_min_ratio=float(config_raw.get("deposition_min_ratio", 0.03)),
-        deposition_use_equivalent_ar=bool(config_raw.get("deposition_use_equivalent_ar", True)),
-        deposition_closure_threshold_a=float(config_raw.get("deposition_closure_threshold_a", 8.0)),
-        deposition_post_closure_fill_pct_hole=float(
-            config_raw.get("deposition_post_closure_fill_pct_hole", 0.03)
-        ),
-        deposition_post_closure_fill_pct_line=float(
-            config_raw.get("deposition_post_closure_fill_pct_line", 0.20)
-        ),
-        deposition_line_open_path_factor=float(config_raw.get("deposition_line_open_path_factor", 1.0)),
-        deposition_residual_fill_decay_length_a=float(
-            config_raw.get("deposition_residual_fill_decay_length_a", 1175.0)
-        ),
-        deposition_residual_fill_distribution=str(
-            config_raw.get("deposition_residual_fill_distribution", "exponential_from_closure")
-        ),
-        deposition_max_depo_per_cell_a=(
-            None
-            if config_raw.get("deposition_max_depo_per_cell_a", None) is None
-            else float(config_raw.get("deposition_max_depo_per_cell_a"))
-        ),
-        deposition_conserve_volume=bool(config_raw.get("deposition_conserve_volume", True)),
-        inhibition_enabled=bool(config_raw.get("inhibition_enabled", False)),
-        inhibition_process_model=str(config_raw.get("inhibition_process_model", "hybrid")),
-        inhibition_strength_pct=float(config_raw.get("inhibition_strength_pct", 85.0)),
-        inhibition_penetration_depth_a=float(config_raw.get("inhibition_penetration_depth_a", 1100.0)),
-        inhibition_decay_power=float(config_raw.get("inhibition_decay_power", 1.2)),
-        inhibition_min_growth_ratio=float(config_raw.get("inhibition_min_growth_ratio", 0.08)),
-        inhibition_bottom_boost_pct=float(config_raw.get("inhibition_bottom_boost_pct", 20.0)),
-        inhibition_peald_recombination_pct=float(config_raw.get("inhibition_peald_recombination_pct", 35.0)),
-        inhibition_smoothing_a=float(config_raw.get("inhibition_smoothing_a", 45.0)),
-    )
+    # Dataclass fields are the replay schema. New physical/process fields must
+    # never disappear because an independently maintained field list was stale.
+    defaults = asdict(TrenchDepoConfig())
+    defaults["cycles"] = max(0, len(frame_profiles) - 1)
+    defaults["emulator_number"] = int(meta.get("emulator_number") or 0)
+    defaults["reparam_ds_a"] = 2.5  # Retain historical replay fallback.
+    values: Dict[str, Any] = {"points": points}
+    for name, default in defaults.items():
+        if name == "points":
+            continue
+        value = config_raw.get(name, default)
+        if name == "initial_voids":
+            if not isinstance(value, (list, tuple)):
+                raise ValueError("Invalid replay payload: initial_voids must be a list.")
+            values[name] = tuple(tuple(_load_points(list(poly), min_count=3)) for poly in value)
+        elif isinstance(default, bool):
+            if not isinstance(value, (bool, int)) or value not in (False, True, 0, 1):
+                raise ValueError(f"Invalid replay payload: {name} must be a boolean.")
+            values[name] = bool(value)
+        elif isinstance(default, int):
+            values[name] = int(value or 0) if name == "emulator_number" else int(value)
+        elif isinstance(default, float):
+            values[name] = float(value)
+        elif default is None:
+            values[name] = None if value is None else float(value)
+        else:
+            values[name] = str(value)
+    config = TrenchDepoConfig(**values)
     result = TrenchDepoResult(
         frame_steps=frame_steps,
         frame_profiles=frame_profiles,
@@ -417,6 +257,53 @@ def save_trench_depo_result_json(
     return path
 
 
+def _recipe_run_lines(config: TrenchDepoConfig) -> List[str]:
+    """Use process units consistently in exported descriptions."""
+    if config.process_type == "cvd":
+        dose = float(config.cvd_rate_a_per_s) * float(config.cvd_duration_s)
+        lines = ["공정: CVD", f"D/R: {float(config.cvd_rate_a_per_s):g} Å/s",
+                 f"증착 시간: {float(config.cvd_duration_s):g} s"]
+        etch_label, etch_unit = "식각 속도", "Å/s"
+    else:
+        dose = float(config.angstrom_per_cycle) * int(config.cycles)
+        lines = ["공정: ALD", f"GPC: {float(config.angstrom_per_cycle):g} Å/cycle",
+                 f"cycle 수: {int(config.cycles)}"]
+        etch_label, etch_unit = "사이클당 식각량", "Å/cycle"
+    basis = "식각 포함 순성장" if config.growth_basis == "net_planar" else "식각 전 성장"
+    lines.extend([
+        f"기준 평면 입력 두께: {dose:g} Å ({basis})",
+        f"{etch_label}: {float(config.sputter_strength_a_per_cycle):g} {etch_unit}",
+    ])
+    return lines
+
+
+def _frame_progress_label(
+    result: TrenchDepoResult, config: TrenchDepoConfig, frame_index: int,
+) -> str:
+    stages = result.meta.get("frame_stage_progress")
+    if isinstance(stages, list) and frame_index < len(stages) and isinstance(stages[frame_index], dict):
+        progress = stages[frame_index]
+        prefix = f"{int(progress.get('stage', 1))}차 {str(progress.get('process_type', 'ald')).upper()} · "
+        if progress.get("process_type") == "cvd" and progress.get("time_s") is not None:
+            duration = progress.get("duration_s")
+            end = f" / {float(duration):g}" if duration is not None else ""
+            return prefix + f"시간 {float(progress['time_s']):g}{end} s"
+        if progress.get("cycle") is not None:
+            total = progress.get("total_cycles")
+            end = f" / {int(total)}" if total is not None else ""
+            return prefix + f"Cycle {int(progress['cycle'])}{end}"
+        return prefix + f"프레임 {frame_index}"
+    if config.process_type == "cvd":
+        times = result.meta.get("frame_times_s", [])
+        if isinstance(times, list) and frame_index < len(times):
+            return f"시간 {float(times[frame_index]):g} / {float(config.cvd_duration_s):g} s"
+        return f"계산 프레임 {frame_index} / {max(0, len(result.frame_profiles) - 1)}"
+    counts = result.meta.get("frame_cycle_counts", result.frame_steps)
+    cycle = counts[frame_index] if isinstance(counts, list) and frame_index < len(counts) else frame_index
+    total_cycles = result.meta.get("cycles", config.cycles)
+    return f"Cycle {int(cycle)} / {int(total_cycles)}"
+
+
 def _gif_panel_lines(
     result: TrenchDepoResult,
     config: TrenchDepoConfig,
@@ -424,24 +311,33 @@ def _gif_panel_lines(
     request_note: str,
     frame_index: int,
 ) -> List[str]:
-    total_cycles = int(result.meta.get("cycles", max(0, len(result.frame_profiles) - 1)))
-    cycle = int(result.frame_steps[frame_index]) if frame_index < len(result.frame_steps) else frame_index
+    progress = result.meta.get("frame_stage_progress", [])
+    historical_note = ""
+    if isinstance(progress, list) and frame_index < len(progress):
+        stage = progress[frame_index].get("stage")
+        historical_note = "이전 기록에 해당 단계 설정이 없어 마지막 단계 설정을 표시합니다."
+        for record in result.meta.get("stage_history", []):
+            snapshot = record.get("recipe_config") if isinstance(record, dict) and record.get("stage") == stage else None
+            if isinstance(snapshot, dict):
+                config = TrenchDepoConfig(**{key: value for key, value in snapshot.items()
+                                            if key in TrenchDepoConfig.__dataclass_fields__})
+                historical_note = ""
+                break
     point_count = len(result.frame_profiles[frame_index]) if frame_index < len(result.frame_profiles) else 0
     note = _coerce_note(request_note)
     return [
         "트렌치 증착 런 정보",
         "",
-        f"현재 cycle: {cycle} / {total_cycles}",
+        _frame_progress_label(result, config, frame_index),
         f"현재 점 수: {point_count}",
         "",
         "[진행 파라미터]",
+        historical_note,
         f"증착 모델: {result.meta.get('growth_model', 'unknown')}",
         f"전파 방식: {result.meta.get('propagation', 'unknown')}",
-        f"사이클 수: {int(config.cycles)}",
-        f"사이클당 증착량: {float(config.angstrom_per_cycle):g} A",
+        *_recipe_run_lines(config),
         f"재샘플 간격: {float(config.reparam_ds_a):g} A",
         f"스퍼터: {'ON' if config.sputter_enabled else 'OFF'}",
-        f"스퍼터 세기: {float(config.sputter_strength_a_per_cycle):g} A/CYC",
         f"스퍼터 peak 비율: {float(config.sputter_peak_pct):g} %",
         f"스퍼터 peak angle: {float(config.sputter_peak_angle_deg):g} deg",
         f"스퍼터 width: {float(config.sputter_width_deg):g} deg",
@@ -609,11 +505,7 @@ def _render_gif_frames(
     try:
         for idx in range(len(frames)):
             view.show_frame(idx, fit=False)
-            current_cycle = int(result.frame_steps[idx]) if idx < len(result.frame_steps) else idx
-            total_cycles = int(result.meta.get("cycles", len(frames) - 1))
-            subtitle.setText(
-                f"Cycle {current_cycle}/{total_cycles}  |  {float(config.angstrom_per_cycle):g} A/CYC"
-            )
+            subtitle.setText(_frame_progress_label(result, config, idx))
             panel_text.setText("\n".join(_gif_panel_lines(result, config, request_note=request_note, frame_index=idx)))
             app.processEvents()
 
@@ -665,6 +557,9 @@ def export_trench_depo_run(
         cycles=int(config.cycles),
         angstrom_per_cycle=float(config.angstrom_per_cycle),
         request_note=note,
+        process_type=config.process_type,
+        cvd_rate_a_per_s=config.cvd_rate_a_per_s,
+        cvd_duration_s=config.cvd_duration_s,
     )
     base_name = run_dir.name
     payload = result_to_payload(config, result, request_note=note)
@@ -694,11 +589,9 @@ def export_trench_depo_run(
         f"런 폴더: {run_dir}",
         "",
         "[런 정보]",
-        f"사이클 수: {int(config.cycles)}",
-        f"사이클당 증착량: {float(config.angstrom_per_cycle):g} A",
+        *_recipe_run_lines(config),
         f"재샘플 간격: {float(config.reparam_ds_a):g} A",
         f"스퍼터: {'ON' if config.sputter_enabled else 'OFF'}",
-        f"스퍼터 세기: {float(config.sputter_strength_a_per_cycle):g} A/CYC",
         f"스퍼터 peak 비율: {float(config.sputter_peak_pct):g} %",
         f"스퍼터 peak angle: {float(config.sputter_peak_angle_deg):g} deg",
         f"스퍼터 width: {float(config.sputter_width_deg):g} deg",

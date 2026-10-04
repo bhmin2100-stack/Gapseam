@@ -25,6 +25,10 @@ def engine_fingerprint():
         ROOT/'src/gapsim/emulation/trench_depo.py',
         ROOT/'src/gapsim/emulation/model4_redeposition.py',
     ]
+    # Recipe execution contains the physical ALD/CVD path when available.
+    recipe_path = ROOT/'src/gapsim/emulation/process_recipe.py'
+    if recipe_path.exists():
+        paths.append(recipe_path)
     h = hashlib.sha256()
     for path in paths:
         h.update(str(path.relative_to(ROOT)).replace('\\', '/').encode())
@@ -64,11 +68,11 @@ def outlines(run):
     return [f['profile']] + [loop+[loop[0]] for loop in f['voids'] if loop]
 
 
-def build(keys=None):
+def build(keys=None, output=OUTPUT):
     fingerprint = engine_fingerprint()
     data = dict(version=catalog.VERSION, engine_sha256=fingerprint, runs={}, cases={})
-    if OUTPUT.exists():
-        previous = json.loads(gzip.decompress(OUTPUT.read_bytes()))
+    if output.exists():
+        previous = json.loads(gzip.decompress(output.read_bytes()))
         if previous.get('engine_sha256') == fingerprint and previous.get('version') == catalog.VERSION:
             data['runs'] = previous['runs']
     for key, example in catalog.examples().items():
@@ -82,11 +86,16 @@ def build(keys=None):
                 continue
             start = time.perf_counter()
             result = run_trench_depo(config)
-            indices = sorted(set(round(i*config.cycles/12) for i in range(13)))
+            last_index = len(result.frame_steps)-1
+            indices = sorted(set(round(i*last_index/12) for i in range(13)))
             frames = []
+            times = result.meta.get('frame_times_s') or [None]*len(result.frame_steps)
+            doses = result.meta.get('frame_doses_a') or [None]*len(result.frame_steps)
             for i in indices:
                 frames.append(dict(step=result.frame_steps[i], profile=result.frame_profiles[i],
                     voids=result.frame_voids[i],
+                    time_s=times[i],
+                    dose_a=doses[i],
                     transport=result.meta.get('frame_transport_lines', [[]]*len(result.frame_steps))[i][:16],
                     etch=result.meta.get('frame_etch_overlays', [[]]*len(result.frame_steps))[i][::3],
                     redepo=result.meta.get('frame_redepo_overlays', [[]]*len(result.frame_steps))[i][::3]))
@@ -94,17 +103,22 @@ def build(keys=None):
                 captured_mass=result.meta.get('redepo_total_mass_last', 0.),
                 removed_mass=result.meta.get('redepo_total_removed_mass_last', 0.))
             print(f'{key}: {example.field}={getattr(config, example.field)} / {time.perf_counter()-start:.2f}s', flush=True)
-        a, b = (data['runs'][rid] for rid in run_ids)
+        a, b = (data['runs'][run_ids[i]] for i in (0, -1))
         delta, focus = distance_and_focus(outlines(a), outlines(b))
         data['cases'][key] = dict(key=key, field=example.field, family=example.family,
-                                 labels=example.labels, runs=run_ids, difference_a=delta, focus=focus)
+                                 labels=example.labels, runs=run_ids, difference_a=delta, focus=focus,
+                                 context=catalog.SVT_CONTEXTS.get(key, ('기본 비교 조건', {}))[0],
+                                 source='2026-10-03 단일 변수 SVT; 현재 엔진 재계산')
     used = {rid for case in data['cases'].values() for rid in case['runs']}
     data['runs'] = {key: run for key, run in data['runs'].items() if key in used}
-    OUTPUT.write_bytes(gzip.compress(json.dumps(data, ensure_ascii=False, separators=(',', ':')).encode(), mtime=0))
-    print(f'{len(data["cases"])} cases, {len(data["runs"])} runs, {OUTPUT.stat().st_size} bytes', flush=True)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_bytes(gzip.compress(json.dumps(data, ensure_ascii=False, separators=(',', ':')).encode(), mtime=0))
+    print(f'{len(data["cases"])} cases, {len(data["runs"])} runs, {output.stat().st_size} bytes', flush=True)
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--keys', nargs='+')
-    build(parser.parse_args().keys)
+    parser.add_argument('--output', type=Path, default=OUTPUT)
+    args = parser.parse_args()
+    build(args.keys, args.output)

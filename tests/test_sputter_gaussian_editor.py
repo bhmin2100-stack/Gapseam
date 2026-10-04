@@ -595,6 +595,7 @@ class SputterGaussianEditorTest(unittest.TestCase):
             window.set_active_emulator_number(0, run=False)
             window.chk_sputter.setChecked(True)
             window.chk_ion_transmission.setChecked(True)
+            window.cmb_recipe_model.setCurrentIndex(window.cmb_recipe_model.findData("legacy_calibrated_v1"))
             window.sync_etch_control_availability()
 
             self.assertTrue(window._active_emulator_supports_sputter())
@@ -915,7 +916,7 @@ class SputterGaussianEditorTest(unittest.TestCase):
                 window.run_emulation(save_artifacts=False)
 
                 self.assertTrue(window.progress_run.isHidden())
-                self.assertEqual(window.lbl_status.text(), "Cycle 3/3 | 점 2")
+                self.assertEqual(window.lbl_status.text(), "Cycle 3 / 3 | 점 2")
             finally:
                 window.close()
 
@@ -1056,6 +1057,7 @@ class SputterGaussianEditorTest(unittest.TestCase):
             window = TrenchDepoWindow()
             try:
                 window.set_active_emulator_number(0, run=False)
+                window.cmb_recipe_model.setCurrentIndex(window.cmb_recipe_model.findData("legacy_calibrated_v1"))
                 window.spin_cycles.setValue(2)
                 window.spin_angstrom_per_cycle.setValue(12.5)
                 window.spin_sputter_strength.setValue(6.25)
@@ -1179,6 +1181,7 @@ class SputterGaussianEditorTest(unittest.TestCase):
         try:
             window.set_active_emulator_number(0, run=False)
             window.chk_depth_deposition.setChecked(True)
+            window.cmb_recipe_model.setCurrentIndex(window.cmb_recipe_model.findData("legacy_calibrated_v1"))
             window.sync_etch_control_availability()
 
             self.assertTrue(window._active_emulator_supports_sputter())
@@ -1331,6 +1334,7 @@ class SputterGaussianEditorTest(unittest.TestCase):
 
         try:
             window.set_active_emulator_number(0, run=False)
+            window.cmb_recipe_model.setCurrentIndex(window.cmb_recipe_model.findData("legacy_calibrated_v1"))
 
             self.assertTrue(window._active_emulator_supports_sputter())
             self.assertTrue(window._active_emulator_supports_ion_transmission())
@@ -1474,6 +1478,7 @@ class SputterGaussianEditorTest(unittest.TestCase):
 
         try:
             window.set_active_emulator_number(0, run=False)
+            window.cmb_recipe_model.setCurrentIndex(window.cmb_recipe_model.findData("legacy_calibrated_v1"))
             window.chk_sputter.setChecked(True)
             window.chk_redepo.setChecked(True)
             window.sync_etch_control_availability()

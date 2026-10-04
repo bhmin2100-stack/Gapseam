@@ -26,7 +26,7 @@ RECESSED=((-700.,0.),(-190.,0.),(-150.,-60.),(-150.,-220.),(-250.,-380.),
 
 
 def catalog():
-    cases=examples()
+    cases=examples(svt=False)
     base=cases['spin_cycles'].config
     cases['spin_depth_closure_threshold']=Example('spin_depth_closure_threshold',
         'deposition_closure_threshold_a',(1.,50.),('1 Å','50 Å'),'diagnostic',
@@ -59,6 +59,8 @@ def catalog():
 
 
 def values_for(e):
+    if len(e.values)==3:
+        return list(e.values)
     lo,hi=e.values
     if isinstance(lo,bool) or isinstance(lo,str) or lo is None or hi is None:
         return [lo,hi]
@@ -162,7 +164,7 @@ def build(keys=None):
     def split(e,c,all_values=True):
         # STRICT one-field change, even for toggles. Dependency guards belong
         # to the engine. Do not use Example.configs(), which mimics UI coupling.
-        vs=values_for(e) if all_values else list(e.values)
+        vs=values_for(e) if all_values else [e.values[0],e.values[-1]]
         configs=[replace(c,**{e.field:v}) for v in vs]
         first=asdict(configs[0])
         for cfg in configs[1:]:

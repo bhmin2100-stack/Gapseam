@@ -13,9 +13,9 @@ from gapsim.engine.incident_ions import source_integral
 
 # Attribute -> config field, UI-to-config factor, unit, useful comparison range.
 FIELDS = {
-    'spin_cycles': ('cycles', 1, 'Step', 10, 50),
-    'spin_angstrom_per_cycle': ('angstrom_per_cycle', 1, 'Å/step', 0, 20),
-    'spin_sputter_strength': ('sputter_strength_a_per_cycle', 1, 'Å/step', 0, 10),
+    'spin_cycles': ('cycles', 1, 'cycle', 10, 50),
+    'spin_angstrom_per_cycle': ('angstrom_per_cycle', 1, 'Å/cycle', 0, 20),
+    'spin_sputter_strength': ('sputter_strength_a_per_cycle', 1, 'Å/cycle', 0, 10),
     'spin_sputter_peak_pct': ('sputter_peak_pct', 1, '%', 0, 100),
     'spin_sputter_peak': ('sputter_peak_angle_deg', 1, '°', 20, 75),
     'spin_sputter_width': ('sputter_width_deg', 1, '°', 5, 40),
@@ -114,6 +114,8 @@ def growth_response(points, c):
 
 
 def los_active(c):
+    if getattr(c, 'recipe_model', 'legacy_calibrated_v1') != 'legacy_calibrated_v1':
+        return c.sputter_enabled and c.sputter_strength_a_per_cycle > 0
     return (c.sputter_enabled and c.sputter_strength_a_per_cycle > 0
             and c.redepo_enabled and c.redepo_incident_los_enabled)
 
@@ -131,6 +133,30 @@ def ion_response(points, c):
 def application_note(key, c):
     """Semantic gates: a collapsed/disabled editor is not a disabled process."""
     etch = c.sputter_enabled and c.sputter_strength_a_per_cycle > 0
+    model = getattr(c, 'recipe_model', 'legacy_calibrated_v1')
+    process = getattr(c, 'process_type', 'ald')
+    if key in ('spin_cycles', 'spin_angstrom_per_cycle', 'spin_ald_exposure'):
+        if process != 'ald':
+            return '현재 미적용: ALD 전용 입력 · CVD는 D/R과 시간 사용'
+        if key == 'spin_ald_exposure' and model != 'physical_transport_v1':
+            return '현재 미적용: 수송·표면 반응 모델에서 ALD 포화 계산에 사용'
+        return '현재 적용: ALD cycle 수와 GPC 기준'
+    if key in ('spin_cvd_rate', 'spin_cvd_duration'):
+        return '현재 적용: CVD D/R × 시간' if process == 'cvd' else '현재 미적용: CVD 전용 입력 · ALD는 GPC와 cycle 수 사용'
+    if key == 'spin_precursor_sticking':
+        return '현재 적용: 중성 전구체 수송·반응' if model == 'physical_transport_v1' else '현재 미적용: 수송·표면 반응 모델에서 사용'
+    if key in ('spin_inhibitor_sticking', 'spin_inhibitor_exposure'):
+        return '현재 적용: 억제제 수송·흡착 피복' if model != 'legacy_calibrated_v1' and c.inhibition_enabled else '현재 미적용: Conformal/수송 모델에서 증착 억제 ON 필요'
+    if key == 'spin_numerical_step':
+        return '계산 정확도 설정 · 실제 공정 cycle/시간과 별개' if model != 'legacy_calibrated_v1' else '현재 미적용: 기존 보정 모델은 저장된 계산 순서 유지'
+    if key == 'spin_transport_rays':
+        active = model == 'physical_transport_v1' or model == 'ideal_conformal_v1' and (c.inhibition_enabled or etch and c.redepo_enabled)
+        return '현재 적용: 방향 적분 정확도' if active else '현재 미적용: 중성 수송·억제 또는 재부착 수송 경로 없음'
+    if model != 'legacy_calibrated_v1':
+        if key.startswith(('cvd_', 'spin_inhibition_', 'spin_depth_', 'cmb_depth_', 'spin_ion_', 'slider_ion_')) or key in ('chk_typical_cvd', 'chk_depth_deposition', 'chk_ion_transmission', 'spin_sputter_smoothing', 'spin_sputter_peak_pct', 'spin_redepo_emit_power', 'spin_redepo_distance_power', 'spin_redepo_max_distance', 'spin_redepo_soft_los'):
+            return '현재 미적용: 기존 보정 모델 전용 설정'
+        if key.startswith(('spin_incident_', 'chk_incident_')):
+            return '현재 적용: 식각의 기하학적 이온 가림 · 재부착 OFF에서도 유지' if etch else '현재 미적용: 식각 OFF 또는 식각량 0'
     if key == 'spin_redepo_soft_los':
         return ''  # Retained compatibility input: its own help says ignored.
     if key.startswith('cvd_'):
@@ -169,7 +195,7 @@ def application_note(key, c):
 
 def build_response(key, c, values):
     """Evaluate exactly the listed values, never interpolate a pretend result."""
-    if key not in FIELDS or c.emulator_number not in (0, 6):
+    if key not in FIELDS or c.emulator_number not in (0, 6) or getattr(c, 'recipe_model', 'legacy_calibrated_v1') != 'legacy_calibrated_v1':
         return None
     field, scale, unit, _, _ = FIELDS[key]
     configs = []
@@ -191,7 +217,7 @@ def build_response(key, c, values):
         title = '기존 이온 전달 배율 (새 가림과 별개)'
         curves = [ion_response(points, v) for v in configs]
     elif key.startswith('spin_sputter_'):
-        title = '제한 전 각도별 식각 기준량 (Å/step)'
+        title = '제한 전 각도별 식각 기준량 ('+('Å/s' if c.process_type=='cvd' else 'Å/cycle')+')'
         x = tuple(float(i) for i in range(91))
         xlabel = '법선과 입사 방향 사이 각도 (°)'
         note = '실제 각도 수율 함수 × 식각량. 투영·가림·평활화·제거량 제한 전 응답이며, 최종 제거량이나 막두께가 아닙니다.'
@@ -200,7 +226,7 @@ def build_response(key, c, values):
             peak_pct=v.sputter_peak_pct) * v.sputter_strength_a_per_cycle
             if v.sputter_enabled else 0. for angle in x] for v in configs]
     elif key.startswith('spin_incident_'):
-        title = '가림 후 이온 식각 원료 응답 (Å/step)'
+        title = '가림 후 이온 식각 원료 응답 ('+('Å/s' if c.process_type=='cvd' else 'Å/cycle')+')'
         normals = engine._smooth_unit_vectors(engine.vertex_air_normals(points),
                     int(round(c.sputter_smoothing_a/20.)))
         curves = []
@@ -216,8 +242,8 @@ def build_response(key, c, values):
         end = max(v.cycles for v in configs)
         x = tuple(end*i/100 for i in range(101))
         curves = [[min(step, v.cycles)*v.angstrom_per_cycle for step in x] for v in configs]
-        xlabel = '계산 Step'
-        note = '명목 누적량 = Step × 기본 증착량. CVD·억제·식각·재증착·닫힘은 미포함. 실제 두께가 계속 증가한다는 뜻은 아닙니다.'
+        xlabel = 'ALD cycle'
+        note = '기준 누적량 = cycle × GPC. 억제·식각·재부착·닫힘은 미포함. 실제 국소 두께가 계속 증가한다는 뜻은 아닙니다.'
     elif key == 'spin_redepo_efficiency':
         title = '도달 원료 1에 대한 재부착 예산'
         x = (0., 1.)

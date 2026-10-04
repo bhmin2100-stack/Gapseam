@@ -63,6 +63,8 @@ class ProcessParameterPanel(QWidget):
     def __init__(self,w,base_group,parent_layout):
         super().__init__()
         self.w=w
+        from gapsim.emulation.recipe_ui import init_recipe_controls
+        init_recipe_controls(w)
         root=QVBoxLayout(self)
         root.setContentsMargins(0,0,0,0)
         nav=QGridLayout()
@@ -247,8 +249,10 @@ class ProcessParameterPanel(QWidget):
         self.w._invalidate_result_for_input_change()
 
     def conformal_only(self):
+        self.w.cmb_recipe_model.setCurrentIndex(self.w.cmb_recipe_model.findData('ideal_conformal_v1'))
         for check in (self.w.chk_typical_cvd,self.w.chk_depth_deposition,self.w.chk_sputter,self.w.chk_inhibition_deposition):
             check.setChecked(False)
+        self.w.chk_redepo.setChecked(False)
         self.w._invalidate_result_for_input_change()
         self.sync()
 
@@ -290,7 +294,7 @@ class ProcessParameterPanel(QWidget):
         self.sections['depth'].setEnabled(not cvd)
         w.depth_profile_group.setEnabled(not cvd and w.chk_depth_deposition.isChecked())
         # A read-only geometry summary remains available with either deposition model.
-        los=etch and w.chk_redepo.isChecked() and w.chk_incident_los.isChecked()
+        los=etch and w.chk_incident_los.isChecked()
         self.sections['ion'].setEnabled(not los)
         w.ion_map_group.setEnabled(not los and etch and w.chk_ion_transmission.isChecked())
         from gapsim.emulation.parameter_help import apply_simple_names
@@ -298,13 +302,15 @@ class ProcessParameterPanel(QWidget):
         if hasattr(self,'advanced_folds'):
             self.advanced_folds['cvd'].setEnabled(cvd)
             for key in ('direct','redepo','rays'):
-                self.advanced_folds[key].setEnabled(etch if key=='direct' else etch and w.chk_redepo.isChecked())
+                self.advanced_folds[key].setEnabled(etch if key in ('direct','rays') else etch and w.chk_redepo.isChecked())
             self.advanced_folds['inhibition'].setEnabled(inh)
             self.section_containers['depth'].setVisible(not cvd)
             self.section_containers['ion'].setVisible(not los)
             self.etch_effective.setText(f'각도 곡선 최대 식각량: {w.spin_sputter_strength.value()*w.spin_sputter_peak_pct.value()/100:g} Å/step (가림 적용 전)')
             self.etch_effective.setVisible(etch)
             self.dose_label.setText(f'누적 명목 증착량 {dose:g} Å ({dose/10:g} nm) · 식각/보정 전')
+        from gapsim.emulation.recipe_ui import sync_recipe_layout
+        sync_recipe_layout(w)
 
     def reorder(self,order):
         # Reordering remains available within each physical category; it cannot

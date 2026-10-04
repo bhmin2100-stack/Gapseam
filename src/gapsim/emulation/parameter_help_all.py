@@ -25,6 +25,8 @@ EXTRA = {
  'edit_parameter_preset_name':spec('프리셋 이름','현재 공정 조건을 저장할 이름입니다.','짧은 이름','조건을 구분할 이름','display','이름 자체는 결과를 바꾸지 않습니다. 같은 이름 저장 시 기존 항목을 확인하세요.'),
  'edit_request_note':spec('공정 메모','관찰 내용이나 조건 설명을 기록합니다.','간단한 기록','상세한 기록','display','메모는 물리 계산에 사용하지 않습니다. 결과 파일명과 요약에 포함됩니다.'),
  'cmb_parameter_preset':spec('공정 프리셋','저장한 공정 조건 묶음을 선택합니다.','현재 조건 유지','선택 조건을 적용해 비교','split','적용 버튼으로 반영합니다. 구조는 유지되지만 여러 공정값이 함께 바뀝니다.'),
+ 'chk_preset_run_defaults':spec('저장된 실행 조건 불러오기','프리셋 적용 시 저장된 ALD cycle 수와 CVD 시간을 함께 불러올지 선택합니다.','현재 cycle 수와 시간 유지','저장된 cycle 수와 시간 적용','display','공정 종류·성장 모델·GPC/D/R·반응 계수는 프리셋에서 적용합니다. 현재 구조는 이 선택과 관계없이 유지됩니다.'),
+ 'chk_preset_calculation_settings':spec('저장된 계산 정확도 불러오기','프리셋 적용 시 저장된 점 간격·방향 수·내부 계산 간격을 함께 불러올지 선택합니다.','현재 계산 정확도 유지','프리셋의 계산 정확도 적용','display','원래 SFO3.1 단면을 그대로 비교할 때는 저장된 계산 설정도 사용하세요. 이 선택은 구조 좌표나 공정 GPC/D/R을 바꾸는 기능이 아닙니다.'),
  'cmb_emulator_default_preset':spec('기본 프리셋','기본 모델의 시작 조건을 선택합니다.','현재 입력 조건','선택한 기본 조건','split','기본 조건을 적용하면 관련 파라미터가 바뀔 수 있습니다.'),
  'cmb_incident_preset':spec('검증 프리셋','이온 가림·재증착 연구에 사용한 조건 묶음입니다.','현재 조건','선택한 검증 조건','split','적용 버튼으로 반영합니다. 실제 장비에서 보정한 레시피라는 뜻은 아닙니다.'),
  'chk_incident_preset_geometry':spec('프리셋 구조 적용','검증 조건을 적용할 때 보고서의 트랜치 구조도 가져옵니다.','현재 구조 유지','보고서 구조로 변경','coordinates','체크만으로는 바뀌지 않습니다. 프리셋 적용 시 구조까지 변경됩니다.'),
@@ -105,14 +107,16 @@ def install_extended_help(owner,manager=None):
                        '조절점을 한쪽으로 이동','반대쪽으로 이동','display','선택한 조절점에 따라 효과가 다릅니다. 드래그 중에는 도움말이 나타나지 않습니다.')
             return entry,editor
         manager.resolvers[editor]=resolve
-    # Explicit overview for multi-axis peak: one handle edits angle AND height.
+    # The engineer pane keeps one removal amplitude. Its angular peak handle
+    # moves the angle only; historical vertical gain is normalized on load.
     editor=getattr(owner,'sputter_curve_editor',None)
     if editor is not None:
         previous=manager.resolvers[editor]
         def sputter_resolve(pos):
             if editor._hit_handle(QPointF(pos))=='peak':
-                return spec('최대 식각 각도 · 식각 세기','꼭짓점을 좌우로 움직이면 최대 식각 각도, 위아래로 움직이면 식각 세기가 바뀝니다.',
-                            '왼쪽: 작은 각도 / 아래: 약한 식각','오른쪽: 큰 각도 / 위: 강한 식각','angle'),editor
+                return spec('최대 식각 각도','꼭짓점을 좌우로 움직여 식각이 가장 강한 입사각을 바꿉니다. 식각량은 별도 입력 하나로 조절합니다.',
+                            '왼쪽: 더 작은 각도에서 최대','오른쪽: 더 큰 각도에서 최대','angle',
+                            '법선과 이온 입사 방향 사이의 각도입니다. 그래프의 높이를 별도 식각 세기로 중복 조절하지 않습니다.'),editor
             return previous(pos)
         manager.resolvers[editor]=sputter_resolve
     table=getattr(owner,'structure_points_table',None)

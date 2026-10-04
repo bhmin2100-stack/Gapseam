@@ -58,6 +58,7 @@ def test_secondary_actions_and_presets_remain_in_process(window):
 
 
 def test_hidden_long_pages_do_not_create_blank_scroll_space(window):
+    window.cmb_recipe_model.setCurrentIndex(window.cmb_recipe_model.findData('legacy_calibrated_v1'))
     p = window.process_parameter_panel
     p.select(0)
     QApplication.processEvents()
@@ -65,6 +66,7 @@ def test_hidden_long_pages_do_not_create_blank_scroll_space(window):
     assert window.process_geometry_fold.y() < window.progress_scroll_area.viewport().height()
     p.select(1)
     window.chk_typical_cvd.setChecked(True)
+    QApplication.processEvents()
     before = p.stack.sizeHint().height()
     p.advanced_folds['cvd'].setChecked(True)
     QApplication.processEvents()
@@ -72,6 +74,7 @@ def test_hidden_long_pages_do_not_create_blank_scroll_space(window):
 
 
 def test_advanced_and_compatibility_settings_are_preserved(window):
+    window.cmb_recipe_model.setCurrentIndex(window.cmb_recipe_model.findData('legacy_calibrated_v1'))
     p = window.process_parameter_panel
     window.chk_sputter.setChecked(True)
     window.chk_redepo.setChecked(True)
@@ -91,7 +94,8 @@ def test_advanced_and_compatibility_settings_are_preserved(window):
     assert p.advanced_folds['direct'].isAncestorOf(window.sputter_curve_editor)
     window.spin_sputter_strength.setValue(4)
     window.spin_sputter_peak_pct.setValue(50)
-    assert '2 Å/step' in p.etch_effective.text()
+    assert '2 Å/cycle' in p.etch_effective.text()
+    assert window.spin_sputter_peak_pct.isHidden()
 
 
 def test_reset_requires_confirmation(window):

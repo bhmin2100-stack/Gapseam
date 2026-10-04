@@ -1,4 +1,8 @@
-"""Reviewed 2026-10-03 synthetic trench study; not calibrated process recipes."""
+"""Profile-matched SFO3.1 ALD preset and its synthetic thickness study.
+
+The user accepted the shape; this does not establish independently measured
+material constants or predictive calibration across arbitrary structures.
+"""
 from .trench_depo import TrenchDepoConfig
 
 INCIDENT_PRESET_DOSES = (300, 500, 750, 1000, 1250, 1500, 1750, 2000)
@@ -12,6 +16,7 @@ def incident_study_preset(dose_a=300):
     if dose_a not in INCIDENT_PRESET_DOSES:
         raise ValueError("Unsupported incident-ion study thickness")
     return TrenchDepoConfig(
+        recipe_model="legacy_calibrated_v1", process_type="ald", growth_basis="gross",
         points=INCIDENT_STUDY_POINTS, emulator_number=0, cycles=int(dose_a // 2),
         angstrom_per_cycle=2., reparam_ds_a=5., sputter_enabled=True,
         sputter_strength_a_per_cycle=8./3., sputter_peak_pct=100.,

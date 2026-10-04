@@ -9,7 +9,7 @@ from . import trench_depo as engine
 from .parameter_help_response import growth_response, ion_response
 from .parameter_help_trench import TRENCH
 
-COLORS = ('#008694', '#db790c')
+COLORS = ('#008694', '#6c58b5', '#db790c')
 
 
 def path(points, transform, close=False):
@@ -84,7 +84,7 @@ class TrenchAnimation(QWidget):
         self.timer = QTimer(self)
         self.timer.setInterval(50)
         self.timer.timeout.connect(self.advance)
-        self.setAccessibleName('실제 트랜치 단면 두 조건 비교, 변화 확대, 공간적 물리 의미')
+        self.setAccessibleName('실제 트랜치 단면 단일 변수 비교, 변화 확대, 공간적 물리 의미')
 
     def configure(self, movie, key, kind, result=None):
         self.movie, self.key, self.kind = movie, key, kind
@@ -107,7 +107,8 @@ class TrenchAnimation(QWidget):
                 points = engine.equal_arc_resample(c.points, 20.)
                 normals = engine.vertex_air_normals(points)
                 self.fields.append(dict(points=points, normals=normals,
-                    growth=growth_response(points, c), ion=ion_response(points, c),
+                    growth=growth_response(points, c) if getattr(c, 'recipe_model', 'legacy_calibrated_v1') == 'legacy_calibrated_v1' else [],
+                    ion=ion_response(points, c),
                     rays=incoming_paths(c.points, c.redepo_incident_sigma_deg, c.redepo_incident_ray_count)))
         self.update()
 
@@ -178,14 +179,21 @@ class TrenchAnimation(QWidget):
         return transform, scale
 
     def draw_shapes(self, p):
-        self.label(p, '예시 트랜치 실제 계산 · 두 조건 같은 축척', 0, size=13)
+        count = len(self.movie['runs'])
+        self.label(p, f'예시 트랜치 실제 계산 · {count}조건 같은 축척·같은 진행률', 0, size=13)
+        width = (504 - (count-1)*8)/count
         for i, run in enumerate(self.movie['runs']):
-            rect = QRectF(8+i*258, 62, 246, 232)
+            rect = QRectF(8+i*(width+8), 62, width, 232)
             p.setPen(QPen(QColor('#d6e1e8'), 1)); p.setBrush(QColor('#ffffff')); p.drawRoundedRect(rect, 7, 7)
             frame = frame_at(run, self.progress())
             p.setPen(QColor(COLORS[i]))
-            p.drawText(QRectF(rect.x()+5, 27, 240, 22), Qt.AlignCenter, self.movie['labels'][i])
-            p.drawText(QRectF(rect.x()+5, 47, 240, 18), Qt.AlignCenter, f"{frame['step']} / {run['config']['cycles']} Step")
+            role = '기준 · ' if count == 3 and i == 1 else ''
+            p.drawText(QRectF(rect.x(), 27, width, 22), Qt.AlignCenter, role+self.movie['labels'][i])
+            c = run['config']
+            progress = (f"{frame['time_s']:g} / {c['cvd_duration_s']:g} s"
+                        if c.get('process_type') == 'cvd' and frame.get('time_s') is not None
+                        else f"{frame['step']} / {c['cycles']} cycle")
+            p.drawText(QRectF(rect.x(), 47, width, 18), Qt.AlignCenter, progress)
             transform, scale = self.draw_profile(p, run, frame, rect.adjusted(6, 10, -6, -10), self.bounds, COLORS[i])
             p.setPen(QPen(QColor('#475569'), 1))
             p.drawLine(QPointF(rect.x()+12, 280), QPointF(rect.x()+12+100*scale, 280))
@@ -202,8 +210,11 @@ class TrenchAnimation(QWidget):
         return x-half, y-half, x+half, y+half
 
     def draw_zoom(self, p):
-        self.label(p, '동일 위치 확대 · 두 조건 겹침 · X/Y 같은 확대 비율', 0, size=13)
-        self.label(p, f"청록 {self.movie['labels'][0]}     /     주황 {self.movie['labels'][1]}", 24)
+        self.label(p, '동일 위치 확대 · 조건 겹침 · X/Y 같은 확대 비율', 0, size=13)
+        count = len(self.movie['runs'])
+        for i, label in enumerate(self.movie['labels']):
+            p.setPen(QColor(COLORS[i]))
+            p.drawText(QRectF(10+i*500/count, 24, 500/count, 23), Qt.AlignCenter, label)
         rect, bounds = QRectF(16, 55, 488, 242), self.zoom_bounds()
         p.setPen(Qt.NoPen); p.setBrush(QColor('#ffffff')); p.drawRect(rect)
         for i, run in enumerate(self.movie['runs']):
@@ -230,8 +241,9 @@ class TrenchAnimation(QWidget):
     def draw_meaning(self, p):
         family = self.movie['family']
         phase = self.phase*4 % 1 if self.view == 'auto' else self.phase
-        sample = 0 if phase < .5 else 1
-        travel = (phase*2) % 1
+        count = len(self.movie['runs'])
+        sample = min(count-1, int(phase*count))
+        travel = (phase*count) % 1
         run = self.movie['runs'][sample]
         frame = run['frames'][-1]
         fields = self.fields[sample]
@@ -247,7 +259,14 @@ class TrenchAnimation(QWidget):
         background = run['frames'][0] if initial_fields else frame
         transform, scale = self.draw_profile(p, run, background, rect, bounds, COLORS[sample])
         p.save(); p.setClipRect(rect)
-        if family == 'redepo':
+        if family == 'physical_growth':
+            points = frame['profile']
+            if points:
+                pt = points[min(len(points)-1, int(travel*len(points)))]
+                p.setPen(Qt.NoPen); p.setBrush(QColor(COLORS[sample])); p.drawEllipse(transform(*pt), 4, 4)
+            caption = '선택한 성장 모델로 계산한 경계 · 점은 경계 위치 표시'
+            detail = '표면 이동을 임의로 과장하지 않습니다. 단면 비교/확대에서 차이를 확인하세요.'
+        elif family == 'redepo':
             lines = sorted(frame['transport'], key=lambda line: line[-1], reverse=True)[:10]
             for i, (x1, y1, x2, y2, weight) in enumerate(lines):
                 a, b = transform(x1, y1), transform(x2, y2)
@@ -274,7 +293,7 @@ class TrenchAnimation(QWidget):
                 color = QColor('#368bd2'); color.setAlpha(int(90+120*(1-travel)))
                 p.setPen(Qt.NoPen); p.setBrush(color); p.drawEllipse(transform(x, y), radius, radius)
             caption = '파랑 원: 엔진이 계산한 제거 위치와 상대 제거량'
-            detail = '두 조건에 같은 원 크기 기준을 씁니다. 원의 크기는 실제 구멍 크기가 아닙니다.'
+            detail = '모든 조건에 같은 원 크기 기준을 씁니다. 원의 크기는 실제 구멍 크기가 아닙니다.'
         elif family == 'mesh':
             for i, pt in enumerate(frame['profile']):
                 p.setPen(Qt.NoPen); p.setBrush(QColor(COLORS[sample])); p.drawEllipse(transform(*pt), 2., 2.)
@@ -319,6 +338,8 @@ class TrenchAnimation(QWidget):
 
     def draw_setting(self, p):
         """Spatial UI illustrations, never fake physical growth or flow boxes."""
+        if self.draw_recipe_meaning(p):
+            return
         t = (1-math.cos(2*math.pi*self.phase))/2
         rect = QRectF(30, 45, 460, 238)
         transform, scale = fit_transform((-750, -980, 750, 200), rect)
@@ -376,3 +397,74 @@ class TrenchAnimation(QWidget):
             p.setPen(Qt.NoPen); p.setBrush(QColor('#008694')); p.drawEllipse(transform(*point), 4, 4)
         self.label(p, title, 0, size=13)
         self.label(p, caption, 304, '#64748b', 11)
+
+    def draw_recipe_meaning(self, p):
+        """Explicit reference equations; these never impersonate trench results."""
+        kinds = {'ald_cycles', 'ald_gpc', 'cvd_rate', 'cvd_time', 'process_type',
+                 'recipe_model', 'growth_basis', 'sticking', 'exposure',
+                 'inhibitor_sticking', 'inhibitor_exposure'}
+        if self.kind not in kinds:
+            return False
+        phase = self.phase
+        left, top, width, height = 55., 60., 420., 205.
+        p.setPen(QPen(QColor('#94a3b8'), 1))
+        p.drawLine(QPointF(left, top), QPointF(left, top+height))
+        p.drawLine(QPointF(left, top+height), QPointF(left+width, top+height))
+        if self.kind in ('exposure', 'inhibitor_exposure'):
+            self.label(p, '설명용 · 평탄면의 유효 표면 피복', 0, size=13)
+            for exposure, color in ((1., COLORS[0]), (5., COLORS[2])):
+                points = [QPointF(left+width*i/100, top+height*math.exp(-exposure*i/100))
+                          for i in range(101)]
+                p.setPen(QPen(QColor(color), 2))
+                curve = QPainterPath(points[0])
+                for point in points[1:]:curve.lineTo(point)
+                p.drawPath(curve)
+                i = int(phase*100)
+                p.setPen(Qt.NoPen); p.setBrush(QColor(color)); p.drawEllipse(points[i], 4, 4)
+            self.label(p, '피복률 = 1 − exp(−유효 노출량) · 최대 100%', 280)
+            self.label(p, '무차원 노출량의 원리 그림 · 실제 트랜치 단면이나 pulse 시간이 아님', 310, '#64748b', 11)
+        elif self.kind in ('sticking', 'inhibitor_sticking'):
+            self.label(p, '설명용 · 반응 가능한 표면에서의 흡착/반응확률', 0, size=13)
+            for row, (probability, color) in enumerate(((.1, COLORS[0]), (.7, COLORS[2]))):
+                y = 120+row*95
+                p.setPen(QColor(color)); p.drawText(75, y-25, f'반응확률 {probability:g}')
+                for i in range(10):
+                    reactive = i < round(probability*10)
+                    p.setBrush(QColor(color if reactive else '#d9e1e8'))
+                    p.setPen(Qt.NoPen)
+                    p.drawEllipse(QPointF(90+i*35, y+(1-phase)*12), 8, 8)
+            self.label(p, '색: 표면에서 소모 · 회색: 반응하지 않아 다시 이동 가능', 280)
+            self.label(p, '반응 가능한 자리의 확률 설명 · 깊이별 포집량은 구조 수송 계산으로 결정', 310, '#64748b', 11)
+        elif self.kind == 'growth_basis':
+            self.label(p, '설명용 · 평탄면에서 성장과 제거를 한 번씩 계산', 0, size=13)
+            labels = [('식각 전 입력', 3., 1.), ('순성장 입력', 4., 1.)]
+            for i, (label, growth, removal) in enumerate(labels):
+                x = 150+i*205
+                p.setPen(QColor('#334155')); p.drawText(x-65, 88, label)
+                h = 35*(growth-removal*min(1., phase*2))
+                p.setPen(Qt.NoPen); p.setBrush(QColor(COLORS[i])); p.drawRect(QRectF(x-30, 245-h, 60, h))
+                p.setPen(QColor('#334155')); p.drawText(x-80, 285, f'{growth:g} 성장 − {removal:g} 제거 = {growth-removal:g}')
+            self.label(p, '같은 입력 3, 평탄면 제거 1의 예시 · 트랜치 형상 예측이 아님', 310, '#64748b', 11)
+        elif self.kind == 'recipe_model':
+            self.label(p, '모델 선택 · 저장된 계수의 해석과 계산법 선택', 0, size=13)
+            for i, text in enumerate(('Conformal: 노출면에 같은 법선 두께 성장', '수송·반응: 구조별 공급과 포화 계산', '기존 보정: SFO3.1 단면 기준 유지')):
+                p.setPen(QColor(COLORS[i])); p.drawText(85, 112+i*58, text)
+            self.label(p, '모델 간 정확도 순위를 뜻하지 않습니다. 다른 구조에서 검증하세요.', 305, '#64748b', 11)
+            p.setPen(Qt.NoPen); p.setBrush(QColor('#008694')); p.drawEllipse(QPointF(80+phase*370, 250), 4, 4)
+        else:
+            ald = self.kind in ('ald_cycles', 'ald_gpc')
+            self.label(p, '설명용 · 기준 평탄면 성장량의 관계식', 0, size=13)
+            for multiplier, color in ((.45, COLORS[0]), (.9, COLORS[2])):
+                curve = QPainterPath(QPointF(left, top+height))
+                for i in range(1, 101):
+                    x = i/100
+                    y = math.floor(x*10)/10 if ald else x
+                    curve.lineTo(QPointF(left+width*x, top+height*(1-y*multiplier)))
+                p.setPen(QPen(QColor(color), 2)); p.drawPath(curve)
+                y = math.floor(phase*10)/10 if ald else phase
+                p.setPen(Qt.NoPen); p.setBrush(QColor(color)); p.drawEllipse(QPointF(left+width*phase, top+height*(1-y*multiplier)), 4, 4)
+            equation = 'ALD: GPC × cycle 수' if ald else 'CVD: D/R × 시간'
+            if self.kind == 'process_type':equation = 'ALD: GPC × cycle 수 / CVD: D/R × 시간'
+            self.label(p, equation, 282)
+            self.label(p, '기준량 관계식 · 실제 트랜치 두께는 수송·반응·식각에 따라 달라짐', 310, '#64748b', 11)
+        return True

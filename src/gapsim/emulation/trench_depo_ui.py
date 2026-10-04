@@ -8,6 +8,7 @@ import platform
 import subprocess
 import sys
 import time
+from threading import Event
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -67,7 +68,10 @@ from gapsim.emulation.research_registry import MAX_EMULATOR_NUMBER
 from gapsim.emulation.incident_presets import SFO31_PRESET_NAME, ensure_sfo31_preset
 from gapsim.emulation.app_icon import gfe_icon, set_taskbar_identity
 from gapsim.emulation.process_parameters import init_cvd_controls, cvd_values, apply_cvd_values, ProcessParameterPanel
+from gapsim.emulation.recipe_ui import (recipe_values, apply_recipe_values,
+    install_recipe_layout, recipe_result_summary, recipe_split_options, RECIPE_WIDGETS)
 from gapsim.engine import typical_cvd
+from gapsim.engine.deposition_pipeline import SimulationCanceled
 from gapsim.emulation.parameter_library import (
     DEFAULT_PARAMETER_LIBRARY_PATH,
     delete_parameter_preset,
@@ -75,6 +79,7 @@ from gapsim.emulation.parameter_library import (
     read_parameter_preset,
     sanitize_parameter_preset_name,
     save_parameter_preset,
+    parameter_preset_application_values,
 )
 from gapsim.emulation.addon_manager import (
     DEFAULT_ADDON_ROOT,
@@ -114,6 +119,7 @@ from gapsim.emulation.trench_depo import (
     run_trench_depo_sweep,
 )
 from gapsim.emulation.trench_depo_export import (
+    _frame_progress_label,
     DEFAULT_RESULTS_ROOT,
     DEFAULT_RUNS_ROOT,
     export_trench_depo_run,
@@ -365,8 +371,71 @@ def merge_continued_trench_result(
     merged_voids = base_voids + used_voids
     merged_stage_ids = _result_frame_stage_ids(base_result) + [stage_i for _ in used_frames]
 
+    def frame_progress(result: TrenchDepoResult, forced_stage: Optional[int] = None) -> List[Dict[str, Any]]:
+        saved = result.meta.get("frame_stage_progress")
+        if isinstance(saved, list) and len(saved) == len(result.frame_profiles) and all(isinstance(v, Mapping) for v in saved):
+            return [dict(value) for value in saved]
+        source = result.meta
+        process = str(source.get("process_type", "ald"))
+        model = str(source.get("recipe_model", "legacy_calibrated_v1"))
+        basis = str(source.get("growth_basis", "gross"))
+        count = len(result.frame_profiles)
+        ids = [forced_stage] * count if forced_stage is not None else _result_frame_stage_ids(result)
+
+        def series(name: str) -> List[Any]:
+            values = source.get(name)
+            return list(values) if isinstance(values, list) and len(values) == count else []
+
+        times, cycles, doses = series("frame_times_s"), series("frame_cycle_counts"), series("frame_doses_a")
+        local_steps = result.frame_steps if len(result.frame_steps) == count else list(range(count))
+        if process == "ald" and not cycles:
+            cycles = list(local_steps)
+        if not doses and not source.get("history_self_contained"):
+            rate = source.get("cvd_rate_a_per_s" if process == "cvd" else "angstrom_per_cycle")
+            progress_values = times if process == "cvd" else cycles
+            if isinstance(rate, (int, float)) and len(progress_values) == count:
+                doses = [float(rate) * float(value) for value in progress_values]
+        return [{
+            "stage": ids[index], "process_type": process, "recipe_model": model,
+            "growth_basis": basis,
+            "cycle": int(cycles[index]) if cycles else None,
+            "time_s": float(times[index]) if times else None,
+            "dose_a": float(doses[index]) if doses else None,
+            "total_cycles": int(source.get("stage_cycles", source.get("cycles", cycles[-1] if cycles else 0))) if process == "ald" else None,
+            "duration_s": float(source.get("cvd_duration_s", times[-1] if times else 0.0)) if process == "cvd" else None,
+            "total_dose_a": source.get("nominal_dose_a", doses[-1] if doses else None),
+        } for index in range(count)]
+
+    progress = frame_progress(base_result) + frame_progress(next_result, stage_i)[drop_head:]
+
+    def accumulated_progress(key: str, *, integer: bool = False) -> List[Any]:
+        if any(value.get(key) is None for value in progress):
+            return []
+        values = []
+        offset = 0.0
+        previous_stage = progress[0]["stage"]
+        for value in progress:
+            if value["stage"] != previous_stage:
+                offset = float(values[-1])
+                previous_stage = value["stage"]
+            amount = offset + float(value[key])
+            values.append(int(amount) if integer else amount)
+        return values
+
     meta = dict(next_result.meta)
     base_meta = dict(base_result.meta)
+    process_types = {value["process_type"] for value in progress}
+    growth_bases = {value["growth_basis"] for value in progress}
+    meta["frame_stage_progress"] = progress
+    meta["history_process_type"] = next(iter(process_types)) if len(process_types) == 1 else "mixed"
+    meta["frame_times_s"] = accumulated_progress("time_s") if process_types == {"cvd"} else []
+    meta["frame_cycle_counts"] = accumulated_progress("cycle", integer=True) if process_types == {"ald"} else []
+    meta["frame_doses_a"] = accumulated_progress("dose_a") if len(growth_bases) == 1 else []
+    meta["stage_nominal_dose_a"] = next_result.meta.get("nominal_dose_a")
+    if meta["frame_doses_a"]:
+        meta["nominal_dose_a"] = meta["frame_doses_a"][-1]
+    else:
+        meta.pop("nominal_dose_a", None)
     for key in ("frame_redepo_overlays", "frame_etch_overlays", "frame_transport_lines"):
         meta[key] = _result_frame_series(base_result, key) + _result_frame_series(next_result, key)[drop_head:]
 
@@ -381,6 +450,10 @@ def merge_continued_trench_result(
                 "start_step": int(base_steps[0]) if base_steps else 0,
                 "end_step": int(base_steps[-1]) if base_steps else 0,
                 "frames": len(base_result.frame_profiles),
+                "process_type": base_meta.get("process_type", "ald"),
+                "recipe_model": base_meta.get("recipe_model", "legacy_calibrated_v1"),
+                "growth_basis": base_meta.get("growth_basis", "gross"),
+                "recipe_config": base_meta.get("recipe_config", base_meta.get("stage_recipe_config")),
             }
         ]
 
@@ -391,6 +464,10 @@ def merge_continued_trench_result(
                 "start_step": int(merged_steps[len(base_result.frame_profiles)]),
                 "end_step": int(merged_steps[-1]),
                 "frames": len(used_frames),
+                "process_type": next_result.meta.get("process_type", "ald"),
+                "recipe_model": next_result.meta.get("recipe_model", "legacy_calibrated_v1"),
+                "growth_basis": next_result.meta.get("growth_basis", "gross"),
+                "recipe_config": next_result.meta.get("recipe_config", next_result.meta.get("stage_recipe_config")),
                 "continued_from_run": "" if continued_from_run is None else str(Path(continued_from_run)),
             }
         )
@@ -2678,10 +2755,9 @@ class SplitTestWindow(QMainWindow):
                 continue
             local_idx = max(0, min(idx, len(frames) - 1))
             self._views[case_idx].show_frame(local_idx, fit=False)
-            cycle = case.result.frame_steps[local_idx] if local_idx < len(case.result.frame_steps) else local_idx
-            total = case.result.meta.get("cycles", len(frames) - 1)
             points = len(frames[local_idx])
-            self._case_status_labels[case_idx].setText(f"Cycle {cycle}/{total} | 점 {points}")
+            label = _frame_progress_label(case.result, case.config, local_idx)
+            self._case_status_labels[case_idx].setText(f"{label} | 점 {points}")
         if self._compare_overlay_enabled:
             self._overlay_view.show_frame(idx, fit=False)
 
@@ -2767,6 +2843,7 @@ class _EmulationRunWorker(QObject):
     progress = Signal(int, int, str)
     finished = Signal(object, object, bool, object, bool, str)
     failed = Signal(str)
+    canceled = Signal()
 
     def __init__(
         self,
@@ -2783,6 +2860,10 @@ class _EmulationRunWorker(QObject):
         self._request_note = str(request_note)
         self._save_artifacts = bool(save_artifacts)
         self._use_preview_cache = bool(use_preview_cache)
+        self._cancel_requested = Event()
+
+    def cancel(self) -> None:
+        self._cancel_requested.set()
 
     @Slot()
     def run(self) -> None:
@@ -2795,6 +2876,7 @@ class _EmulationRunWorker(QObject):
                     "실행",
                 ),
                 detail_cb=self._emit_detail_progress,
+                cancel_check=self._cancel_requested.is_set,
             )
             self.finished.emit(
                 self._config,
@@ -2804,6 +2886,8 @@ class _EmulationRunWorker(QObject):
                 self._save_artifacts,
                 self._request_note,
             )
+        except SimulationCanceled:
+            self.canceled.emit()
         except Exception as exc:  # noqa: BLE001
             self.failed.emit(str(exc))
 
@@ -2812,14 +2896,14 @@ class _EmulationRunWorker(QObject):
             return
         if "substep" not in detail or "substeps" not in detail:
             return
-        cycles = max(1, int(self._config.cycles))
+        cycles = max(1, int(detail.get("total", self._config.cycles)))
         substeps = max(1, int(detail.get("substeps", 1)))
         step = max(0, int(detail.get("step", 0)))
         substep = max(0, min(substeps, int(detail.get("substep", 0))))
         total = max(1, cycles * substeps)
         done = max(0, min(total, (step * substeps) + substep))
         phase = str(detail.get("phase", ""))
-        cycle_label = f"{step + 1}CYC"
+        cycle_label = f"{step + 1} cycle" if self._config.process_type == "ald" else f"계산 구간 {step + 1}"
         sub_label = f"{substep}/{substeps}"
         suffix = "계산 중" if phase == "start" else "완료"
         self.progress.emit(done, total, f"실행 {cycle_label} sub {sub_label} {suffix}")
@@ -2942,7 +3026,7 @@ class TrenchDepoWindow(QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("GFE - 트렌치 Depo 에뮬레이터")
+        self.setWindowTitle("GFE")
         self.setWindowIcon(gfe_icon())
         self.resize(1280, 820)
 
@@ -3001,6 +3085,7 @@ class TrenchDepoWindow(QMainWindow):
         self.progress_geometry_view.set_editing_enabled(False)
         self.smoothing = SmoothingController()
         self._structure_points: List[Tuple[float, float]] = []
+        self._initial_voids: Tuple[Tuple[Tuple[float, float], ...], ...] = ()
         self._smoothed_points: List[Tuple[float, float]] = []
         self._use_smoothed_geometry = False
         self._preserve_geometry_on_emulator_switch = False
@@ -3011,6 +3096,7 @@ class TrenchDepoWindow(QMainWindow):
         self._syncing_emulator_preset = False
         self._syncing_quality_mode = False
         self._structure_undo_stack: List[List[Tuple[float, float]]] = []
+        self._structure_undo_voids_stack: List[Tuple[Tuple[Tuple[float, float], ...], ...]] = []
         self._structure_drag_undo_snapshot: Optional[List[Tuple[float, float]]] = None
         self._structure_drag_changed = False
         self._applying_structure_undo = False
@@ -4435,7 +4521,7 @@ class TrenchDepoWindow(QMainWindow):
         result_summary_layout.setContentsMargins(10, 10, 10, 10)
         self.lbl_result_summary = QLabel("결과: 아직 실행 전")
         self.lbl_result_summary.setWordWrap(True)
-        self.lbl_result_hint = QLabel("왼쪽 결과 화면에서 프레임 슬라이더로 cycle별 profile을 확인합니다.")
+        self.lbl_result_hint = QLabel("왼쪽 프레임 슬라이더로 ALD cycle·CVD 시간에 따른 단면을 확인합니다.")
         self.lbl_result_hint.setWordWrap(True)
         self.edit_result_parameters = QPlainTextEdit()
         self.edit_result_parameters.setReadOnly(True)
@@ -4674,6 +4760,7 @@ class TrenchDepoWindow(QMainWindow):
         self._set_workflow_step("structure")
         from gapsim.emulation.workflow_layout import install_workflow_layout
         install_workflow_layout(self)
+        install_recipe_layout(self)
         from gapsim.emulation.parameter_help_all import install_extended_help
         install_extended_help(self,self.process_parameter_panel.help_manager)
         QTimer.singleShot(1500, self.check_updates_on_startup)
@@ -5130,6 +5217,7 @@ class TrenchDepoWindow(QMainWindow):
             combo.setCurrentIndex(idx)
 
     def _apply_parameter_config_values(self, values: Mapping[str, object]) -> None:
+        apply_recipe_values(self, values)
         supports_sputter = self._active_emulator_supports_sputter()
         supports_ion = self._active_emulator_supports_ion_transmission()
         supports_reflected = self._active_emulator_supports_reflected_ion()
@@ -5179,8 +5267,9 @@ class TrenchDepoWindow(QMainWindow):
             bool(supports_closure and b("closure_redepo_enabled", self.chk_closure_redepo.isChecked()))
         )
 
-        self.spin_sputter_strength.setValue(f("sputter_strength_a_per_cycle", self.spin_sputter_strength.value()))
-        self.spin_sputter_peak_pct.setValue(f("sputter_peak_pct", self.spin_sputter_peak_pct.value()))
+        gain = f("sputter_peak_pct", 100.0) / 100.0 if self.cmb_recipe_model.currentData() == "legacy_calibrated_v1" else 1.0
+        self.spin_sputter_strength.setValue(f("sputter_strength_a_per_cycle", self.spin_sputter_strength.value()) * gain)
+        self.spin_sputter_peak_pct.setValue(100.0)
         self.spin_sputter_peak.setValue(f("sputter_peak_angle_deg", self.spin_sputter_peak.value()))
         self.spin_sputter_width.setValue(f("sputter_width_deg", self.spin_sputter_width.value()))
         self.spin_sputter_smoothing.setValue(f("sputter_smoothing_a", self.spin_sputter_smoothing.value()))
@@ -5294,7 +5383,11 @@ class TrenchDepoWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "공정 파라미터 프리셋", f"파라미터 불러오기 실패:\n{exc}")
             return
-        config_values = record.get("config", {})
+        config_values = parameter_preset_application_values(
+            record, self.current_config(),
+            include_run_defaults=self.chk_preset_run_defaults.isChecked(),
+            include_calculation_settings=self.chk_preset_calculation_settings.isChecked(),
+        )
         if not isinstance(config_values, dict):
             QMessageBox.warning(self, "공정 파라미터 프리셋", "프리셋 config 형식이 올바르지 않습니다.")
             return
@@ -5357,12 +5450,15 @@ class TrenchDepoWindow(QMainWindow):
         pts = [(float(x), float(y)) for x, y in snapshot]
         if len(pts) < 2:
             return
-        if self._structure_undo_stack and self._same_point_sequence(self._structure_undo_stack[-1], pts):
+        if (self._structure_undo_stack and self._same_point_sequence(self._structure_undo_stack[-1], pts)
+                and self._structure_undo_voids_stack[-1] == self._initial_voids):
             return
         self._structure_undo_stack.append(pts)
+        self._structure_undo_voids_stack.append(self._initial_voids)
         max_depth = 100
         if len(self._structure_undo_stack) > max_depth:
             del self._structure_undo_stack[: len(self._structure_undo_stack) - max_depth]
+            del self._structure_undo_voids_stack[: len(self._structure_undo_voids_stack) - max_depth]
 
     def _record_structure_undo_before_change(self) -> None:
         if self._structure_drag_undo_snapshot is not None:
@@ -5372,6 +5468,7 @@ class TrenchDepoWindow(QMainWindow):
 
     def _clear_structure_undo_stack(self) -> None:
         self._structure_undo_stack.clear()
+        self._structure_undo_voids_stack.clear()
         self._structure_drag_undo_snapshot = None
         self._structure_drag_changed = False
 
@@ -5385,12 +5482,14 @@ class TrenchDepoWindow(QMainWindow):
             self.statusBar().showMessage("되돌릴 구조 편집이 없습니다.", 1600)
             return
         previous = self._structure_undo_stack.pop()
+        previous_voids = self._structure_undo_voids_stack.pop()
         self._applying_structure_undo = True
         try:
             self.structure_view.clear_point_selection()
             self._clear_continuation_context()
             self._set_structure_points(
                 previous,
+                initial_voids=previous_voids,
                 clear_smoothing=True,
                 fit=False,
                 preserve_on_emulator_switch=True,
@@ -5419,9 +5518,14 @@ class TrenchDepoWindow(QMainWindow):
         clear_smoothing: bool = True,
         fit: bool = True,
         preserve_on_emulator_switch: bool = False,
+        initial_voids: Sequence[Sequence[Tuple[float, float]]] = (),
     ) -> None:
         pts = [(float(x), float(y)) for x, y in points]
         self._structure_points = pts
+        # Cavities belong to this structure. Importing/resetting a new exterior
+        # clears them; replay/continued deposition passes its actual voids.
+        self._initial_voids = tuple(tuple((float(x), float(y)) for x, y in polygon)
+                                    for polygon in initial_voids)
         if preserve_on_emulator_switch:
             self._preserve_geometry_on_emulator_switch = True
         self._syncing_structure_view = True
@@ -5807,7 +5911,8 @@ class TrenchDepoWindow(QMainWindow):
         self._continuation_stage_index = next_stage
 
         self._record_structure_undo_before_change()
-        self._set_structure_points(seed, clear_smoothing=True, fit=True, preserve_on_emulator_switch=True)
+        self._set_structure_points(seed, clear_smoothing=True, fit=True, preserve_on_emulator_switch=True,
+                                   initial_voids=base_result.frame_voids[-1] if base_result.frame_voids else ())
         self._continuation_base_result = base_result
         self._continuation_base_run_dir = base_run_dir
         self._continuation_stage_index = next_stage
@@ -6549,6 +6654,8 @@ class TrenchDepoWindow(QMainWindow):
                 *options,
             ]
 
+        if hasattr(self, "cmb_recipe_model"):
+            options = recipe_split_options(self, options)
         self.cmb_split_parameter.blockSignals(True)
         self.cmb_split_parameter.clear()
         for label, key in options:
@@ -6691,7 +6798,7 @@ class TrenchDepoWindow(QMainWindow):
         supports_lf_overhang = self._active_emulator_supports_lf_overhang()
         supports_closure_redepo = self._active_emulator_supports_closure_redepo()
 
-        self.setWindowTitle(f"GFE - {_emulator_mode_title(number)}")
+        self.setWindowTitle("GFE")
         if changed and not preserve_geometry:
             self._reset_geometry_to_default()
 
@@ -7296,7 +7403,7 @@ class TrenchDepoWindow(QMainWindow):
 
         self.chk_redepo.setEnabled(etch_enabled and supports_redeposition)
         self.incident_model_group.setVisible(supports_redeposition)
-        self.chk_incident_los.setEnabled(etch_enabled and supports_redeposition and self.chk_redepo.isChecked())
+        self.chk_incident_los.setEnabled(etch_enabled and supports_redeposition)
         self.spin_incident_sigma.setEnabled(self.chk_incident_los.isEnabled() and self.chk_incident_los.isChecked())
         self.spin_incident_rays.setEnabled(self.chk_incident_los.isEnabled() and self.chk_incident_los.isChecked())
         redepo_enabled = bool(
@@ -7603,7 +7710,17 @@ class TrenchDepoWindow(QMainWindow):
 
     def apply_split_parameter_defaults(self, _index: int = 0) -> None:
         parameter = str(self.cmb_split_parameter.currentData())
-        if parameter in ("cvd_overhang_pct", "cvd_cusping_pct"):
+        if parameter in ("precursor_sticking", "inhibitor_sticking"):
+            values = (0.01, 0.51, 0.25, 4, 0.0001, 1.0)
+        elif parameter == "ald_exposure":
+            values = (1.0, 21.0, 10.0, 3, 0.0001, 100000.0)
+        elif parameter == "inhibitor_exposure":
+            values = (0.0, 2.0, 1.0, 3, 0.0, 5.0)
+        elif parameter == "cvd_rate_a_per_s":
+            values = (0.5, 2.0, 0.5, 4, 0.0, 10000.0)
+        elif parameter == "cvd_duration_s":
+            values = (10.0, 50.0, 20.0, 3, 0.0, 1e7)
+        elif parameter in ("cvd_overhang_pct", "cvd_cusping_pct"):
             values = (0.0, 100.0, 25.0, 1, 0.0, 200.0)
         elif parameter == "cvd_bottom_ratio_pct":
             values = (20.0, 100.0, 20.0, 1, 0.0, 100.0)
@@ -7732,6 +7849,8 @@ class TrenchDepoWindow(QMainWindow):
         depth_feature_length = float(self.spin_depth_feature_length.value())
         return TrenchDepoConfig(
             points=self._current_geometry_points(),
+            initial_voids=self._initial_voids,
+            **recipe_values(self),
             cycles=int(self.spin_cycles.value()),
             emulator_number=int(active_emulator),
             angstrom_per_cycle=float(self.spin_angstrom_per_cycle.value()),
@@ -7784,7 +7903,7 @@ class TrenchDepoWindow(QMainWindow):
                 etch_enabled and supports_redeposition and self.chk_redepo.isChecked()
             ),
             redepo_source_model=str(self.cmb_redepo_source_model.currentData() or "model2"),
-            redepo_incident_los_enabled=bool(etch_enabled and supports_redeposition and self.chk_redepo.isChecked() and self.chk_incident_los.isChecked()),
+            redepo_incident_los_enabled=bool(etch_enabled and self.chk_incident_los.isChecked()),
             redepo_incident_sigma_deg=float(self.spin_incident_sigma.value()),
             redepo_incident_ray_count=int(self.spin_incident_rays.value()),
             redepo_efficiency_pct=(
@@ -7862,6 +7981,8 @@ class TrenchDepoWindow(QMainWindow):
         config: TrenchDepoConfig,
         result: Optional[TrenchDepoResult],
     ) -> str:
+        if config.recipe_model != "legacy_calibrated_v1":
+            return recipe_result_summary(config, result)
         meta = dict(result.meta) if result is not None else {}
         number = self.active_emulator_number()
         title = EMULATOR_MODE_TITLES.get(number, EMULATOR_MODE_TITLES[0])
@@ -8008,7 +8129,7 @@ class TrenchDepoWindow(QMainWindow):
                 f"각도 σ: {config.redepo_incident_sigma_deg:g}° / 방향 수: {config.redepo_incident_ray_count}",
                 f"누적 증착량 (식각 전): {config.cycles * config.angstrom_per_cycle:g} A",
                 "기존 경험적 깊이 감쇠 대체 / 실제 LF·이온 에너지 미보정"])
-        return "\n".join(lines)
+        return recipe_result_summary(config) + "\n\n" + "\n".join(lines)
 
     def _update_result_parameter_summary(
         self,
@@ -8027,61 +8148,7 @@ class TrenchDepoWindow(QMainWindow):
         cfg = self.current_config()
         if cfg.sputter_enabled or cfg.sputter_strength_a_per_cycle <= 0.0:
             return cfg
-        return TrenchDepoConfig(
-            points=cfg.points,
-            cycles=cfg.cycles,
-            emulator_number=cfg.emulator_number,
-            angstrom_per_cycle=cfg.angstrom_per_cycle,
-            reparam_ds_a=cfg.reparam_ds_a,
-            sputter_enabled=True,
-            sputter_strength_a_per_cycle=cfg.sputter_strength_a_per_cycle,
-            sputter_peak_pct=cfg.sputter_peak_pct,
-            sputter_peak_angle_deg=cfg.sputter_peak_angle_deg,
-            sputter_width_deg=cfg.sputter_width_deg,
-            sputter_smoothing_a=cfg.sputter_smoothing_a,
-            ion_transmission_enabled=cfg.ion_transmission_enabled,
-            ion_transmission_override=cfg.ion_transmission_override,
-            ion_transmission_start_depth_pct=cfg.ion_transmission_start_depth_pct,
-            ion_transmission_end_depth_pct=cfg.ion_transmission_end_depth_pct,
-            ion_transmission_decay_strength_pct=cfg.ion_transmission_decay_strength_pct,
-            ion_transmission_floor_pct=cfg.ion_transmission_floor_pct,
-            ion_transmission_curve_power=cfg.ion_transmission_curve_power,
-            ion_transmission_aperture_shadow_pct=cfg.ion_transmission_aperture_shadow_pct,
-            ion_transmission_lateral_shadow_pct=cfg.ion_transmission_lateral_shadow_pct,
-            ion_transmission_edge_shadow_pct=cfg.ion_transmission_edge_shadow_pct,
-            reflected_ion_enabled=cfg.reflected_ion_enabled,
-            reflected_ion_strength_pct=cfg.reflected_ion_strength_pct,
-            reflected_ion_bowing_weight=cfg.reflected_ion_bowing_weight,
-            reflected_ion_microtrench_weight=cfg.reflected_ion_microtrench_weight,
-            reflected_ion_range_a=cfg.reflected_ion_range_a,
-            redepo_enabled=cfg.redepo_enabled,
-            redepo_source_model=cfg.redepo_source_model,
-            redepo_efficiency_pct=cfg.redepo_efficiency_pct,
-            redepo_emit_power=cfg.redepo_emit_power,
-            redepo_distance_power=cfg.redepo_distance_power,
-            redepo_neighbor_exclusion=cfg.redepo_neighbor_exclusion,
-            redepo_max_distance_a=cfg.redepo_max_distance_a,
-            redepo_soft_los_radius_points=cfg.redepo_soft_los_radius_points,
-            redepo_incident_los_enabled=cfg.redepo_incident_los_enabled,
-            redepo_incident_sigma_deg=cfg.redepo_incident_sigma_deg,
-            redepo_incident_ray_count=cfg.redepo_incident_ray_count,
-            redepo_transport_model=cfg.redepo_transport_model,
-            redepo_ray_count=cfg.redepo_ray_count,
-            redepo_footprint_sigma_a=cfg.redepo_footprint_sigma_a,
-            redepo_footprint_radius_sigma=cfg.redepo_footprint_radius_sigma,
-            lf_overhang_enabled=cfg.lf_overhang_enabled,
-            lf_overhang_dose=cfg.lf_overhang_dose,
-            lf_overhang_sputter_gain=cfg.lf_overhang_sputter_gain,
-            lf_overhang_redepo_fraction_pct=cfg.lf_overhang_redepo_fraction_pct,
-            lf_overhang_survival_penalty=cfg.lf_overhang_survival_penalty,
-            lf_overhang_width_a=cfg.lf_overhang_width_a,
-            closure_redepo_enabled=cfg.closure_redepo_enabled,
-            closure_redepo_efficiency_pct=cfg.closure_redepo_efficiency_pct,
-            closure_redepo_shadow_gain=cfg.closure_redepo_shadow_gain,
-            closure_redepo_width_a=cfg.closure_redepo_width_a,
-            closure_redepo_survival_penalty=cfg.closure_redepo_survival_penalty,
-            closure_redepo_smoothing_a=cfg.closure_redepo_smoothing_a,
-        )
+        return replace(cfg, sputter_enabled=True)
 
     def _config_for_emulator_number(
         self,
@@ -8201,8 +8268,10 @@ class TrenchDepoWindow(QMainWindow):
 
     def _preview_cache_key(self, config: TrenchDepoConfig) -> tuple[object, ...]:
         return (
+            tuple(getattr(config, key) for key in RECIPE_WIDGETS),
             tuple(typical_cvd.config_values(config).values()),
             tuple((float(x), float(y)) for x, y in config.points),
+            tuple(tuple((float(x), float(y)) for x, y in polygon) for polygon in config.initial_voids),
             int(config.cycles),
             int(getattr(config, "emulator_number", 0) or 0),
             float(config.angstrom_per_cycle),
@@ -8342,6 +8411,8 @@ class TrenchDepoWindow(QMainWindow):
         QApplication.processEvents()
 
     def _finish_run_progress(self, *, success: bool) -> None:
+        if hasattr(self, "btn_cancel_run"):
+            self.btn_cancel_run.hide()
         if success:
             maximum = max(1, self.progress_run.maximum())
             self.progress_run.setRange(0, maximum)
@@ -8418,6 +8489,8 @@ class TrenchDepoWindow(QMainWindow):
         save_artifacts: bool,
         request_note: str,
     ) -> None:
+        if hasattr(self, "btn_cancel_run"):
+            self.btn_cancel_run.hide()
         run_dir: Optional[Path] = None
         result = self._merge_result_if_continuation(result)
         if bool(save_artifacts):
@@ -8458,6 +8531,20 @@ class TrenchDepoWindow(QMainWindow):
             "트렌치 Depo 에뮬레이션",
             f"트렌치 증착 에뮬레이션 실행 실패:\n{message}",
         )
+
+    def cancel_emulation(self, _checked: bool = False) -> None:
+        if self._emulation_worker is not None:
+            self._emulation_worker.cancel()
+            self.btn_cancel_run.setEnabled(False)
+            self.btn_cancel_run.setText("취소 중…")
+
+    def _on_emulation_worker_canceled(self) -> None:
+        self.btn_run.setEnabled(True)
+        self._finish_run_progress(success=False)
+        self.lbl_status.setText("계산 취소 · 이전 결과는 유지됩니다.")
+        if hasattr(self, "lbl_progress_view_status"):
+            self.lbl_progress_view_status.setText("계산 취소")
+            self.progress_view_bar.setFormat("취소")
 
     def _on_emulation_thread_finished(self) -> None:
         self._emulation_thread = None
@@ -8503,12 +8590,19 @@ class TrenchDepoWindow(QMainWindow):
                 worker.progress.connect(self._on_emulation_worker_progress)
                 worker.finished.connect(self._on_emulation_worker_finished)
                 worker.failed.connect(self._on_emulation_worker_failed)
+                worker.canceled.connect(self._on_emulation_worker_canceled)
                 worker.finished.connect(worker.deleteLater)
                 worker.failed.connect(worker.deleteLater)
+                worker.canceled.connect(worker.deleteLater)
                 worker.finished.connect(thread.quit)
                 worker.failed.connect(thread.quit)
+                worker.canceled.connect(thread.quit)
                 thread.finished.connect(self._on_emulation_thread_finished)
                 thread.finished.connect(thread.deleteLater)
+                if hasattr(self, "btn_cancel_run"):
+                    self.btn_cancel_run.setText("계산 취소")
+                    self.btn_cancel_run.setEnabled(True)
+                    self.btn_cancel_run.show()
                 thread.start()
                 return
             else:
@@ -8901,12 +8995,11 @@ class TrenchDepoWindow(QMainWindow):
 
         idx = max(0, min(int(index), len(self._result.frame_profiles) - 1))
         self.view.show_frame(idx, fit=False)
-        cycle = self._result.frame_steps[idx] if idx < len(self._result.frame_steps) else idx
-        total = self._result.meta.get("cycles", len(self._result.frame_profiles) - 1)
         points = len(self._result.frame_profiles[idx])
-        self.lbl_status.setText(f"Cycle {cycle}/{total} | 점 {points}")
+        label = _frame_progress_label(self._result, self._result_config or self.current_config(), idx)
+        self.lbl_status.setText(f"{label} | 점 {points}")
         if hasattr(self, "lbl_result_summary"):
-            self.lbl_result_summary.setText(f"결과: Cycle {cycle}/{total} | 점 {points}")
+            self.lbl_result_summary.setText(f"결과: {label} | 점 {points}")
         self.addonFrameShown.emit(idx)
 
     def load_replay_json(self, path: Path | str) -> None:
@@ -8931,8 +9024,9 @@ class TrenchDepoWindow(QMainWindow):
         else:
             replay_emulator = 1
         self.set_active_emulator_number(replay_emulator, run=False)
+        apply_recipe_values(self, {key: getattr(config, key) for key in RECIPE_WIDGETS})
         apply_cvd_values(self, typical_cvd.config_values(config))
-        self._set_structure_points(config.points, preserve_on_emulator_switch=True)
+        self._set_structure_points(config.points, preserve_on_emulator_switch=True, initial_voids=config.initial_voids)
         self._clear_structure_undo_stack()
         self.spin_cycles.setValue(int(config.cycles))
         self.spin_angstrom_per_cycle.setValue(float(config.angstrom_per_cycle))
@@ -9009,8 +9103,9 @@ class TrenchDepoWindow(QMainWindow):
         self.spin_inhibition_bottom_boost.setValue(float(config.inhibition_bottom_boost_pct))
         self.spin_inhibition_recombination.setValue(float(config.inhibition_peald_recombination_pct))
         self.spin_inhibition_smoothing.setValue(float(config.inhibition_smoothing_a))
-        self.spin_sputter_strength.setValue(float(config.sputter_strength_a_per_cycle))
-        self.spin_sputter_peak_pct.setValue(float(config.sputter_peak_pct))
+        gain = config.sputter_peak_pct / 100.0 if config.recipe_model == "legacy_calibrated_v1" else 1.0
+        self.spin_sputter_strength.setValue(float(config.sputter_strength_a_per_cycle) * gain)
+        self.spin_sputter_peak_pct.setValue(100.0)
         self.spin_sputter_peak.setValue(float(config.sputter_peak_angle_deg))
         self.spin_sputter_width.setValue(float(config.sputter_width_deg))
         self.spin_sputter_smoothing.setValue(float(config.sputter_smoothing_a))

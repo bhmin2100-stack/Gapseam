@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from bisect import bisect_left, bisect_right
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from gapsim.engine.deposition_pipeline import (
@@ -84,6 +84,7 @@ BOWED_JAR_TRENCH_POINTS: Tuple[Point, ...] = (
 @dataclass(frozen=True)
 class TrenchDepoConfig:
     points: Sequence[Point] = DEFAULT_TRENCH_POINTS
+    initial_voids: Sequence[Sequence[Point]] = ()
     cycles: int = 20
     emulator_number: int = 0
     angstrom_per_cycle: float = 10.0
@@ -169,6 +170,18 @@ class TrenchDepoConfig:
     inhibition_bottom_boost_pct: float = 20.0
     inhibition_peald_recombination_pct: float = 35.0
     inhibition_smoothing_a: float = 45.0
+    # Versioned recipe controls. Legacy defaults replay saved SFO3.1 exactly.
+    recipe_model: str = "legacy_calibrated_v1"
+    process_type: str = "ald"
+    cvd_rate_a_per_s: float = 1.0
+    cvd_duration_s: float = 60.0
+    precursor_sticking: float = 0.1
+    ald_exposure: float = 5.0
+    inhibitor_sticking: float = 0.3
+    inhibitor_exposure: float = 1.0
+    transport_ray_count: int = 32
+    numerical_step_a: float = 2.0
+    growth_basis: str = "gross"
 
 
 @dataclass(frozen=True)
@@ -211,6 +224,14 @@ class _ConstantFluxModel(FluxModel):
 
 
 SWEEP_PARAMETER_LABELS: Dict[str, str] = {
+    "cvd_rate_a_per_s": "CVD rate A/s",
+    "cvd_duration_s": "CVD time s",
+    "precursor_sticking": "Precursor reaction probability",
+    "ald_exposure": "ALD exposure",
+    "inhibitor_sticking": "Inhibitor adsorption probability",
+    "inhibitor_exposure": "Inhibitor exposure",
+    "numerical_step_a": "Calculation increment A",
+    "transport_ray_count": "Transport directions",
     "cvd_overhang_pct": "CVD Overhang %",
     "cvd_cusping_pct": "CVD Cusping %",
     "cvd_bottom_ratio_pct": "CVD bottom growth %",
@@ -4057,6 +4078,20 @@ def _sweep_values(start: float, stop: float, step: float, *, max_cases: int) -> 
 
 
 def _validate_sweep_value(parameter: str, value: float) -> float:
+    if parameter in {"cvd_rate_a_per_s", "cvd_duration_s", "inhibitor_exposure"}:
+        return _coerce_non_negative_float(value, name=parameter)
+    if parameter in {"ald_exposure", "numerical_step_a"}:
+        return _coerce_positive_float(value, name=parameter)
+    if parameter in {"precursor_sticking", "inhibitor_sticking"}:
+        probability = _coerce_positive_float(value, name=parameter)
+        if probability > 1.0:
+            raise ValueError(f"{parameter} must be in (0, 1]")
+        return probability
+    if parameter == "transport_ray_count":
+        rays = _coerce_cycles(value)
+        if rays < 8 or rays % 2:
+            raise ValueError("transport_ray_count must be even and at least 8")
+        return float(rays)
     if parameter == "cycles":
         return float(_coerce_cycles(value))
     if parameter == "angstrom_per_cycle":
@@ -4194,12 +4229,14 @@ def _replace_sweep_config(base_config: TrenchDepoConfig, parameter: str, value: 
     kwargs: Dict[str, Any] = {}
     if parameter in typical_cvd.DEFAULTS and parameter != "cvd_enabled":
         kwargs["cvd_enabled"] = True
-    if parameter == "cycles":
+    if parameter in {"cycles", "transport_ray_count"}:
         kwargs[parameter] = int(value)
     else:
         kwargs[parameter] = float(value)
     if parameter in _SPUTTER_SWEEP_PARAMETERS:
         kwargs["sputter_enabled"] = True
+    if parameter in {"inhibitor_sticking", "inhibitor_exposure"}:
+        kwargs["inhibition_enabled"] = True
     if parameter in _ION_TRANSMISSION_SWEEP_PARAMETERS:
         kwargs["sputter_enabled"] = True
         kwargs["ion_transmission_enabled"] = True
@@ -4301,6 +4338,11 @@ def run_trench_depo(
     cancel_check: Optional[Callable[[], bool]] = None,
 ) -> TrenchDepoResult:
     cfg = config or TrenchDepoConfig()
+    from gapsim.emulation.process_recipe import apply_initial_voids, dispatch_recipe
+    recipe_result = dispatch_recipe(cfg, progress_cb=progress_cb, detail_cb=detail_cb,
+                                    cancel_check=cancel_check)
+    if recipe_result is not None:
+        return recipe_result
     emulator_number = int(getattr(cfg, "emulator_number", 0) or 0)
     allowed_sputter = emulator_number in (0, 2, 3, 6)
     allowed_ion_transmission = emulator_number in (0, 3)
@@ -4640,6 +4682,7 @@ def run_trench_depo(
     OffsetBoolean.require_backend()
 
     state = init_simulation_state(initial_points, units="A", reparam_ds_a=reparam_ds_a)
+    apply_initial_voids(state, cfg.initial_voids)
     frame_steps: List[int] = []
     frame_profiles: List[List[Point]] = []
     frame_voids: List[List[List[Point]]] = []
@@ -4970,6 +5013,9 @@ def run_trench_depo(
                         reflected_ion_bowing_weight=reflected_ion_bowing_weight,
                         reflected_ion_microtrench_weight=reflected_ion_microtrench_weight,
                         reflected_ion_range_a=reflected_ion_range_a,
+                        incident_los_enabled=incident_los_enabled,
+                        incident_sigma_deg=cfg.redepo_incident_sigma_deg,
+                        incident_ray_count=cfg.redepo_incident_ray_count,
                     )
                     cycle_etch_overlay.extend(_snapshot_etch_overlay_samples(state.meta))
                 if detail_cb is not None:
@@ -5231,12 +5277,20 @@ def run_trench_depo(
         final_profile=final_profile,
         meta={
             "version": 1,
+            "recipe_model": "legacy_calibrated_v1",
+            "recipe_config": asdict(cfg),
+            "process_type": "ald",
+            "growth_basis": "gross",
+            "nominal_dose_a": float(cycles * angstrom_per_cycle),
+            "frame_cycle_counts": list(frame_steps),
+            "frame_times_s": [],
+            "frame_doses_a": [float(step * angstrom_per_cycle) for step in frame_steps],
             "units": {"length": "A", "y_down_is_negative": True},
             "growth_model": growth_model,
-            "redepo_incident_los_enabled": bool(model6_redepo_active and incident_los_enabled),
+            "redepo_incident_los_enabled": bool(sputter_active and incident_los_enabled),
             "redepo_incident_sigma_deg": float(cfg.redepo_incident_sigma_deg),
             "redepo_incident_ray_count": int(cfg.redepo_incident_ray_count),
-            "incident_source_model": "gaussian_cosine_yield_geometric_visibility" if model6_redepo_active and incident_los_enabled else "legacy",
+            "incident_source_model": "gaussian_cosine_yield_geometric_visibility" if sputter_active and incident_los_enabled else "legacy",
             "propagation": propagation,
             "cycles": int(cycles),
             "emulator_number": int(emulator_number),

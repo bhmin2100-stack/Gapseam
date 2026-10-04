@@ -38,15 +38,19 @@ def apply_sfo(window):
 
 
 def test_single_sfo_preset_applies_without_changing_geometry(window):
+    assert window.windowTitle() == 'GFE'
     points=window._current_geometry_points()
+    cycles=window.spin_cycles.value()
     assert window.cmb_parameter_preset.count()==1
     assert window.cmb_parameter_preset.currentText()=='SFO3.1'
     assert not hasattr(window,'cmb_incident_preset')
     window.btn_split_options.setChecked(True)
     apply_sfo(window)
+    assert window.windowTitle() == 'GFE'
     assert not window.btn_split_options.isChecked()
     cfg=window.current_config()
-    assert cfg.cycles*cfg.angstrom_per_cycle==300
+    assert cfg.cycles==cycles and cfg.angstrom_per_cycle==2
+    assert cfg.process_type=='ald' and cfg.recipe_model=='legacy_calibrated_v1'
     assert cfg.redepo_incident_los_enabled
     assert cfg.sputter_strength_a_per_cycle==pytest.approx(8/3,abs=1e-11)
     assert cfg.sputter_width_deg==40 and cfg.sputter_smoothing_a==20
@@ -61,8 +65,9 @@ def test_saved_preset_roundtrip(window):
     window.spin_incident_rays.setValue(49)
     window.edit_parameter_preset_name.setText('가림 roundtrip')
     window.btn_save_parameter_preset.click()
-    saved=read_parameter_preset(window._parameter_library_path,'가림 roundtrip')['config']
-    assert saved['redepo_incident_los_enabled'] and saved['redepo_incident_ray_count']==49
+    record=read_parameter_preset(window._parameter_library_path,'가림 roundtrip')
+    saved=record['config']
+    assert saved['redepo_incident_los_enabled'] and record['calculation_settings']['redepo_incident_ray_count']==49
     assert 'points' not in saved
     window.chk_incident_los.setChecked(False)
     window.spin_incident_sigma.setValue(15)
@@ -111,8 +116,8 @@ def test_source_controls_gated_and_rays_odd(window):
     window.spin_incident_rays.setValue(24)
     assert window.spin_incident_rays.value()==25
     window.chk_redepo.setChecked(False)
-    assert not window.current_config().redepo_incident_los_enabled
-    assert not window.spin_incident_sigma.isEnabled()
+    assert window.current_config().redepo_incident_los_enabled
+    assert window.spin_incident_sigma.isEnabled()
 
 
 def test_sfo_user_edit_survives_reseed_and_other_presets_are_preserved(window):

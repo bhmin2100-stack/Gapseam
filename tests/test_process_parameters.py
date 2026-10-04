@@ -119,6 +119,7 @@ def test_four_group_navigation_and_dependencies(window):
 
 
 def test_cvd_ui_preset_cache_and_replay_roundtrip(window,tmp_path):
+    window.cmb_recipe_model.setCurrentIndex(window.cmb_recipe_model.findData('legacy_calibrated_v1'))
     window.process_presets_fold.setChecked(True)
     window.chk_typical_cvd.setChecked(True)
     window.cvd_spins['cvd_overhang_pct'].setValue(65)

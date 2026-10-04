@@ -130,6 +130,37 @@ def test_incident_response_is_actual_normalized_integral_even_at_zero_redepo():
     assert not np.any(off.curves)
 
 
+def test_recipe_application_help_matches_active_process_and_transport_model():
+    c = config(recipe_model='ideal_conformal_v1', process_type='ald')
+    assert '현재 적용' in application_note('spin_angstrom_per_cycle', c)
+    assert '현재 미적용' in application_note('spin_cvd_rate', c)
+    assert '현재 미적용' in application_note('spin_precursor_sticking', c)
+    assert '기존 보정 모델 전용' in application_note('cvd_overhang_pct', c)
+    c = replace(c, recipe_model='physical_transport_v1', process_type='cvd', sputter_enabled=True,
+                redepo_enabled=False, redepo_incident_los_enabled=False)
+    assert '현재 적용' in application_note('spin_cvd_rate', c)
+    assert '현재 미적용' in application_note('spin_angstrom_per_cycle', c)
+    assert '현재 적용' in application_note('spin_precursor_sticking', c)
+    assert '재부착 OFF에서도 유지' in application_note('spin_incident_sigma', c)
+    assert '현재 미적용' in application_note('spin_inhibitor_sticking', c)
+    assert '현재 적용' in application_note('spin_inhibitor_sticking', replace(c, inhibition_enabled=True))
+
+
+def test_recipe_help_resolves_physical_units_and_redeposition_semantics():
+    from gapsim.emulation.parameter_help import effective_help
+    c = config(recipe_model='ideal_conformal_v1', process_type='ald')
+    ald = effective_help('spin_sputter_strength', HELP['spin_sputter_strength'], c)
+    assert 'Å/cycle' in ald.title and '기준 평탄면' in ald.meaning
+    cvd = effective_help('spin_sputter_strength', HELP['spin_sputter_strength'], replace(c, process_type='cvd'))
+    assert 'Å/s' in cvd.title
+    old = effective_help('spin_sputter_strength', HELP['spin_sputter_strength'], replace(c, recipe_model='legacy_calibrated_v1'))
+    assert '최대 제거량' in old.meaning
+    toggle = effective_help('chk_redepo', HELP['chk_redepo'], c)
+    assert '꺼도 직접 식각과 이온 가림은 유지' in toggle.caution
+    conformal = effective_help('spin_angstrom_per_cycle', HELP['spin_angstrom_per_cycle'], c)
+    assert '노출면 전체' in conformal.meaning
+
+
 def test_post_fill_is_total_budget_and_uses_only_selected_feature_type():
     c = replace(config(), cvd_enabled=False, deposition_depth_enabled=True,
                 deposition_feature_type='line', deposition_line_open_path_factor=.4)

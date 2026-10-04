@@ -9,6 +9,11 @@ from gapsim.emulation.parameter_help import HELP, clamped_rect
 from gapsim.emulation.parameter_help_all import EXTRA, HANDLES, is_value_control
 
 
+def select_model(window, model):
+    window.cmb_recipe_model.setCurrentIndex(window.cmb_recipe_model.findData(model))
+    QApplication.processEvents()
+
+
 def test_help_catalog_covers_all_primary_parameters(window):
     manager=window.process_parameter_panel.help_manager
     assert len(HELP)>=50
@@ -26,7 +31,54 @@ def test_help_catalog_covers_all_primary_parameters(window):
                 assert manager.lookup(control) is not None, control.objectName() or repr(control)
 
 
+@pytest.mark.parametrize('model', ['ideal_conformal_v1', 'physical_transport_v1', 'legacy_calibrated_v1'])
+def test_recipe_model_selects_its_own_calculated_help_and_preserves_inputs(window, model):
+    select_model(window, model)
+    before=window.current_config()
+    manager=window.parameter_help
+    with mock.patch('gapsim.emulation.trench_depo.run_trench_depo',side_effect=AssertionError('No hover simulation')):
+        manager.show_for(window.spin_angstrom_per_cycle)
+        movie=manager.bubble.animation.movie
+        assert movie is not None
+        assert {run['config']['recipe_model'] for run in movie['runs']} == {model}
+        assert 'GPC' in manager.bubble.meaning.text()
+        assert '현재 입력으로 실행한 결과가 아닙니다' in manager.bubble.plot_note.text()
+    assert window.current_config()==before
+
+
+def test_cvd_rate_help_shows_seconds_and_correct_removal_units(window):
+    select_model(window, 'physical_transport_v1')
+    window.cmb_process_type.setCurrentIndex(window.cmb_process_type.findData('cvd'))
+    manager=window.parameter_help
+    manager.show_for(window.spin_cvd_rate)
+    assert 'D/R' in manager.bubble.meaning.text()
+    assert 'D/R' in manager.bubble.plot_note.text()
+    assert all(run['config']['process_type']=='cvd' for run in manager.bubble.animation.movie['runs'])
+    manager.show_for(window.spin_sputter_strength)
+    assert 'Å/s' in manager.bubble.title.text()
+    assert '기준 평탄면' in manager.bubble.meaning.text()
+    assert all(run['config']['process_type']=='cvd' for run in manager.bubble.animation.movie['runs'])
+
+
+def test_explanation_drawings_are_labeled_and_not_faked_trench_predictions(window):
+    manager=window.parameter_help
+    for key in ('cmb_recipe_model', 'cmb_process_type', 'cmb_growth_basis'):
+        manager.show_for(getattr(window,key))
+        assert manager.bubble.animation.movie is None
+        assert '설명용 이미지' in manager.bubble.plot_note.text()
+        assert not manager.bubble.animation.grab().isNull()
+
+
+def test_invalid_current_input_does_not_block_parameter_explanation(window):
+    manager=window.parameter_help
+    with mock.patch.object(window,'current_config',side_effect=ValueError('입력값 범위 확인')):
+        manager.show_for(window.spin_precursor_sticking)
+        assert manager.bubble.isVisible()
+        assert '입력값 범위 확인' in manager.bubble.caution.text()
+
+
 def test_disabled_cvd_label_and_input_help_are_read_only(window):
+    select_model(window, 'legacy_calibrated_v1')
     panel=window.process_parameter_panel
     panel.select(1)
     QApplication.processEvents()
@@ -117,6 +169,7 @@ def test_all_illustrations_render_and_animate_without_changing_config(window,tmp
 
 
 def test_help_reports_model_state_not_collapsed_editor_state(window):
+    select_model(window, 'legacy_calibrated_v1')
     window.chk_typical_cvd.setChecked(True)
     control=window.cvd_spins['cvd_cusping_pct']
     manager=window.parameter_help
@@ -131,11 +184,12 @@ def test_help_reports_model_state_not_collapsed_editor_state(window):
 
 
 def test_redeposition_uses_actual_profiles_not_a_response_curve_or_flow_boxes(window):
+    select_model(window, 'legacy_calibrated_v1')
     manager=window.parameter_help
     manager.show_for(window.spin_redepo_emit_power)
     movie=manager.bubble.animation.movie
     assert movie['family']=='redepo'
-    assert len(movie['runs'])==2
+    assert len(movie['runs'])==3
     assert all(len(run['frames'])>2 for run in movie['runs'])
     assert any(frame['transport'] for run in movie['runs'] for frame in run['frames'])
     manager.show_for(window.slider_frame)
@@ -144,6 +198,7 @@ def test_redeposition_uses_actual_profiles_not_a_response_curve_or_flow_boxes(wi
 
 
 def test_example_values_are_not_misrepresented_as_current_values(window):
+    select_model(window, 'legacy_calibrated_v1')
     window.chk_typical_cvd.setChecked(True)
     control=window.cvd_spins['cvd_overhang_pct']
     manager=window.parameter_help
@@ -151,13 +206,14 @@ def test_example_values_are_not_misrepresented_as_current_values(window):
     before=window.current_config()
     manager.show_for(control)
     movie=manager.bubble.animation.movie
-    assert movie['labels']==['0 %','100 %']
+    assert movie['labels']==['0 %','30 %','100 %']
     assert '80.00' in manager.bubble.current.text()
     assert '현재 입력으로 실행한 결과가 아닙니다' in manager.bubble.plot_note.text()
     assert window.current_config() == before
 
 
 def test_views_change_only_illustration_not_recipe(window):
+    select_model(window, 'legacy_calibrated_v1')
     manager=window.parameter_help
     manager.show_for(window.spin_redepo_emit_power)
     before=window.current_config()
@@ -191,12 +247,18 @@ def test_bubble_view_buttons_accept_mouse_clicks_without_dismissing(window):
     assert bubble.isVisible() and bubble.animation.timer.isActive()
 
 
-def test_every_movie_and_mechanism_renders_without_running_user_simulation(window):
+@pytest.mark.parametrize('model', ['legacy_calibrated_v1', 'ideal_conformal_v1', 'physical_transport_v1'])
+def test_every_movie_and_mechanism_renders_without_running_user_simulation(window,model):
     from gapsim.emulation.parameter_help_trench import examples
+    select_model(window, model)
     manager=window.parameter_help
     before=window.current_config()
     with mock.patch('gapsim.emulation.trench_depo.run_trench_depo',side_effect=AssertionError('No hover simulation')):
         for key in examples():
+            parts=key.split('@',1)
+            if (parts[1] if len(parts)>1 else 'legacy_calibrated_v1') != model:
+                continue
+            key=parts[0]
             control=window.cvd_spins[key] if key.startswith('cvd_') else getattr(window,key)
             manager.show_for(control)
             animation=manager.bubble.animation
@@ -249,7 +311,7 @@ def test_each_curve_handle_uses_its_own_parameter_help(window):
             with mock.patch.object(editor,'_hit_handle',return_value=handle):
                 entry,control=manager.resolve_at(editor,QPoint(50,50))
             if attr=='sputter_curve_editor' and handle=='peak':
-                assert '식각 세기' in entry.title
+                assert '최대 식각 각도' in entry.title
             else:assert control is getattr(window,key),(attr,handle)
 
 

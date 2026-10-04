@@ -1551,13 +1551,15 @@ class OffsetBoolean:
         return out if out else [solid_seed_i]
 
     @staticmethod
-    def grow_solid(solid_paths_i: Sequence[Sequence[IntPoint]], dr_ref: float, scale: int) -> List[IntPath]:
+    def grow_solid(solid_paths_i: Sequence[Sequence[IntPoint]], dr_ref: float, scale: int,
+                   *, arc_tolerance_a: Optional[float] = None) -> List[IntPath]:
         if dr_ref <= 0.0:
             return _normalize_int_paths(solid_paths_i)
         delta_i = int(round(dr_ref * scale))
         if delta_i <= 0:
             return _normalize_int_paths(solid_paths_i)
-        return _clip_offset(solid_paths_i, delta_i, arc_tolerance=max(scale * 0.25, 1.0))
+        tolerance = 0.25 if arc_tolerance_a is None else max(0.0, float(arc_tolerance_a))
+        return _clip_offset(solid_paths_i, delta_i, arc_tolerance=max(scale * tolerance, 1.0))
 
     @staticmethod
     def _touches_top_as_external(contour: Sequence[IntPoint], state: SimulationState, tol: int) -> bool:
@@ -1614,14 +1616,16 @@ class OffsetBoolean:
         return _normalize_int_paths([contour for contour, is_external in components if not is_external])
 
     @staticmethod
-    def grow_solid_external_air_limited(state: SimulationState, dr_ref: float) -> List[IntPath]:
+    def grow_solid_external_air_limited(state: SimulationState, dr_ref: float,
+                                       *, arc_tolerance_a: Optional[float] = None) -> List[IntPath]:
         base = _normalize_int_paths(state.solid_paths_i)
         if dr_ref <= 0.0:
             return base
         if not base:
             return base
 
-        grown = OffsetBoolean.grow_solid(base, dr_ref=dr_ref, scale=state.scale)
+        grown = OffsetBoolean.grow_solid(base, dr_ref=dr_ref, scale=state.scale,
+                                        arc_tolerance_a=arc_tolerance_a)
         if not grown:
             return base
         add_raw = _clip_difference(grown, base)
