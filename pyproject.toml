@@ -25,4 +25,4 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-"gapsim.emulation" = ["help_trench_examples.json.gz", "assets/*.ico", "assets/*.svg", "assets/*.png"]
+"gapsim.emulation" = ["help_trench_examples.json.gz", "sfo31_verified.json", "assets/*.ico", "assets/*.svg", "assets/*.png"]

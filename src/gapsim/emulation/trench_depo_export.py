@@ -202,6 +202,9 @@ def payload_to_trench_run(payload: Dict[str, Any]) -> Tuple[TrenchDepoConfig, Tr
     # Dataclass fields are the replay schema. New physical/process fields must
     # never disappear because an independently maintained field list was stale.
     defaults = asdict(TrenchDepoConfig())
+    # Replay continuation must not silently add a new numerical boundary to
+    # results saved before symmetry_mode existed. New payloads retain theirs.
+    defaults["symmetry_mode"] = "off"
     defaults["cycles"] = max(0, len(frame_profiles) - 1)
     defaults["emulator_number"] = int(meta.get("emulator_number") or 0)
     defaults["reparam_ds_a"] = 2.5  # Retain historical replay fallback.

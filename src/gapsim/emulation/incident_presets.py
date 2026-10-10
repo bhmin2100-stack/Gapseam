@@ -16,6 +16,7 @@ def incident_study_preset(dose_a=300):
     if dose_a not in INCIDENT_PRESET_DOSES:
         raise ValueError("Unsupported incident-ion study thickness")
     return TrenchDepoConfig(
+        symmetry_mode="off",  # Preserve the previously accepted SFO3.1 replay.
         recipe_model="legacy_calibrated_v1", process_type="ald", growth_basis="gross",
         points=INCIDENT_STUDY_POINTS, emulator_number=0, cycles=int(dose_a // 2),
         angstrom_per_cycle=2., reparam_ds_a=5., sputter_enabled=True,
@@ -39,4 +40,5 @@ def ensure_sfo31_preset(path):
     """Seed the normal user library once; preserve user-edited and other presets."""
     from .parameter_library import list_parameter_presets, save_parameter_preset
     if SFO31_PRESET_NAME not in list_parameter_presets(path):
-        save_parameter_preset(path, SFO31_PRESET_NAME, sfo31_preset(), emulator_number=0)
+        from .sfo31_verified import verified_sfo31_config
+        save_parameter_preset(path, SFO31_PRESET_NAME, verified_sfo31_config(), emulator_number=0)

@@ -63,13 +63,14 @@ def test_sfo_preset_is_ald_and_preserves_target_geometry_and_runtime(window):
     assert tuple(cfg.points)==points
     assert cfg.process_type=='ald' and cfg.recipe_model=='legacy_calibrated_v1'
     assert cfg.cycles==47 and cfg.cvd_duration_s==123
-    assert cfg.angstrom_per_cycle==2 and cfg.redepo_enabled
+    assert cfg.angstrom_per_cycle==.56 and cfg.redepo_enabled
+    assert cfg.front_scheme=='angular_godunov_v1' and cfg.growth_basis=='net_planar'
     window.chk_preset_run_defaults.setChecked(True)
     window.chk_preset_calculation_settings.setChecked(True)
     window.spin_reparam_ds.setValue(20)
     window.apply_selected_parameter_preset()
-    assert window.current_config().cycles==150
-    assert window.current_config().reparam_ds_a==5
+    assert window.current_config().cycles==1045
+    assert window.current_config().reparam_ds_a==4
     assert tuple(window.current_config().points)==points
 
 

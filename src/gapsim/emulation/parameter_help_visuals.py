@@ -400,6 +400,35 @@ class TrenchAnimation(QWidget):
 
     def draw_recipe_meaning(self, p):
         """Explicit reference equations; these never impersonate trench results."""
+        if self.kind in ('ion_growth','front_scheme','symmetry','distance_cutoff','inhibition_law'):
+            t=(1-math.cos(2*math.pi*self.phase))/2
+            self.label(p, '설명용 원리 그림 · 시뮬레이션 결과 아님', 0, size=13)
+            if self.kind == 'ion_growth':
+                f=t
+                self.label(p, f'이온 성장 기여율 f = {f:.2f}', 45)
+                for i,(arrival,label) in enumerate(((1.,'노출면'),(.1,'가려진 면'))):
+                    factor=1-f+f*arrival
+                    p.setPen(QColor('#334155'));p.drawText(60,110+i*75,label)
+                    p.setPen(Qt.NoPen);p.setBrush(QColor(COLORS[i]))
+                    p.drawRect(QRectF(170,90+i*75,260*factor,28))
+                self.label(p, '성장 배율 = (1−f) + f × 정규화 이온 도달량', 275)
+            elif self.kind == 'distance_cutoff':
+                radius=80+240*t
+                p.setPen(QPen(QColor('#94a3b8'),2));p.drawLine(QPointF(80,160),QPointF(430,160))
+                p.setPen(QPen(QColor('#008694'),5));p.drawLine(QPointF(80,160),QPointF(80+radius,160))
+                self.label(p, '색 구간: 수송 거리 상한 안의 후보', 75)
+                self.label(p, '상한 밖 제외 · 상한 안에서도 가림/부착 조건 확인', 265)
+            else:
+                rows={
+                    'front_scheme':('같은 시퀀스 반복','표면 방향별 이동 속도 계산','내부 수치 분할 ≠ 추가 공정'),
+                    'symmetry':('입력 대칭성 검사','대칭이면 수치 대칭 경계 유지','비대칭이면 일반 경계로 계산'),
+                    'inhibition_law':('ALD / 복합 / PEALD 법칙 선택','현재 깊이와 계수로 억제 배율 계산','공정 pulse 순서 변경이 아님'),
+                }[self.kind]
+                for i,line in enumerate(rows):
+                    p.setPen(QColor(COLORS[i]));p.drawText(65,105+i*58,line)
+                p.setPen(Qt.NoPen);p.setBrush(QColor('#008694'));p.drawEllipse(QPointF(60+t*390,260),4,4)
+            self.label(p, '실제 단면 변화는 실행 결과에서 확인하세요.', 310, '#64748b', 11)
+            return True
         kinds = {'ald_cycles', 'ald_gpc', 'cvd_rate', 'cvd_time', 'process_type',
                  'recipe_model', 'growth_basis', 'sticking', 'exposure',
                  'inhibitor_sticking', 'inhibitor_exposure'}

@@ -49,12 +49,14 @@ def test_single_sfo_preset_applies_without_changing_geometry(window):
     assert window.windowTitle() == 'GFE'
     assert not window.btn_split_options.isChecked()
     cfg=window.current_config()
-    assert cfg.cycles==cycles and cfg.angstrom_per_cycle==2
+    assert cfg.cycles==cycles and cfg.angstrom_per_cycle==.56
     assert cfg.process_type=='ald' and cfg.recipe_model=='legacy_calibrated_v1'
     assert cfg.redepo_incident_los_enabled
-    assert cfg.sputter_strength_a_per_cycle==pytest.approx(8/3,abs=1e-11)
-    assert cfg.sputter_width_deg==40 and cfg.sputter_smoothing_a==20
-    assert cfg.redepo_emit_power==5 and cfg.redepo_distance_power==50
+    from gapsim.emulation.sfo31_verified import verified_sfo31_config
+    expected=verified_sfo31_config()
+    assert cfg.sputter_strength_a_per_cycle==pytest.approx(expected.sputter_strength_a_per_cycle,abs=1e-11)
+    assert cfg.sputter_width_deg==pytest.approx(expected.sputter_width_deg) and cfg.sputter_smoothing_a==20
+    assert cfg.redepo_emit_power==pytest.approx(expected.redepo_emit_power) and cfg.redepo_distance_power==76.25
     assert cfg.points==points
     assert window._active_parameter_preset_name=='SFO3.1'
 

@@ -106,6 +106,7 @@ class ProcessParameterPanel(QWidget):
             ng.addWidget(label,row,0)
             ng.addWidget(spin,row,1)
         self.layouts[0].addWidget(self.fold('수치 해상도 · 공정 효과 아님',numerical))
+        self.layouts[0].addWidget(w.chk_symmetry)
         self.dose_label=QLabel()
         self.dose_label.setWordWrap(True)
         self.layouts[0].addWidget(self.dose_label)
@@ -192,6 +193,7 @@ class ProcessParameterPanel(QWidget):
         w.spin_sputter_smoothing.setToolTip('수치 요철 억제 길이입니다. 물리적 표면 확산이나 공정 레시피가 아닙니다.')
         for layout in self.layouts:layout.addStretch(1)
         w.chk_typical_cvd.toggled.connect(self.changed)
+        w.chk_symmetry.toggled.connect(self.changed)
         for spin in w.cvd_spins.values():spin.valueChanged.connect(self.changed)
         for check in (w.chk_depth_deposition,w.chk_sputter,w.chk_redepo,w.chk_inhibition_deposition,w.chk_incident_los):
             check.toggled.connect(self.sync)

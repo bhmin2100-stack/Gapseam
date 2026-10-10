@@ -56,7 +56,7 @@ def recipe_nominal_dose(config):
 
 
 def _planar_legacy_etch(config):
-    if not config.sputter_enabled:
+    if not config.sputter_enabled or int(config.emulator_number or 0) not in (0, 2, 3, 6):
         return 0.
     amplitude=config.sputter_strength_a_per_cycle*config.sputter_peak_pct/100.
     if config.redepo_incident_los_enabled:
@@ -64,6 +64,23 @@ def _planar_legacy_etch(config):
             sigma=config.redepo_incident_sigma_deg,rays=config.redepo_incident_ray_count,
             peak=config.sputter_peak_angle_deg,width=config.sputter_width_deg,amplitude=amplitude)[1][0])
     return amplitude*math.exp(-.5*(config.sputter_peak_angle_deg/config.sputter_width_deg)**2)
+
+
+def _planar_legacy_growth_ratio(config):
+    """Use the same inhibition field as the solver on its reference plane."""
+    if not config.inhibition_enabled or int(config.emulator_number or 0) not in (0, 5):
+        return 1.
+    from .trench_depo import compute_inhibition_deposition_factors
+    names = ('inhibition_strength_pct', 'inhibition_penetration_depth_a',
+             'inhibition_decay_power', 'inhibition_min_growth_ratio',
+             'inhibition_bottom_boost_pct', 'inhibition_peald_recombination_pct',
+             'inhibition_smoothing_a')
+    ratio = float(compute_inhibition_deposition_factors(
+        [(-1., 0.), (1., 0.)], process_model=config.inhibition_process_model,
+        **{name: _finite(getattr(config, name), name) for name in names})[0])
+    if not math.isfinite(ratio) or ratio < 1e-8:
+        raise ValueError('Planar inhibition leaves too little growth to calibrate net GPC')
+    return ratio
 
 
 def dispatch_recipe(config, *, progress_cb=None, detail_cb=None, cancel_check=None):
@@ -91,7 +108,8 @@ def dispatch_recipe(config, *, progress_cb=None, detail_cb=None, cancel_check=No
         count=config.cycles;dt=None
         inner=replace(config,growth_basis='gross')
     if config.growth_basis == 'net_planar':
-        inner=replace(inner,angstrom_per_cycle=inner.angstrom_per_cycle+_planar_legacy_etch(inner))
+        inner=replace(inner,angstrom_per_cycle=(inner.angstrom_per_cycle+_planar_legacy_etch(inner))
+                      /_planar_legacy_growth_ratio(inner))
     result=run_trench_depo(inner,progress_cb=progress_cb,detail_cb=detail_cb,cancel_check=cancel_check)
     metadata=dict(result.meta,process_type=config.process_type,recipe_model=config.recipe_model,
                   recipe_config=asdict(config),
@@ -199,6 +217,9 @@ def run_physical_recipe(config,*,progress_cb=None,detail_cb=None,cancel_check=No
     outer_dt=1. if is_ald else duration/outer_count if outer_count else 0.
     state=init_simulation_state(config.points,units='A',reparam_ds_a=ds)
     apply_initial_voids(state,config.initial_voids)
+    from gapsim.engine.symmetry import configure, constrain
+    configure(state, config.symmetry_mode)
+    constrain(state, ds)
     initial_y_min=min(y for x,y in state.surface.points)
     initial_y_max=max(y for x,y in state.surface.points)
     internal_rectangle=[(state.x_left_i,round(initial_y_min*state.scale)),
@@ -257,6 +278,7 @@ def run_physical_recipe(config,*,progress_cb=None,detail_cb=None,cancel_check=No
             delta=growth+redeposited-removed
             max_local_step=max(max_local_step,float(np.max(np.abs(delta))))
             _advance_surface(state,delta,ds)
+            constrain(state, ds)
             numerical_steps+=1
             remaining=max(0.,remaining-increment)
             substep+=1
@@ -279,6 +301,7 @@ def run_physical_recipe(config,*,progress_cb=None,detail_cb=None,cancel_check=No
                 closure_kind='sealed_void' if area>1e-5 else 'filled'
         if progress_cb:progress_cb(outer+1,outer_count)
     metadata=dict(version=2,units={'length':'A','y_down_is_negative':True},
+        symmetry=dict(state.meta.get('symmetry', {})),
         process_type=config.process_type,recipe_model=config.recipe_model,growth_basis=config.growth_basis,
         recipe_config=asdict(config),
         growth_model=config.recipe_model,propagation='surface_normal_transport',

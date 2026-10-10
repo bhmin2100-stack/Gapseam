@@ -39,6 +39,7 @@ _NON_PROCESS_FIELDS = (
 _LEGACY_RECIPE_DEFAULTS = {
     "recipe_model": "legacy_calibrated_v1", "process_type": "ald",
     "growth_basis": "gross",
+    "symmetry_mode": "off",  # Older fitted recipes must not acquire a new boundary.
 }
 
 

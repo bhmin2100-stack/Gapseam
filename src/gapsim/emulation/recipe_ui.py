@@ -21,6 +21,10 @@ RECIPE_WIDGETS = {
     "numerical_step_a": "spin_numerical_step",
     "inhibitor_sticking": "spin_inhibitor_sticking",
     "inhibitor_exposure": "spin_inhibitor_exposure",
+    "front_scheme": "cmb_front_scheme",
+    "ion_growth_fraction": "spin_ion_growth_fraction",
+    "redepo_max_distance_a": "spin_redepo_max_distance",
+    "inhibition_process_model": "cmb_inhibition_process_model",
 }
 
 
@@ -47,6 +51,10 @@ def init_recipe_controls(w):
     combo("cmb_recipe_model", [("Conformal · 균일 증착", "ideal_conformal_v1"),
         ("수송·표면 반응", "physical_transport_v1"), ("기존 보정 모델", "legacy_calibrated_v1")])
     combo("cmb_growth_basis", [("기준면 순성장량", "net_planar"), ("식각 전 증착량", "gross")])
+    combo("cmb_front_scheme", [("기존 계산", "legacy"), ("SFO3.1 동일 반복", "angular_godunov_v1")])
+    combo("cmb_inhibition_process_model", [("ALD", "ald"), ("복합", "hybrid"), ("PEALD", "peald")])
+    spin("spin_ion_growth_fraction", 0, 0, 1, "", 15)
+    spin("spin_redepo_max_distance", 1800, 1, 1e7, " Å", 15)
     spin("spin_cvd_rate", 1.0, 0, 10000, " Å/s")
     spin("spin_cvd_duration", 100.0, 0, 1e7, " s", 3)
     spin("spin_precursor_sticking", .1, .0001, 1)
@@ -73,12 +81,17 @@ def recipe_values(w):
     # A typed odd value can reach Run before editingFinished on keyboard shortcuts.
     rays = int(values.get("transport_ray_count", 32))
     values["transport_ray_count"] = min(256, rays + rays % 2)
+    if values.get("recipe_model") != "legacy_calibrated_v1" or values.get("process_type") != "ald":
+        values["front_scheme"] = "legacy"
+        values["ion_growth_fraction"] = 0.
     return values
 
 
 def apply_recipe_values(w, values):
     # Missing fields mean an older calibrated run, never the current UI mode.
-    defaults = {"process_type": "ald", "recipe_model": "legacy_calibrated_v1", "growth_basis": "gross"}
+    defaults = {"process_type": "ald", "recipe_model": "legacy_calibrated_v1", "growth_basis": "gross",
+                "front_scheme": "legacy", "ion_growth_fraction": 0., "redepo_max_distance_a": 1800.,
+                "inhibition_process_model": "hybrid"}
     for key, name in RECIPE_WIDGETS.items():
         if key not in values and key not in defaults:
             continue
@@ -136,6 +149,11 @@ def install_recipe_layout(w):
     w.spin_cycles.setMinimum(0)
     w.parameter_preset_group.layout().insertWidget(1, w.chk_preset_run_defaults)
     w.parameter_preset_group.layout().insertWidget(2, w.chk_preset_calculation_settings)
+    w.btn_load_sfo31_reference = QPushButton("SFO3.1 검증 조건 불러오기")
+    w.btn_load_sfo31_reference.setObjectName("btn_load_sfo31_reference")
+    w.btn_load_sfo31_reference.setToolTip("저장된 SFO3.1 공정과 CD242/R42/H702 구조, cycle 수와 계산 정확도를 함께 불러옵니다. 실행은 별도로 누르세요.")
+    w.btn_load_sfo31_reference.clicked.connect(w.load_sfo31_reference)
+    w.parameter_preset_group.layout().insertWidget(3, w.btn_load_sfo31_reference)
     p.buttons[0].setText("공정·계산")
     p.buttons[1].setText("성장·수송")
     p.buttons[2].setText("식각·재부착")
@@ -154,6 +172,15 @@ def install_recipe_layout(w):
     p.layouts[0].insertWidget(1, w.recipe_basis_group)
     p.recipe_note = p.note("")
     p.layouts[0].insertWidget(2, p.recipe_note)
+    w.fixed_repeat_group, _ = _group("SFO3.1 반복 계산", [
+        ("front", "계산 방식", w.cmb_front_scheme),
+        ("growth", "이온 성장 기여율", w.spin_ion_growth_fraction),
+    ])
+    w.spin_ion_growth_fraction.setToolTip("0은 이온과 무관한 성장, 0.05는 성장의 5%가 이온 도달량에 따라 달라지는 유효 모델입니다. 매 사이클 동일하게 적용합니다.")
+    w.redepo_distance_group, _ = _group("재부착 수송 범위", [("distance", "최대 이동 거리", w.spin_redepo_max_distance)])
+    p.layouts[2].insertWidget(2, w.redepo_distance_group)
+    w.inhibition_law_group, _ = _group("억제 계산", [("law", "억제 모델", w.cmb_inhibition_process_model)])
+    p.layouts[3].insertWidget(2, w.inhibition_law_group)
     w.transport_group, w.transport_labels = _group("입자 수송 · 표면 반응", [
         ("sticking", "표면 반응확률", w.spin_precursor_sticking),
         ("exposure", "ALD 노출량", w.spin_ald_exposure),
@@ -164,6 +191,7 @@ def install_recipe_layout(w):
         ("step", "최대 성장 간격", w.spin_numerical_step),
     ])
     w.recipe_numerical_fold = p.fold("계산 정확도", w.recipe_numerical_group)
+    w.recipe_numerical_fold.layout().itemAt(0).widget().layout().addWidget(w.fixed_repeat_group)
     # Keep one compact numerical section rather than parallel quality panels.
     for index in range(p.layouts[0].count()):
         item = p.layouts[0].itemAt(index)
@@ -205,7 +233,8 @@ def recipe_split_options(w, legacy_options):
         ("증착속도 D/R (Å/s)", "cvd_rate_a_per_s"), ("증착시간 (s)", "cvd_duration_s")]
     if model == "legacy_calibrated_v1":
         obsolete = {"sputter_peak_pct", "angstrom_per_cycle", "cycles"}
-        return amount + [(label, key) for label, key in legacy_options if key not in obsolete]
+        extra = [("이온 성장 기여율", "ion_growth_fraction")] if w.cmb_front_scheme.currentData() != "legacy" else []
+        return amount + extra + [(label, key) for label, key in legacy_options if key not in obsolete]
     options = list(amount)
     if model == "physical_transport_v1":
         options.append(("표면 반응확률", "precursor_sticking"))
@@ -238,6 +267,10 @@ def sync_recipe_layout(w):
     ald = w.cmb_process_type.currentData() == "ald"
     model = w.cmb_recipe_model.currentData()
     legacy = model == "legacy_calibrated_v1"
+    w.fixed_repeat_group.setVisible(legacy and ald)
+    w.recipe_numerical_fold.setTitle("계산 · SFO3.1 설정" if legacy and ald else "계산 정확도")
+    w.redepo_distance_group.setVisible(legacy)
+    w.inhibition_law_group.setVisible(legacy)
     transport = model == "physical_transport_v1"
     etch = w.chk_sputter.isChecked()
     inh = w.chk_inhibition_deposition.isChecked()
@@ -254,7 +287,7 @@ def sync_recipe_layout(w):
     w.spin_transport_rays.setEnabled(transport or inh or etch)
     w.cmb_growth_basis.setEnabled(True)
     p.recipe_note.setText(
-        "기존 단면을 재현하는 보정 모델입니다. SFO3.1은 ALD 프리셋이며 포화 반응을 직접 푸는 모델은 아닙니다. SFO3.1의 저장된 GPC는 식각 전 기준입니다."
+        "형상 보정용 유효 모델입니다. SFO3.1 동일 반복은 매 cycle 같은 계수를 사용합니다. GPC 기준은 위의 순성장/식각 전 선택을 따릅니다. 실제 재료 물성의 독립 검증은 별도입니다."
         if legacy else
         "기준면 순성장량은 평탄면의 제거량을 반영해 보정합니다. 트랜치의 국소 두께와 재부착은 실제 구조에서 따로 계산합니다."
     )
@@ -323,6 +356,10 @@ def recipe_result_summary(config, result=None):
                 lines.append(f"도착 후 부착확률: {config.redepo_efficiency_pct:g}%")
         if config.inhibition_enabled:
             lines.append(f"억제제 반응확률: {config.inhibitor_sticking:g} · 노출량: {config.inhibitor_exposure:g} (무차원)")
+    if config.front_scheme == "angular_godunov_v1":
+        lines += ["SFO3.1 동일 반복 · 종료 후 추가 처리 없음",
+                  f"이온 성장 기여율: {config.ion_growth_fraction*100:g}%",
+                  "형상 보정용 유효 모델 · 실제 물성/다른 구조의 예측력은 별도 검증 필요"]
     if result:
         lines += [f"저장 프레임: {len(result.frame_profiles)}", f"최종 단면 점: {len(result.final_profile)}"]
         for key, label in (("redepo_total_removed_mass", "누적 제거 수송량"),

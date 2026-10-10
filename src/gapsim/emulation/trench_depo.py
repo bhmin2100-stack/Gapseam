@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-from bisect import bisect_left, bisect_right
 from dataclasses import asdict, dataclass, replace
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -31,9 +30,12 @@ from gapsim.emulation.model4_redeposition import (
     compute_redeposition,
 )
 from gapsim.engine.segment_index import SegmentIndex
+from gapsim.engine.scanline_index import ScanlineIndex
+from gapsim.engine.reflection_footprint import ReflectionFootprintIndex
 from gapsim.engine.profile_regularization import fair_profile_implicit
 from gapsim.engine.incident_ions import source_integral, validate_incident_parameters
 from gapsim.engine import typical_cvd
+from gapsim.engine.symmetry import resample as symmetry_resample
 
 Point = Tuple[float, float]
 
@@ -85,6 +87,7 @@ BOWED_JAR_TRENCH_POINTS: Tuple[Point, ...] = (
 class TrenchDepoConfig:
     points: Sequence[Point] = DEFAULT_TRENCH_POINTS
     initial_voids: Sequence[Sequence[Point]] = ()
+    symmetry_mode: str = "auto"
     cycles: int = 20
     emulator_number: int = 0
     angstrom_per_cycle: float = 10.0
@@ -182,6 +185,9 @@ class TrenchDepoConfig:
     transport_ray_count: int = 32
     numerical_step_a: float = 2.0
     growth_basis: str = "gross"
+    # Versioned per-run solver; no global research hooks or terminal finishing.
+    front_scheme: str = "legacy"
+    ion_growth_fraction: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -224,6 +230,7 @@ class _ConstantFluxModel(FluxModel):
 
 
 SWEEP_PARAMETER_LABELS: Dict[str, str] = {
+    "ion_growth_fraction": "Ion growth fraction",
     "cvd_rate_a_per_s": "CVD rate A/s",
     "cvd_duration_s": "CVD time s",
     "precursor_sticking": "Precursor reaction probability",
@@ -590,10 +597,14 @@ def direct_sputter_angle_response(
     return float(amplitude * math.exp(-0.5 * z * z))
 
 
-def _line_intersections_at_y(points: Sequence[Point], y_value: float) -> List[float]:
+def _line_intersections_at_y(
+    points: Sequence[Point], y_value: float, *, segment_candidates=None,
+) -> List[float]:
     y0 = float(y_value)
     xs: List[float] = []
-    for a, b in zip(points, points[1:]):
+    segments = (zip(points, points[1:]) if segment_candidates is None else
+                ((points[i], points[i+1]) for i in segment_candidates))
+    for a, b in segments:
         ax, ay = float(a[0]), float(a[1])
         bx, by = float(b[0]), float(b[1])
         if math.isclose(ay, by, rel_tol=0.0, abs_tol=1e-9):
@@ -843,10 +854,12 @@ def detect_depth_deposition_closure(
     bin_a = max(float(reparam_ds_a) * 4.0, max_depth / 160.0, 1.0)
     min_width = float("inf")
     min_depth = 0.0
+    scanlines = ScanlineIndex(pts)
     depth = min(max_depth, bin_a)
     while depth <= max_depth + 1e-9:
         y_probe = surface_y - min(depth, max_depth)
-        xs = _line_intersections_at_y(pts, y_probe)
+        xs = _line_intersections_at_y(pts, y_probe,
+                                      segment_candidates=scanlines.candidates(y_probe))
         if len(xs) >= 2:
             widths = [max(0.0, float(r - l)) for l, r in zip(xs, xs[1:])]
             width = min(widths) if widths else 0.0
@@ -1277,6 +1290,33 @@ def _apply_depth_post_closure_fill(
     state.meta["depth_post_closure_last_fill_area_a2"] = float(filled_area)
 
 
+def _advance_recipe_growth(points, flux, deposition_a, cfg):
+    if cfg.front_scheme == "legacy":
+        return VertexNormalPropagator().advance(points, flux, deposition_a)
+    from gapsim.engine.scalar_front import advance
+    from gapsim.engine.incident_ions import visible_from_direction, validate_incident_parameters
+    import numpy as np
+    pts = normalize_surface_order(points)
+    normals = np.asarray(VertexNormalPropagator._vertex_air_normals(pts))
+    factors = np.ones(len(pts))
+    if cfg.ion_growth_fraction:
+        # Match the verified 25-direction growth response, independent of the
+        # erosion quadrature setting. Reference-plane activation is exactly one.
+        sigma, rays = validate_incident_parameters(cfg.redepo_incident_sigma_deg, 25)
+        angles = np.linspace(-4*sigma, 4*sigma, rays)*math.pi/180
+        w = np.exp(-.5*(angles/(sigma*math.pi/180))**2)
+        w[[0, -1]] *= .5
+        w /= w.sum()
+        incoming = np.zeros(len(pts))
+        activation_normals = np.asarray(vertex_air_normals(pts))
+        for a, weight in zip(angles, w):
+            cosine = np.clip(activation_normals @ np.array([math.sin(a), math.cos(a)]), 0, 1)
+            incoming += weight*cosine*visible_from_direction(pts, a)
+        activation = np.clip(incoming/float(np.sum(w*np.cos(angles))), 0, 1)
+        factors = 1-cfg.ion_growth_fraction+cfg.ion_growth_fraction*activation
+    return advance(pts, np.asarray(flux)*factors*deposition_a, normals=normals)[0]
+
+
 def _apply_typical_cvd_step(state, cfg, *, deposition_a, reparam_ds_a, inhibition_flux=None):
     pts = normalize_surface_order(state.surface.points)
     if len(pts) < 2 or deposition_a <= 0:
@@ -1285,7 +1325,7 @@ def _apply_typical_cvd_step(state, cfg, *, deposition_a, reparam_ds_a, inhibitio
     if inhibition_flux is not None:
         flux = [a*b for a, b in zip(flux, inhibition_flux)]
     trapped = OffsetBoolean.collect_void_air(state)
-    proposed = VertexNormalPropagator().advance(pts, flux, deposition_a)
+    proposed = _advance_recipe_growth(pts, flux, deposition_a, cfg)
     cleaned, solid = TopologyCleanup().cleanup(proposed, state, solid_merge_mode="union")
     if trapped:
         solid = _clip_difference(solid, trapped)
@@ -1294,6 +1334,19 @@ def _apply_typical_cvd_step(state, cfg, *, deposition_a, reparam_ds_a, inhibitio
         state.solid_paths_i = solid
     state.surface.points = equal_arc_resample(cleaned, reparam_ds_a)
     state.meta["typical_cvd_flux_range_last"] = [min(flux), max(flux)]
+
+
+def _apply_fixed_uniform_growth_step(state, cfg, *, deposition_a, reparam_ds_a):
+    pts = normalize_surface_order(state.surface.points)
+    if len(pts) < 2 or deposition_a <= 0:
+        return
+    proposed = _advance_recipe_growth(pts, [1.] * len(pts), deposition_a, cfg)
+    solid_ref = OffsetBoolean.grow_solid_external_air_limited(state, dr_ref=deposition_a)
+    cleaned, solid = TopologyCleanup().cleanup(proposed, state,
+        solid_ref_paths_i=solid_ref, solid_merge_mode="union")
+    state.surface.points = equal_arc_resample(cleaned, reparam_ds_a)
+    if solid:
+        state.solid_paths_i = solid
 
 
 def _apply_depth_deposition_step(
@@ -1327,7 +1380,7 @@ def _apply_depth_deposition_step(
     flux = model.compute_flux(state)
     if len(flux) != len(pts):
         flux = [1.0 for _ in pts]
-    proposed = VertexNormalPropagator().advance(pts, flux, deposition_a)
+    proposed = _advance_recipe_growth(pts, flux, deposition_a, cfg)
     positive = [max(0.0, float(v)) for v in flux]
     mean_flux = sum(positive) / float(len(positive)) if positive else 1.0
     solid_ref = OffsetBoolean.grow_solid_external_air_limited(state, dr_ref=deposition_a * mean_flux)
@@ -1392,7 +1445,7 @@ def _apply_inhibition_deposition_step(
         _apply_typical_cvd_step(state, cfg, deposition_a=deposition_a,
                                reparam_ds_a=reparam_ds_a, inhibition_flux=flux)
         return
-    proposed = VertexNormalPropagator().advance(pts, flux, deposition_a)
+    proposed = _advance_recipe_growth(pts, flux, deposition_a, cfg)
     positive = [max(0.0, float(v)) for v in flux]
     mean_flux = sum(positive) / float(len(positive)) if positive else 1.0
     solid_ref = OffsetBoolean.grow_solid_external_air_limited(state, dr_ref=deposition_a * mean_flux)
@@ -2094,6 +2147,25 @@ def _model6_first_opposite_reflection_hit(
     return best
 
 
+def _advance_model6_profile(points, normals, profile_delta):
+    """Default vertex-normal update; separate hook for forward-method research."""
+    proposed = []
+    for idx, (x, y) in enumerate(points):
+        nx, ny = normals[idx] if idx < len(normals) else (0.0, 1.0)
+        move_delta = float(profile_delta[idx]) if idx < len(profile_delta) else 0.0
+        x2 = float(x + move_delta * nx)
+        y2 = float(y + move_delta * ny)
+        if idx == 0 or idx == (len(points) - 1):
+            x2 = float(x)
+        proposed.append((x2, y2))
+    return proposed
+
+
+def _model6_transport_research_override(points, normals, removed_mass, **kwargs):
+    """No-op extension point for isolated transport studies; never a preset default."""
+    return None
+
+
 def _apply_model6_reflection_gaussian_redepo_step(
     state: SimulationState,
     *,
@@ -2105,6 +2177,7 @@ def _apply_model6_reflection_gaussian_redepo_step(
     sputter_smoothing_a: float,
     reparam_ds_a: float,
     regularization_step_fraction: float = 1.0,
+    front_scheme: str = "legacy",
     incident_los_enabled: bool = False,
     incident_sigma_deg: float = 10.0,
     incident_ray_count: int = 25,
@@ -2126,7 +2199,7 @@ def _apply_model6_reflection_gaussian_redepo_step(
 ) -> Tuple[List[float], List[float], float]:
     grown_solid = OffsetBoolean.grow_solid_external_air_limited(state, dr_ref=deposition_a)
     grown_surface = _extract_surface_from_solid(state, grown_solid, state.surface.points)
-    grown_surface = equal_arc_resample(grown_surface, reparam_ds_a)
+    grown_surface = symmetry_resample(state, grown_surface, reparam_ds_a, equal_arc_resample)
     source_state = _clone_simulation_state(state)
     angles, responses, etch_clamp_a = _apply_direct_sputter_step(
         source_state,
@@ -2192,6 +2265,7 @@ def _apply_model6_reflection_gaussian_redepo_step(
     escaped_mass = 0.0
     raw_hit_mass = 0.0
     segment_index = SegmentIndex(grown_surface)
+    footprint_index = ReflectionFootprintIndex(grown_surface, normals, arc_s, areas, center_x)
     for idx, mass in enumerate(removed_mass):
         if mass <= source_cutoff:
             continue
@@ -2253,23 +2327,9 @@ def _apply_model6_reflection_gaussian_redepo_step(
             min(max_distance, float(distance) * math.tan(spread_rad)),
         )
         footprint_radius = max(float(reparam_ds_a) * 2.0, footprint_sigma * 3.0)
-        target_weights: List[Tuple[int, float]] = []
-        left = bisect_left(arc_s, hit_s-footprint_radius)
-        right = bisect_right(arc_s, hit_s+footprint_radius)
-        for target_idx in range(left, right):
-            tx, _ty = grown_surface[target_idx]
-            if target_idx >= len(arc_s):
-                continue
-            if (-1 if float(tx) < center_x else 1) != hit_side:
-                continue
-            if target_idx < len(normals) and abs(float(normals[target_idx][0])) < 0.12:
-                continue
-            ds = abs(float(arc_s[target_idx]) - hit_s)
-            if ds > footprint_radius:
-                continue
-            weight = areas[target_idx] * math.exp(-0.5 * (ds / max(footprint_sigma, 1e-9)) ** 2)
-            if weight > 0.0:
-                target_weights.append((target_idx, weight))
+        target_weights = footprint_index.weights(
+            hit_side=hit_side, hit_arc=hit_s,
+            sigma=footprint_sigma, radius=footprint_radius)
         if not target_weights:
             if 0 <= seg_idx < len(grown_surface):
                 target_weights.append((seg_idx, max(1e-9, left_weight)))
@@ -2292,6 +2352,30 @@ def _apply_model6_reflection_gaussian_redepo_step(
         if footprint_sum > 1e-12 and target_total_mass > 0.0
         else [0.0 for _ in grown_surface]
     )
+    transport_override = _model6_transport_research_override(
+        grown_surface, normals, removed_mass, efficiency=efficiency,
+        spread_deg=angular_spread, specular_bias=specular_bias,
+        max_distance=max_distance,
+    )
+    if transport_override is not None:
+        redepo_mass = [float(v) for v in transport_override["mass"]]
+        if len(redepo_mass) != len(grown_surface) or any(
+            not math.isfinite(v) or v < 0 for v in redepo_mass
+        ) or sum(redepo_mass) > total_removed_mass * efficiency + 1e-7:
+            raise ValueError("Invalid research redeposition transport budget")
+        # The alternate law owns interception and escape: do not normalize its
+        # surviving arrivals back to the legacy, guaranteed capture budget.
+        center_hit_mass = list(redepo_mass)
+        footprint_mass = list(redepo_mass)
+        center_hit_sum = footprint_sum = target_total_mass = sum(redepo_mass)
+        source_capture = transport_override["source_captured"]
+        active_hit_count = sum(v > 0 for v in source_capture)
+        hit_source_removed_mass = sum(
+            mass for mass, capture in zip(removed_mass, source_capture) if capture > 0
+        )
+        raw_hit_mass = target_total_mass
+        escaped_mass = float(transport_override["escaped"])
+        transport_lines = transport_override["lines"]
     peak_idx = max(range(len(redepo_mass)), key=lambda i: redepo_mass[i]) if any(v > 0.0 for v in redepo_mass) else -1
     gaussian_mass = (
         [(value / footprint_sum) * target_total_mass for value in footprint_mass]
@@ -2318,20 +2402,27 @@ def _apply_model6_reflection_gaussian_redepo_step(
         for redepo, etch in zip(dh_redepo, dh_etch)
     ]
 
-    proposed: List[Point] = []
-    has_negative_net = False
-    for idx, (x, y) in enumerate(grown_surface):
-        nx, ny = normals[idx] if idx < len(normals) else (0.0, 1.0)
-        move_delta = float(profile_delta[idx]) if idx < len(profile_delta) else 0.0
-        if float(deposition_a) + move_delta < 0.0:
-            has_negative_net = True
-        x2 = float(x + move_delta * nx)
-        y2 = float(y + move_delta * ny)
-        if idx == 0 or idx == (len(grown_surface) - 1):
-            x2 = float(x)
-        proposed.append((x2, y2))
+    if front_scheme == "angular_godunov_v1":
+        from gapsim.engine.orientation_front import advance
+        # Reconstruct exactly the incoming term used in the frozen research
+        # runner; subtraction/addition order is retained for reproducibility.
+        arrival = [max(0., delta + mass / area) for delta, mass, area in
+                   zip(profile_delta, removed_mass, areas)]
+        proposed, front_info = advance(grown_surface, normals, arrival,
+            strength=sputter_strength_a, amplitude=sputter_peak_pct/100.,
+            sigma=incident_sigma_deg, rays=incident_ray_count,
+            peak=sputter_peak_angle_deg, width=sputter_width_deg,
+            clamp=max(deposition_a*2, reparam_ds_a*4), samples=9)
+        audit = state.meta.setdefault("orientation_front_audit", {"calls": 0, "substeps": 0, "fallback_vertices": 0, "max_cfl": 0.})
+        audit["calls"] += 1
+        for key in ("substeps", "fallback_vertices"):
+            audit[key] += front_info[key]
+        audit["max_cfl"] = max(audit["max_cfl"], front_info["max_cfl"])
+    else:
+        proposed = _advance_model6_profile(grown_surface, normals, profile_delta)
+    has_negative_net = any(float(deposition_a) + float(delta) < 0.0 for delta in profile_delta)
 
-    if sputter_smoothing_a > 0:
+    if sputter_smoothing_a > 0 and front_scheme == "legacy":
         # Fourth-order coefficient is proportional to elapsed cycle fraction:
         # refining internal time steps must not multiply smoothing strength.
         # Source removal, ray transport, and capture budgets above are unchanged.
@@ -2344,7 +2435,7 @@ def _apply_model6_reflection_gaussian_redepo_step(
         solid_ref_paths_i=grown_solid,
         solid_merge_mode=("candidate" if has_negative_net else "union"),
     )
-    state.surface.points = equal_arc_resample(clean_surface, reparam_ds_a)
+    state.surface.points = symmetry_resample(state, clean_surface, reparam_ds_a, equal_arc_resample)
     if clean_solid:
         state.solid_paths_i = clean_solid
 
@@ -2419,7 +2510,10 @@ def _apply_model6_reflection_gaussian_redepo_step(
     state.meta["model6_reflection_redepo_total_mass_last"] = float(redepo_sum)
     state.meta["model6_reflection_redepo_active_source_count_last"] = int(active_source_count)
     state.meta["model6_reflection_redepo_active_target_count_last"] = int(active_target_count)
-    state.meta["model6_reflection_redepo_transport_model_last"] = "normal_specular_lobe_los"
+    state.meta["model6_reflection_redepo_transport_model_last"] = (
+        "research_first_surface_angular_lobe" if transport_override is not None
+        else "normal_specular_lobe_los"
+    )
     state.meta["direct_sputter_total_last"] = float(sum(dh_etch))
     return angles, responses, etch_clamp_a
 
@@ -4078,6 +4172,11 @@ def _sweep_values(start: float, stop: float, step: float, *, max_cases: int) -> 
 
 
 def _validate_sweep_value(parameter: str, value: float) -> float:
+    if parameter == "ion_growth_fraction":
+        fraction = _coerce_non_negative_float(value, name=parameter)
+        if fraction > 1:
+            raise ValueError("ion_growth_fraction must be in [0, 1]")
+        return fraction
     if parameter in {"cvd_rate_a_per_s", "cvd_duration_s", "inhibitor_exposure"}:
         return _coerce_non_negative_float(value, name=parameter)
     if parameter in {"ald_exposure", "numerical_step_a"}:
@@ -4226,6 +4325,12 @@ def _validate_sweep_value(parameter: str, value: float) -> float:
 
 def _replace_sweep_config(base_config: TrenchDepoConfig, parameter: str, value: float) -> TrenchDepoConfig:
     value = _validate_sweep_value(parameter, value)
+    if base_config.front_scheme == "angular_godunov_v1":
+        # A fixed-repeat split changes one coefficient, not the other physics
+        # switches (legacy depth splits implicitly disabled etch/redeposition).
+        integer_fields = {"cycles", "transport_ray_count", "redepo_incident_ray_count",
+                          "redepo_ray_count", "redepo_neighbor_exclusion", "redepo_soft_los_radius_points"}
+        return replace(base_config, **{parameter: int(value) if parameter in integer_fields else float(value)})
     kwargs: Dict[str, Any] = {}
     if parameter in typical_cvd.DEFAULTS and parameter != "cvd_enabled":
         kwargs["cvd_enabled"] = True
@@ -4338,6 +4443,15 @@ def run_trench_depo(
     cancel_check: Optional[Callable[[], bool]] = None,
 ) -> TrenchDepoResult:
     cfg = config or TrenchDepoConfig()
+    if cfg.front_scheme not in ("legacy", "angular_godunov_v1"):
+        raise ValueError("Unknown front scheme")
+    if not math.isfinite(cfg.ion_growth_fraction) or not 0 <= cfg.ion_growth_fraction <= 1:
+        raise ValueError("Ion growth fraction must be in [0, 1]")
+    if cfg.front_scheme != "legacy":
+        if cfg.recipe_model != "legacy_calibrated_v1" or cfg.process_type != "ald" or cfg.emulator_number != 0:
+            raise ValueError("SFO fixed-repeat front requires the integrated ALD calibrated model")
+        if cfg.sputter_enabled and (not cfg.redepo_incident_los_enabled or cfg.ion_transmission_enabled):
+            raise ValueError("SFO fixed-repeat front requires geometric ion visibility without the older attenuation law")
     from gapsim.emulation.process_recipe import apply_initial_voids, dispatch_recipe
     recipe_result = dispatch_recipe(cfg, progress_cb=progress_cb, detail_cb=detail_cb,
                                     cancel_check=cancel_check)
@@ -4635,9 +4749,9 @@ def run_trench_depo(
     )
     sputter_active = bool(allowed_sputter and cfg.sputter_enabled) and sputter_strength_a > 0.0
     reflected_ion_requested = False
-    model6_redepo_requested = bool(allowed_reflection_redepo and cfg.redepo_enabled)
+    model6_redepo_requested = bool(allowed_reflection_redepo and (cfg.redepo_enabled or cfg.front_scheme == "angular_godunov_v1"))
     model6_redepo_active = bool(model6_redepo_requested and sputter_active and (redepo_efficiency_pct > 0.0 or incident_los_enabled))
-    redepo_active = bool(model6_redepo_active)
+    redepo_active = bool(model6_redepo_active and cfg.redepo_enabled)
     lf_overhang_requested = False
     lf_overhang_active = bool(lf_overhang_requested and lf_overhang_dose > 0.0 and lf_overhang_sputter_gain > 0.0)
     closure_redepo_requested = False
@@ -4683,6 +4797,9 @@ def run_trench_depo(
 
     state = init_simulation_state(initial_points, units="A", reparam_ds_a=reparam_ds_a)
     apply_initial_voids(state, cfg.initial_voids)
+    from gapsim.engine.symmetry import configure, constrain
+    configure(state, cfg.symmetry_mode)
+    constrain(state, reparam_ds_a)
     frame_steps: List[int] = []
     frame_profiles: List[List[Point]] = []
     frame_voids: List[List[List[Point]]] = []
@@ -4790,6 +4907,10 @@ def run_trench_depo(
                         reparam_ds_a=reparam_ds_a,
                         cycle_index=int(step + 1),
                     )
+                    sputter_deposition_sub_a = 0.0
+                elif cfg.front_scheme == "angular_godunov_v1":
+                    _apply_fixed_uniform_growth_step(state, cfg,
+                        deposition_a=deposition_sub_a, reparam_ds_a=reparam_ds_a)
                     sputter_deposition_sub_a = 0.0
                 detail_kind = (
                     "integrated_inhibition_model8_closure_redepo_substep"
@@ -4933,6 +5054,7 @@ def run_trench_depo(
                         sputter_smoothing_a=sputter_smoothing_a,
                         reparam_ds_a=reparam_ds_a,
                         regularization_step_fraction=(angstrom_per_cycle / 3.0 if incident_los_enabled else 1.0) / substeps,
+                        front_scheme=cfg.front_scheme,
                         incident_los_enabled=incident_los_enabled,
                         incident_sigma_deg=cfg.redepo_incident_sigma_deg,
                         incident_ray_count=cfg.redepo_incident_ray_count,
@@ -4946,7 +5068,7 @@ def run_trench_depo(
                         ion_transmission_aperture_shadow_pct=ion_transmission_aperture_shadow_pct,
                         ion_transmission_lateral_shadow_pct=ion_transmission_lateral_shadow_pct,
                         ion_transmission_edge_shadow_pct=ion_transmission_edge_shadow_pct,
-                        redepo_efficiency_pct=redepo_efficiency_pct,
+                        redepo_efficiency_pct=redepo_efficiency_pct if cfg.redepo_enabled else 0.,
                         angular_spread_deg=redepo_emit_power,
                         specular_bias_pct=redepo_distance_power,
                         redepo_neighbor_exclusion=redepo_neighbor_exclusion,
@@ -5091,11 +5213,16 @@ def run_trench_depo(
                             }
                         )
             elif angstrom_per_cycle > 0.0:
-                grown_solid = OffsetBoolean.grow_solid_external_air_limited(state, dr_ref=angstrom_per_cycle)
-                grown_surface = _extract_surface_from_solid(state, grown_solid, state.surface.points)
-                state.surface.points = equal_arc_resample(grown_surface, reparam_ds_a)
-                if grown_solid:
-                    state.solid_paths_i = grown_solid
+                if cfg.front_scheme == "angular_godunov_v1":
+                    _apply_fixed_uniform_growth_step(state, cfg,
+                        deposition_a=angstrom_per_cycle, reparam_ds_a=reparam_ds_a)
+                else:
+                    grown_solid = OffsetBoolean.grow_solid_external_air_limited(state, dr_ref=angstrom_per_cycle)
+                    grown_surface = _extract_surface_from_solid(state, grown_solid, state.surface.points)
+                    state.surface.points = equal_arc_resample(grown_surface, reparam_ds_a)
+                    if grown_solid:
+                        state.solid_paths_i = grown_solid
+        constrain(state, reparam_ds_a)
         state.meta["step_idx"] = int(state.meta.get("step_idx", 0)) + 1
         state.meta["dr"] = float(angstrom_per_cycle)
 
@@ -5277,6 +5404,10 @@ def run_trench_depo(
         final_profile=final_profile,
         meta={
             "version": 1,
+            "symmetry": dict(state.meta.get("symmetry", {})),
+            "front_scheme": cfg.front_scheme,
+            "ion_growth_fraction": cfg.ion_growth_fraction,
+            "orientation_front_audit": dict(state.meta.get("orientation_front_audit", {})),
             "recipe_model": "legacy_calibrated_v1",
             "recipe_config": asdict(cfg),
             "process_type": "ald",
@@ -5340,7 +5471,7 @@ def run_trench_depo(
             "reflected_ion_total_last": float(reflected_total),
             "direct_sputter_total_last": float(direct_total),
             "reflected_direct_ratio_last": float(reflected_total / direct_total) if direct_total > 1e-12 else 0.0,
-            "redepo_enabled": bool(model6_redepo_requested),
+            "redepo_enabled": bool(allowed_reflection_redepo and cfg.redepo_enabled),
             "redepo_active": bool(redepo_active and redepo_total_mass > 0.0),
             "redepo_model": (
                 "normal_specular_lobe_los"

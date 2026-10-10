@@ -23,6 +23,7 @@ emulator = Analysis(
     pathex=[str(ROOT / 'src')],
     binaries=[],
     datas=[(str(ROOT / 'src' / 'gapsim' / 'emulation' / 'help_trench_examples.json.gz'), 'gapsim/emulation'),
+           (str(ROOT / 'src' / 'gapsim' / 'emulation' / 'sfo31_verified.json'), 'gapsim/emulation'),
            (str(ROOT / 'src' / 'gapsim' / 'emulation' / 'assets' / 'gfe.ico'), 'gapsim/emulation/assets')],
     hiddenimports=HIDDEN_IMPORTS,
     hookspath=[],

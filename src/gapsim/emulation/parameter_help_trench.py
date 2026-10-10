@@ -122,6 +122,15 @@ def examples(svt=True):
         labels=('빠름 · 20 Å', '정밀 · 5 Å'))
     add('cmb_depth_feature_type', 'deposition_feature_type', ('hole', 'line'), 'reference', depth,
         labels=('Hole', 'Line'))
+    add('chk_symmetry', 'symmetry_mode', ('off', 'auto'), 'mesh', base,
+        labels=('일반 경계', '대칭 입력 보존'))
+    add('cmb_front_scheme', 'front_scheme', ('legacy', 'angular_godunov_v1'), 'mesh', etch,
+        labels=('기존 전진법', '방향별 전진법'))
+    add('spin_ion_growth_fraction', 'ion_growth_fraction', (0., .6), 'growth',
+        replace(etch, front_scheme='angular_godunov_v1'))
+    add('spin_redepo_max_distance', 'redepo_max_distance_a', (100., 1800.), 'redepo', etch, 'Å')
+    add('cmb_inhibition_process_model', 'inhibition_process_model', ('ald','peald'), 'inhibition',
+        replace(inhibit, inhibition_peald_recombination_pct=60.), labels=('ALD 법칙','PEALD 법칙'))
     for key, field, family, recipe in [
         ('chk_typical_cvd', 'cvd_enabled', 'growth', cvd),
         ('chk_sputter', 'sputter_enabled', 'etch', etch),
@@ -152,7 +161,7 @@ def examples(svt=True):
             _, scale, unit, _, _ = FIELDS[key]
             middle_label = f'{mid/scale:g} {unit}'.strip()
         else:
-            unit = '°' if key == 'spin_redepo_emit_power' else 'Å'
+            unit = '°' if key == 'spin_redepo_emit_power' else '' if key == 'spin_ion_growth_fraction' else 'Å'
             middle_label = f'{mid:g} {unit}'
         context = SVT_CONTEXTS.get(key, ('기본 비교 조건', {}))[1]
         result[key] = replace(example, values=(lo, mid, hi),

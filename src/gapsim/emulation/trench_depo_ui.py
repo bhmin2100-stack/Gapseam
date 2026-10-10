@@ -3160,6 +3160,9 @@ class TrenchDepoWindow(QMainWindow):
             "프로파일 조각 크기를 선택합니다. 값이 클수록 빠르고, 작을수록 형상이 더 정밀하지만 느립니다."
         )
         self.spin_reparam_ds = QDoubleSpinBox()
+        self.chk_symmetry = QCheckBox("대칭 입력 보존")
+        self.chk_symmetry.setChecked(True)
+        self.chk_symmetry.setToolTip("입력 표면과 내부 빈 공간이 정확히 좌우대칭일 때만 대칭 계산 경계를 적용합니다. 비대칭 입력은 그대로 계산합니다. 기존 보정 결과 재현 시 끌 수 있습니다.")
         self.spin_reparam_ds.setRange(0.5, 200.0)
         self.spin_reparam_ds.setDecimals(2)
         self.spin_reparam_ds.setSingleStep(2.5)
@@ -3631,7 +3634,7 @@ class TrenchDepoWindow(QMainWindow):
         self.btn_fit_structure = QPushButton("화면 맞춤")
         self.btn_reset_structure = QPushButton("기본 구조")
         self.chk_symmetric_structure_edit = QCheckBox("좌우대칭 이동")
-        self.chk_symmetric_structure_edit.setToolTip("구조 점을 움직일 때 x=0 기준 반대편 대응점을 (-x, y)로 같이 이동합니다.")
+        self.chk_symmetric_structure_edit.setToolTip("구조 양 끝의 중간을 대칭축으로 삼아 정확히 대응하는 반대편 점을 함께 이동합니다. 중심축 위의 점은 가로로 움직이지 않습니다. 비대칭 점은 임의로 짝짓지 않습니다.")
         self.lbl_geometry_points = QLabel("구조: 0점")
         self.lbl_geometry_source = QLabel("입력: raw")
         self.lbl_geometry_source.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -3867,6 +3870,7 @@ class TrenchDepoWindow(QMainWindow):
         deposition_controls_layout.addWidget(self.cmb_quality_mode, 1, 1)
         deposition_controls_layout.addWidget(self.lbl_reparam_ds, 2, 0)
         deposition_controls_layout.addWidget(self.spin_reparam_ds, 2, 1)
+        deposition_controls_layout.addWidget(self.chk_symmetry, 3, 0, 1, 2)
         deposition_controls.setLayout(deposition_controls_layout)
         params_grid.addWidget(deposition_controls, 2, 0, 1, 2)
         params_grid.addWidget(self.lbl_etch_section, 3, 0, 1, 2)
@@ -4712,7 +4716,7 @@ class TrenchDepoWindow(QMainWindow):
         self.smoothing_view.pointInserted.connect(self._on_smoothed_point_inserted)
         self.smoothing_view.pointDeleted.connect(self._on_smoothed_point_deleted)
         self.btn_reload_structure_library.clicked.connect(self.refresh_structure_library)
-        self.cmb_structure_library.currentIndexChanged.connect(self.load_selected_structure_from_library)
+        self.cmb_structure_library.activated.connect(self.load_selected_structure_from_library)
         self.btn_save_structure.clicked.connect(self.save_current_structure_to_library)
         self.btn_delete_structure.clicked.connect(self.delete_selected_structure_from_library)
         self.btn_export_default_structures.clicked.connect(self.export_default_structures_to_library)
@@ -4744,11 +4748,12 @@ class TrenchDepoWindow(QMainWindow):
         self.sync_ion_shadow_slider_labels()
         self.spin_ion_end_depth.valueChanged.connect(self.sync_ion_transmission_editor_from_spins)
 
-        self.refresh_structure_library(show_status=False)
         try:
-            ensure_sfo31_preset(self._parameter_library_path)
+            from gapsim.emulation.sfo31_verified import register_verified_sfo31
+            register_verified_sfo31(self._parameter_library_path, self._structure_library_path)
         except Exception as exc:  # noqa: BLE001
             self.statusBar().showMessage(f"SFO3.1 프리셋 등록 실패: {exc}", 5000)
+        self.refresh_structure_library(show_status=False)
         self.refresh_parameter_presets(show_status=False)
         self.refresh_addons(show_status=False)
         self.apply_emulator_mode(run=False)
@@ -4865,6 +4870,9 @@ class TrenchDepoWindow(QMainWindow):
             idx = self.cmb_structure_library.findData(previous)
             if idx >= 0:
                 self.cmb_structure_library.setCurrentIndex(idx)
+            else:
+                self.cmb_structure_library.setCurrentIndex(-1)
+                self.cmb_structure_library.setPlaceholderText("구조 프리셋 선택")
         finally:
             self.cmb_structure_library.blockSignals(False)
 
@@ -4912,6 +4920,13 @@ class TrenchDepoWindow(QMainWindow):
         self.edit_structure_name.setText(_structure_preset_display_name(sheet_name))
         self._record_structure_undo_before_change()
         self._set_structure_points(points, fit=True, preserve_on_emulator_switch=True)
+        from gapsim.emulation.sfo31_verified import structure_metadata
+        metadata = structure_metadata(sheet_name, points)
+        if metadata:
+            self._set_combo_data(self.cmb_depth_feature_type, metadata["deposition_feature_type"])
+            self.spin_depth_feature_width.setValue(metadata["deposition_feature_width_a"])
+            self.spin_depth_feature_depth.setValue(metadata["deposition_feature_depth_a"])
+            self.spin_depth_feature_length.setValue(metadata["deposition_feature_length_a"] or 0.)
         self._update_structure_library_active_label()
         self.statusBar().showMessage(f"구조 프리셋 적용: {_structure_preset_display_name(sheet_name)}", 2200)
 
@@ -4932,7 +4947,7 @@ class TrenchDepoWindow(QMainWindow):
             QMessageBox.warning(self, "구조 라이브러리", f"구조 저장 실패:\n{exc}")
             return
         self._active_structure_sheet_name = saved_name
-        self.edit_structure_name.setText(saved_name)
+        self.edit_structure_name.setText(_structure_preset_display_name(saved_name))
         self.refresh_structure_library(show_status=False)
         idx = self.cmb_structure_library.findData(saved_name)
         if idx >= 0:
@@ -5217,6 +5232,7 @@ class TrenchDepoWindow(QMainWindow):
             combo.setCurrentIndex(idx)
 
     def _apply_parameter_config_values(self, values: Mapping[str, object]) -> None:
+        self._enable_recipe_precision()
         apply_recipe_values(self, values)
         supports_sputter = self._active_emulator_supports_sputter()
         supports_ion = self._active_emulator_supports_ion_transmission()
@@ -5243,6 +5259,7 @@ class TrenchDepoWindow(QMainWindow):
         apply_cvd_values(self, values)
         self.spin_angstrom_per_cycle.setValue(f("angstrom_per_cycle", float(self.spin_angstrom_per_cycle.value())))
         self._set_quality_mode_for_ds(f("reparam_ds_a", float(self.spin_reparam_ds.value())))
+        self.chk_symmetry.setChecked(str(values.get("symmetry_mode", "off")) == "auto")
         self.chk_sputter.setChecked(bool(supports_sputter and b("sputter_enabled", self.chk_sputter.isChecked())))
         self.chk_ion_transmission.setChecked(
             bool(supports_ion and b("ion_transmission_enabled", self.chk_ion_transmission.isChecked()))
@@ -5372,6 +5389,30 @@ class TrenchDepoWindow(QMainWindow):
         self.sync_etch_control_availability()
         self._populate_split_parameters()
         self._invalidate_result_for_input_change()
+
+    def _enable_recipe_precision(self):
+        # Loading must not silently round calibrated coefficients to 0.1/0.01.
+        for name in ("spin_sputter_strength", "spin_sputter_peak", "spin_sputter_width",
+                     "spin_redepo_efficiency", "spin_redepo_emit_power", "spin_redepo_distance_power",
+                     "spin_depth_decay_k", "spin_depth_decay_power", "spin_incident_sigma",
+                     "spin_inhibition_strength", "spin_inhibition_penetration"):
+            getattr(self, name).setDecimals(15)
+
+    def load_sfo31_reference(self, _checked: bool = False) -> None:
+        from gapsim.emulation.sfo31_verified import STRUCTURE_NAME
+        self.refresh_structure_library(show_status=False)
+        index = self.cmb_structure_library.findData(STRUCTURE_NAME)
+        if index < 0:
+            QMessageBox.warning(self, "SFO3.1", "등록된 검증 구조를 찾지 못했습니다.")
+            return
+        self.cmb_structure_library.setCurrentIndex(index)
+        self.load_selected_structure_from_library()
+        self.chk_preset_run_defaults.setChecked(True)
+        self.chk_preset_calculation_settings.setChecked(True)
+        self.refresh_parameter_presets(show_status=False)
+        self.cmb_parameter_preset.setCurrentIndex(self.cmb_parameter_preset.findData(SFO31_PRESET_NAME))
+        self.apply_selected_parameter_preset()
+        self.statusBar().showMessage("SFO3.1 공정·구조·cycle·정확도 적용 완료. 실행을 누르세요.", 8000)
 
     def apply_selected_parameter_preset(self, _checked: bool = False) -> None:
         name = self._selected_parameter_preset_name()
@@ -5589,24 +5630,24 @@ class TrenchDepoWindow(QMainWindow):
         if source_idx < 0 or source_idx >= len(points):
             return None
         sx, sy = points[source_idx]
-        if abs(float(sx)) <= 1e-9:
+        axis = (float(points[0][0]) + float(points[-1][0])) / 2.
+        if abs(float(sx)-axis) <= 1e-9:
             return None
-        xs = [float(x) for x, _y in points]
-        ys = [float(y) for _x, y in points]
-        diag = math.hypot(max(xs, default=0.0) - min(xs, default=0.0), max(ys, default=0.0) - min(ys, default=0.0))
-        tolerance = max(5.0, diag * 0.04)
+        # Match actual coordinates, not a percentage of trench depth: on a
+        # high-aspect-ratio trench that heuristic can pair unrelated vertices.
+        tolerance = 1e-6
         best_idx: Optional[int] = None
         best_score = float("inf")
-        target_x = -float(sx)
+        target_x = 2.*axis-float(sx)
         target_y = float(sy)
-        source_sign = -1 if float(sx) < 0.0 else 1
+        source_sign = -1 if float(sx) < axis else 1
         for candidate_idx, (cx_raw, cy_raw) in enumerate(points):
             if candidate_idx == source_idx:
                 continue
             cx, cy = float(cx_raw), float(cy_raw)
-            if abs(cx) <= 1e-9:
+            if abs(cx-axis) <= 1e-9:
                 continue
-            candidate_sign = -1 if cx < 0.0 else 1
+            candidate_sign = -1 if cx < axis else 1
             if candidate_sign == source_sign:
                 continue
             score = math.hypot(cx - target_x, cy - target_y)
@@ -5627,14 +5668,18 @@ class TrenchDepoWindow(QMainWindow):
         point_idx = int(idx)
         if point_idx < 0 or point_idx >= len(pts):
             return pts, None
+        axis = (pts[0][0]+pts[-1][0])/2.
+        symmetric_edit = self.chk_symmetric_structure_edit.isChecked()
         mirror_idx = (
             self._find_symmetric_structure_point_index(pts, point_idx)
-            if self.chk_symmetric_structure_edit.isChecked()
+            if symmetric_edit
             else None
         )
+        if symmetric_edit and abs(pts[point_idx][0]-axis) <= 1e-9:
+            x = axis
         pts[point_idx] = (float(x), float(y))
         if mirror_idx is not None:
-            pts[mirror_idx] = (-float(x), float(y))
+            pts[mirror_idx] = (2.*axis-float(x), float(y))
         return pts, mirror_idx
 
     def _on_structure_table_point_edit_requested(self, row: int, x: float, y: float) -> None:
@@ -6844,10 +6889,10 @@ class TrenchDepoWindow(QMainWindow):
             self.lbl_redepo_efficiency.setText("Redepo efficiency %")
             self.lbl_redepo_emit_power.setText("Angular spread deg")
             self.lbl_redepo_distance_power.setText("Specular bias %")
-            self.spin_redepo_emit_power.setDecimals(1)
+            self.spin_redepo_emit_power.setDecimals(15)
             self.spin_redepo_emit_power.setRange(1.0, 80.0)
             self.spin_redepo_emit_power.setSingleStep(2.0)
-            self.spin_redepo_distance_power.setDecimals(1)
+            self.spin_redepo_distance_power.setDecimals(15)
             self.spin_redepo_distance_power.setRange(-100.0, 100.0)
             self.spin_redepo_distance_power.setSingleStep(5.0)
             if changed and (self.spin_redepo_emit_power.value() <= 8.0 or self.spin_redepo_emit_power.value() > 80.0):
@@ -7712,6 +7757,8 @@ class TrenchDepoWindow(QMainWindow):
         parameter = str(self.cmb_split_parameter.currentData())
         if parameter in ("precursor_sticking", "inhibitor_sticking"):
             values = (0.01, 0.51, 0.25, 4, 0.0001, 1.0)
+        elif parameter == "ion_growth_fraction":
+            values = (0.0, 0.1, 0.05, 4, 0.0, 1.0)
         elif parameter == "ald_exposure":
             values = (1.0, 21.0, 10.0, 3, 0.0001, 100000.0)
         elif parameter == "inhibitor_exposure":
@@ -7850,6 +7897,7 @@ class TrenchDepoWindow(QMainWindow):
         return TrenchDepoConfig(
             points=self._current_geometry_points(),
             initial_voids=self._initial_voids,
+            symmetry_mode="auto" if self.chk_symmetry.isChecked() else "off",
             **recipe_values(self),
             cycles=int(self.spin_cycles.value()),
             emulator_number=int(active_emulator),
@@ -7954,7 +8002,6 @@ class TrenchDepoWindow(QMainWindow):
                 supports_inhibition and self.chk_inhibition_deposition.isChecked()
             ),
             **cvd_values(self),
-            inhibition_process_model="hybrid",
             inhibition_strength_pct=float(self.spin_inhibition_strength.value()),
             inhibition_penetration_depth_a=float(self.spin_inhibition_penetration.value()),
             inhibition_decay_power=float(self.spin_inhibition_decay_power.value()),
@@ -8127,7 +8174,7 @@ class TrenchDepoWindow(QMainWindow):
         if config.redepo_incident_los_enabled:
             lines.extend(["", "[입사 이온 가림 연구 모델]",
                 f"각도 σ: {config.redepo_incident_sigma_deg:g}° / 방향 수: {config.redepo_incident_ray_count}",
-                f"누적 증착량 (식각 전): {config.cycles * config.angstrom_per_cycle:g} A",
+                f"누적 기준량 ({'기준면 순성장' if config.growth_basis == 'net_planar' else '식각 전'}): {config.cycles * config.angstrom_per_cycle:g} A",
                 "기존 경험적 깊이 감쇠 대체 / 실제 LF·이온 에너지 미보정"])
         return recipe_result_summary(config) + "\n\n" + "\n".join(lines)
 
@@ -8276,6 +8323,7 @@ class TrenchDepoWindow(QMainWindow):
             int(getattr(config, "emulator_number", 0) or 0),
             float(config.angstrom_per_cycle),
             float(config.reparam_ds_a),
+            config.symmetry_mode,
             bool(config.sputter_enabled),
             float(config.sputter_strength_a_per_cycle),
             float(config.sputter_peak_pct),
@@ -9007,7 +9055,10 @@ class TrenchDepoWindow(QMainWindow):
         self._clear_continuation_context()
         replay_path = Path(path).resolve()
         config, result, note = load_trench_depo_run(replay_path)
-        if bool(config.sputter_enabled) and bool(config.ion_transmission_enabled) and (
+        self._enable_recipe_precision()
+        if config.front_scheme == "angular_godunov_v1":
+            replay_emulator = 0
+        elif bool(config.sputter_enabled) and bool(config.ion_transmission_enabled) and (
             bool(config.deposition_depth_enabled) or bool(config.inhibition_enabled)
         ):
             replay_emulator = 0
@@ -9031,6 +9082,7 @@ class TrenchDepoWindow(QMainWindow):
         self.spin_cycles.setValue(int(config.cycles))
         self.spin_angstrom_per_cycle.setValue(float(config.angstrom_per_cycle))
         self._set_quality_mode_for_ds(float(config.reparam_ds_a))
+        self.chk_symmetry.setChecked(config.symmetry_mode == "auto")
         self.chk_sputter.setChecked(
             bool(self._active_emulator_supports_sputter() and config.sputter_enabled)
         )

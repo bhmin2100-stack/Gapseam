@@ -86,7 +86,8 @@ def test_sfo_is_ald_and_opt_in_reference_settings_restore_exact_config(tmp_path)
     path = tmp_path / "presets.json"
     ensure_sfo31_preset(path)
     record = read_parameter_preset(path, "SFO3.1")
-    expected = sfo31_preset()
+    from gapsim.emulation.sfo31_verified import verified_sfo31_config
+    expected = verified_sfo31_config()
     current = replace(expected, process_type="cvd", recipe_model="physical_transport_v1",
                       growth_basis="net_planar", cycles=700, reparam_ds_a=20.0,
                       redepo_incident_ray_count=49, sputter_smoothing_a=80.0)
