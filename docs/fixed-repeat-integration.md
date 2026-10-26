@@ -8,8 +8,11 @@ uses the same settings on every cycle. There is no terminal finishing stage,
 target-contour replacement, or cycle-dependent recipe switch.
 
 The process preset and input structure are separate library entries. Loading a
-process preset does not replace an arbitrary user structure. The explicit
-reference-load action loads both together for reproduction. Existing library
+process preset does not replace an arbitrary user structure. Select the input
+separately in step 1's structure library. The process pane has one Apply action;
+it loads saved calculation settings by default, keeps the current cycle/time
+unless the optional saved-duration checkbox is checked, and never locks dose
+editing. Existing library
 files are backed up before an explicit replacement; unrelated entries remain.
 
 ## Controls
@@ -31,7 +34,10 @@ an explanatory diagram from an actual simulated profile.
 
 ## Reproduction and limitations
 
-Use the explicit reference-load action, then the normal Run button. The saved
+For reference reproduction, select the reference structure in step 1, select
+the process preset in step 3, enable saved cycle/time and calculation settings,
+click Apply, then the normal Run button. For another target structure or dose,
+keep that input and edit cycles after applying the process. The saved
 run JSON includes the input structure, recipe, frame steps, and void geometry.
 `tools/compare_sfo31_replay.py` compares a saved native run against a separately
 supplied frozen reference. It checks every reference snapshot and final voids;

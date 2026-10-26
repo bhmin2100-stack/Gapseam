@@ -5199,7 +5199,19 @@ class TrenchDepoWindow(QMainWindow):
 
     def _update_parameter_preset_active_label(self) -> None:
         active = self._active_parameter_preset_name or "없음"
-        self.lbl_parameter_preset_active.setText(f"활성: {active}")
+        if not self._active_parameter_preset_name:
+            self.lbl_parameter_preset_active.setText("적용된 프리셋: 없음 · 선택 후 파라미터 적용을 누르세요.")
+            return
+        ald = self.cmb_process_type.currentData() == "ald"
+        dose = (f"GPC {self.spin_angstrom_per_cycle.value():g} Å/cycle" if ald
+                else f"D/R {self.spin_cvd_rate.value():g} Å/s")
+        model = (self.cmb_front_scheme.currentText() if self.cmb_front_scheme.currentData() != "legacy"
+                 else self.cmb_recipe_model.currentText())
+        self.lbl_parameter_preset_active.setText(
+            f"적용된 프리셋: {active}\n"
+            f"적용 시: {self.cmb_process_type.currentText()} · {model} · {dose}\n"
+            "구조 유지 · Cycle 수 / 시간은 아래에서 직접 조절"
+        )
 
     def save_current_parameter_preset(self, _checked: bool = False) -> None:
         name = sanitize_parameter_preset_name(
@@ -5399,6 +5411,8 @@ class TrenchDepoWindow(QMainWindow):
             getattr(self, name).setDecimals(15)
 
     def load_sfo31_reference(self, _checked: bool = False) -> None:
+        # Internal research verification helper, not a process-pane action.
+        # The user-facing Apply button never calls this geometry-loading path.
         from gapsim.emulation.sfo31_verified import STRUCTURE_NAME
         self.refresh_structure_library(show_status=False)
         index = self.cmb_structure_library.findData(STRUCTURE_NAME)
@@ -5441,7 +5455,9 @@ class TrenchDepoWindow(QMainWindow):
             self.btn_split_options.setChecked(False)
         self.edit_parameter_preset_name.setText(self._active_parameter_preset_name)
         self._update_parameter_preset_active_label()
-        self.statusBar().showMessage(f"공정 파라미터 적용됨: {self._active_parameter_preset_name}", 2200)
+        self.statusBar().showMessage(
+            f"{self._active_parameter_preset_name} 파라미터 적용 완료 · 구조 유지 · "
+            f"현재 {self.spin_cycles.value()} cycle (직접 변경 가능)", 10000)
 
     def delete_selected_parameter_preset(self, _checked: bool = False) -> None:
         name = self._selected_parameter_preset_name()

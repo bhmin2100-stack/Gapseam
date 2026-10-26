@@ -72,6 +72,7 @@ def init_recipe_controls(w):
     w.chk_preset_run_defaults = QCheckBox("저장된 cycle·시간도 불러오기")
     w.chk_preset_run_defaults.setToolTip("끄면 현재 반복 횟수와 시간을 유지하고 공정 계수만 적용합니다. 구조는 항상 유지합니다.")
     w.chk_preset_calculation_settings = QCheckBox("저장된 계산 정확도도 불러오기")
+    w.chk_preset_calculation_settings.setChecked(True)
     w.chk_preset_calculation_settings.setToolTip("동일한 계산 결과 재현을 위해 저장된 표면 간격과 방향 수를 함께 적용합니다. 구조는 유지합니다.")
 
 
@@ -149,11 +150,14 @@ def install_recipe_layout(w):
     w.spin_cycles.setMinimum(0)
     w.parameter_preset_group.layout().insertWidget(1, w.chk_preset_run_defaults)
     w.parameter_preset_group.layout().insertWidget(2, w.chk_preset_calculation_settings)
-    w.btn_load_sfo31_reference = QPushButton("SFO3.1 검증 조건 불러오기")
-    w.btn_load_sfo31_reference.setObjectName("btn_load_sfo31_reference")
-    w.btn_load_sfo31_reference.setToolTip("저장된 SFO3.1 공정과 CD242/R42/H702 구조, cycle 수와 계산 정확도를 함께 불러옵니다. 실행은 별도로 누르세요.")
-    w.btn_load_sfo31_reference.clicked.connect(w.load_sfo31_reference)
-    w.parameter_preset_group.layout().insertWidget(3, w.btn_load_sfo31_reference)
+    # Process application must never load a structure. The reference structure
+    # is selected separately in step 1's structure library.
+    w.btn_apply_parameter_preset.setText("파라미터 적용")
+    w.btn_apply_parameter_preset.setToolTip("선택한 공정 파라미터를 적용합니다. 구조는 유지하며, 적용 후 Cycle 수를 직접 바꿀 수 있습니다.")
+    w.lbl_parameter_preset_active.setWordWrap(True)
+    w.preset_usage_note = QLabel("구조: 1 구조에서 별도 선택 · 적용 후 Cycle 수 직접 조절\n저장된 cycle·시간 불러오기를 끄면 현재 횟수·시간을 유지합니다.")
+    w.preset_usage_note.setWordWrap(True)
+    w.parameter_preset_group.layout().addWidget(w.preset_usage_note)
     p.buttons[0].setText("공정·계산")
     p.buttons[1].setText("성장·수송")
     p.buttons[2].setText("식각·재부착")
