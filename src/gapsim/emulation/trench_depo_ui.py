@@ -64,6 +64,7 @@ from PySide6.QtWidgets import (
 )
 
 from gapsim import updater
+from gapsim.emulation.result_navigation import DOSE_TOOLTIP, ResultFrameNavigation, frame_deposition_label
 from gapsim.emulation.research_registry import MAX_EMULATOR_NUMBER
 from gapsim.emulation.incident_presets import SFO31_PRESET_NAME, ensure_sfo31_preset
 from gapsim.emulation.app_icon import gfe_icon, set_taskbar_identity
@@ -2607,6 +2608,9 @@ class SplitTestWindow(QMainWindow):
         self.btn_play = QPushButton("일시정지" if max_idx > 0 else "재생")
         self.btn_play.setEnabled(max_idx > 0)
         self.btn_play.clicked.connect(self.toggle_playback)
+        self.result_navigation = ResultFrameNavigation(self.slider_frame)
+        self.result_navigation.setEnabled(max_idx > 0)
+        self.result_navigation.manualNavigation.connect(self._stop_playback)
         self.lbl_frame = QLabel("Frame 0/0")
         self.btn_overlay_compare = QPushButton("한 그래프 보기")
         self.btn_overlay_compare.setCheckable(True)
@@ -2625,6 +2629,7 @@ class SplitTestWindow(QMainWindow):
         controls.addWidget(QLabel("Frame"))
         controls.addWidget(self.slider_frame, 1)
         controls.addWidget(self.lbl_frame)
+        controls.addWidget(self.result_navigation)
         controls.addWidget(self.btn_play)
         controls.addWidget(self.btn_overlay_compare)
         controls.addWidget(self.lbl_overlay_opacity)
@@ -2644,6 +2649,8 @@ class SplitTestWindow(QMainWindow):
             cell_layout.setContentsMargins(6, 6, 6, 6)
             header = QLabel(self._case_label(case))
             status = QLabel("Cycle 0/0 | 점 0")
+            status.setToolTip(DOSE_TOOLTIP)
+            status.setWordWrap(True)
             view = ResultVectorView()
             view.setMinimumSize(360, 260)
             solid_playback = _use_solid_playback(case.result)
@@ -2729,13 +2736,16 @@ class SplitTestWindow(QMainWindow):
 
     def toggle_playback(self) -> None:
         if self._timer.isActive():
-            self._timer.stop()
-            self.btn_play.setText("재생")
+            self._stop_playback()
             return
         if self.slider_frame.value() >= self.slider_frame.maximum():
             self.slider_frame.setValue(0)
         self._timer.start()
         self.btn_play.setText("일시정지")
+
+    def _stop_playback(self) -> None:
+        self._timer.stop()
+        self.btn_play.setText("재생")
 
     def _advance_frame(self) -> None:
         current = self.slider_frame.value()
@@ -2743,7 +2753,7 @@ class SplitTestWindow(QMainWindow):
             self._timer.stop()
             self.btn_play.setText("다시 재생")
             return
-        self.slider_frame.setValue(current + 1)
+        self.slider_frame.setValue(self.result_navigation.next_index())
 
     def show_frame(self, index: int) -> None:
         max_idx = self.slider_frame.maximum()
@@ -2757,7 +2767,8 @@ class SplitTestWindow(QMainWindow):
             self._views[case_idx].show_frame(local_idx, fit=False)
             points = len(frames[local_idx])
             label = _frame_progress_label(case.result, case.config, local_idx)
-            self._case_status_labels[case_idx].setText(f"{label} | 점 {points}")
+            dose = frame_deposition_label(case.result, case.config, local_idx)
+            self._case_status_labels[case_idx].setText(f"{label} | {dose} | 점 {points}")
         if self._compare_overlay_enabled:
             self._overlay_view.show_frame(idx, fit=False)
 
@@ -3521,6 +3532,13 @@ class TrenchDepoWindow(QMainWindow):
         self.slider_frame.setEnabled(False)
         self.btn_result_play = QPushButton("반복재생")
         self.btn_result_play.setEnabled(False)
+        self.result_navigation = ResultFrameNavigation(self.slider_frame)
+        self.result_navigation.setEnabled(False)
+        self.result_navigation.manualNavigation.connect(self._stop_result_playback)
+        self.lbl_result_dose = QLabel("누적 증착량 —")
+        self.lbl_result_dose.setToolTip(DOSE_TOOLTIP)
+        self.lbl_result_dose.setStyleSheet("font-weight: 600;")
+        self.lbl_result_dose.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.btn_next_depo = QPushButton("다음 Depo")
         self.btn_next_depo.setEnabled(False)
         self.btn_next_depo.setToolTip("현재 결과의 마지막 profile에서 다음 Depo 차수를 이어서 시작합니다.")
@@ -3585,15 +3603,25 @@ class TrenchDepoWindow(QMainWindow):
         status = QStatusBar(self)
         self.setStatusBar(status)
 
-        controls = QHBoxLayout()
+        controls = QVBoxLayout()
         controls.setContentsMargins(0, 0, 0, 0)
-        controls.addWidget(QLabel("Frame"))
-        controls.addWidget(self.slider_frame, 1)
-        controls.addWidget(self.lbl_status)
-        controls.addWidget(self.chk_show_etch_overlay)
-        controls.addWidget(self.chk_show_redepo_overlay)
-        controls.addWidget(self.btn_result_play)
-        controls.addWidget(self.btn_next_depo)
+        frame_controls = QHBoxLayout()
+        frame_controls.addWidget(QLabel("Frame"))
+        frame_controls.addWidget(self.slider_frame, 1)
+        frame_controls.addWidget(self.lbl_status)
+        controls.addLayout(frame_controls)
+        dose_row = QHBoxLayout()
+        dose_row.addWidget(self.lbl_result_dose)
+        dose_row.addStretch(1)
+        dose_row.addWidget(self.chk_show_etch_overlay)
+        dose_row.addWidget(self.chk_show_redepo_overlay)
+        controls.addLayout(dose_row)
+        playback_controls = QHBoxLayout()
+        playback_controls.addStretch(1)
+        playback_controls.addWidget(self.result_navigation)
+        playback_controls.addWidget(self.btn_result_play)
+        playback_controls.addWidget(self.btn_next_depo)
+        controls.addLayout(playback_controls)
 
         run_row = QHBoxLayout()
         run_row.setContentsMargins(0, 0, 0, 0)
@@ -9061,6 +9089,9 @@ class TrenchDepoWindow(QMainWindow):
             return
         enabled = bool(available)
         self.btn_result_play.setEnabled(enabled)
+        self.result_navigation.setEnabled(enabled)
+        if self._result is None:
+            self.lbl_result_dose.setText("누적 증착량 —")
         if not enabled:
             self._stop_result_playback()
 
@@ -9086,9 +9117,7 @@ class TrenchDepoWindow(QMainWindow):
         if self._result is None or self.slider_frame.maximum() <= 0:
             self._set_result_playback_available(False)
             return
-        next_index = int(self.slider_frame.value()) + 1
-        if next_index > self.slider_frame.maximum():
-            next_index = 0
+        next_index = self.result_navigation.next_index(loop=True)
         self.slider_frame.setValue(next_index)
 
     def show_frame(self, index: int) -> None:
@@ -9101,6 +9130,7 @@ class TrenchDepoWindow(QMainWindow):
         points = len(self._result.frame_profiles[idx])
         label = _frame_progress_label(self._result, self._result_config or self.current_config(), idx)
         self.lbl_status.setText(f"{label} | 점 {points}")
+        self.lbl_result_dose.setText(frame_deposition_label(self._result, self._result_config or self.current_config(), idx))
         if hasattr(self, "lbl_result_summary"):
             self.lbl_result_summary.setText(f"결과: {label} | 점 {points}")
         self.addonFrameShown.emit(idx)

@@ -90,6 +90,12 @@ def bind_grid_labels(root,manager):
 
 def install_extended_help(owner,manager=None):
     manager=manager or ParameterHelp(owner)
+    navigation = getattr(owner, 'result_navigation', None)
+    if navigation is not None:
+        manager.bind(navigation.interval, spec(
+            '결과 이동 간격', '이전·다음 버튼, 슬라이더 방향키와 재생에서 이동하는 이미지 수입니다.',
+            '1장: 모든 이미지를 순서대로 확인', '100장: 100장씩 빠르게 이동',
+            'frames', '마지막 이미지는 항상 표시합니다. 슬라이더 드래그로 개별 이미지도 선택할 수 있습니다. ' + DISPLAY))
     for key,entry in EXTRA.items():
         widget=getattr(owner,key,None)
         if widget is not None:
