@@ -5157,6 +5157,7 @@ class TrenchDepoWindow(QMainWindow):
         self.statusBar().showMessage(f"애드온 {state}: {addon_id}", 1600)
 
     def refresh_parameter_presets(self, _checked: bool = False, *, show_status: bool = True) -> None:
+        from gapsim.emulation.sfo31_verified import SAVED_PRESET_KEY, is_verified_sfo31_process_record
         try:
             names = list_parameter_presets(self._parameter_library_path)
         except Exception as exc:  # noqa: BLE001
@@ -5164,11 +5165,21 @@ class TrenchDepoWindow(QMainWindow):
             if show_status:
                 QMessageBox.warning(self, "공정 파라미터 프리셋", f"파라미터 프리셋 읽기 실패:\n{exc}")
 
-        previous = self._selected_parameter_preset_name()
+        previous = self.cmb_parameter_preset.currentData()
         self.cmb_parameter_preset.blockSignals(True)
         try:
             self.cmb_parameter_preset.clear()
+            # Always available, including a fresh, read-only, or damaged library.
+            self.cmb_parameter_preset.addItem(SFO31_PRESET_NAME, SFO31_PRESET_NAME)
             for name in names:
+                if name == SFO31_PRESET_NAME:
+                    try:
+                        same = is_verified_sfo31_process_record(read_parameter_preset(self._parameter_library_path, name))
+                    except Exception:
+                        same = False
+                    if not same:
+                        self.cmb_parameter_preset.addItem("SFO3.1 (저장본)", SAVED_PRESET_KEY)
+                    continue
                 self.cmb_parameter_preset.addItem(name, name)
             idx = self.cmb_parameter_preset.findData(previous)
             if idx >= 0:
@@ -5176,7 +5187,7 @@ class TrenchDepoWindow(QMainWindow):
         finally:
             self.cmb_parameter_preset.blockSignals(False)
 
-        has_presets = bool(names)
+        has_presets = self.cmb_parameter_preset.count() > 0
         self.cmb_parameter_preset.setEnabled(has_presets)
         self.btn_apply_parameter_preset.setEnabled(has_presets)
         self.btn_delete_parameter_preset.setEnabled(has_presets)
@@ -5184,10 +5195,12 @@ class TrenchDepoWindow(QMainWindow):
         self._on_parameter_preset_selected()
         self._update_parameter_preset_active_label()
         if show_status:
-            self.statusBar().showMessage(f"공정 파라미터 프리셋 {len(names)}개 로드됨", 2200)
+            self.statusBar().showMessage(f"공정 파라미터 프리셋 {self.cmb_parameter_preset.count()}개 로드됨", 2200)
 
     def _selected_parameter_preset_name(self) -> str:
         data = self.cmb_parameter_preset.currentData()
+        if isinstance(data, (tuple, list)) and tuple(data) == ("saved", SFO31_PRESET_NAME):
+            return SFO31_PRESET_NAME
         if data is not None:
             return str(data).strip()
         return self.cmb_parameter_preset.currentText().strip()
@@ -5196,6 +5209,8 @@ class TrenchDepoWindow(QMainWindow):
         name = self._selected_parameter_preset_name()
         if name:
             self.edit_parameter_preset_name.setText(name)
+        self.btn_delete_parameter_preset.setEnabled(
+            bool(name) and self.cmb_parameter_preset.currentData() != SFO31_PRESET_NAME)
 
     def _update_parameter_preset_active_label(self) -> None:
         active = self._active_parameter_preset_name or "없음"
@@ -5232,7 +5247,10 @@ class TrenchDepoWindow(QMainWindow):
         self._active_parameter_preset_name = saved_name
         self.edit_parameter_preset_name.setText(saved_name)
         self.refresh_parameter_presets(show_status=False)
-        idx = self.cmb_parameter_preset.findData(saved_name)
+        from gapsim.emulation.sfo31_verified import SAVED_PRESET_KEY
+        idx = self.cmb_parameter_preset.findData(SAVED_PRESET_KEY if saved_name == SFO31_PRESET_NAME else saved_name)
+        if idx < 0:
+            idx = self.cmb_parameter_preset.findData(saved_name)
         if idx >= 0:
             self.cmb_parameter_preset.setCurrentIndex(idx)
         self._update_parameter_preset_active_label()
@@ -5430,11 +5448,16 @@ class TrenchDepoWindow(QMainWindow):
 
     def apply_selected_parameter_preset(self, _checked: bool = False) -> None:
         name = self._selected_parameter_preset_name()
+        builtin = self.cmb_parameter_preset.currentData() == SFO31_PRESET_NAME
         if not name:
             QMessageBox.information(self, "공정 파라미터 프리셋", "적용할 파라미터 프리셋이 없습니다.")
             return
         try:
-            record = read_parameter_preset(self._parameter_library_path, name)
+            if builtin:
+                from gapsim.emulation.sfo31_verified import verified_sfo31_process_record
+                record = verified_sfo31_process_record()
+            else:
+                record = read_parameter_preset(self._parameter_library_path, name)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "공정 파라미터 프리셋", f"파라미터 불러오기 실패:\n{exc}")
             return
@@ -5449,17 +5472,33 @@ class TrenchDepoWindow(QMainWindow):
         target_emulator = int(record.get("emulator_number", self.active_emulator_number()))
         self._preserve_geometry_on_emulator_switch = True
         self.set_active_emulator_number(target_emulator, run=False)
-        self._apply_parameter_config_values(config_values)
-        self._active_parameter_preset_name = sanitize_parameter_preset_name(name)
-        if self._active_parameter_preset_name == SFO31_PRESET_NAME:
+        try:
+            self._apply_parameter_config_values(config_values)
+            if builtin:
+                actual = asdict(self.current_config())
+                keys = ("angstrom_per_cycle", "recipe_model", "front_scheme", "process_type",
+                        "growth_basis", "sputter_enabled", "redepo_enabled", "inhibition_enabled",
+                        "redepo_incident_los_enabled", "cycles")
+                failed = [key for key in keys if actual[key] != config_values[key]]
+                if failed:
+                    raise ValueError("적용 값 확인 실패: " + ", ".join(failed))
+        except Exception as exc:
+            self._active_parameter_preset_name = ""
+            self._update_parameter_preset_active_label()
+            QMessageBox.warning(self, "공정 파라미터 프리셋", f"파라미터 적용 실패:\n{exc}")
+            return
+        self._active_parameter_preset_name = self.cmb_parameter_preset.currentText()
+        if name == SFO31_PRESET_NAME:
             self.btn_split_options.setChecked(False)
-        self.edit_parameter_preset_name.setText(self._active_parameter_preset_name)
+        self.edit_parameter_preset_name.setText(name)
         self._update_parameter_preset_active_label()
         self.statusBar().showMessage(
             f"{self._active_parameter_preset_name} 파라미터 적용 완료 · 구조 유지 · "
             f"현재 {self.spin_cycles.value()} cycle (직접 변경 가능)", 10000)
 
     def delete_selected_parameter_preset(self, _checked: bool = False) -> None:
+        if self.cmb_parameter_preset.currentData() == SFO31_PRESET_NAME:
+            return  # The application-provided recipe is independent of user saves.
         name = self._selected_parameter_preset_name()
         if not name:
             QMessageBox.information(self, "공정 파라미터 프리셋", "삭제할 파라미터 프리셋이 없습니다.")
@@ -5478,7 +5517,7 @@ class TrenchDepoWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "공정 파라미터 프리셋", f"파라미터 삭제 실패:\n{exc}")
             return
-        if self._active_parameter_preset_name == deleted_name:
+        if self._active_parameter_preset_name in (deleted_name, self.cmb_parameter_preset.currentText()):
             self._active_parameter_preset_name = ""
         self.refresh_parameter_presets(show_status=False)
         self._update_parameter_preset_active_label()

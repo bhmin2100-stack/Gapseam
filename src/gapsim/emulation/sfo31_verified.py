@@ -3,16 +3,18 @@
 The old recipe is retained in incident_presets for historical research replay.
 Registration is explicit and backs up libraries before replacing SFO3.1.
 """
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import datetime
 from pathlib import Path
 import json
+import math
 import shutil
 
 from .trench_depo import TrenchDepoConfig
 
 STRUCTURE_NAME = "SFO3.1 CD242 R42 H702"
 VERSION = "fixed-repeat-20261008"
+SAVED_PRESET_KEY = ("saved", "SFO3.1")
 
 
 def verified_sfo31_config():
@@ -21,6 +23,30 @@ def verified_sfo31_config():
     cfg["points"] = tuple(tuple(p) for p in cfg["points"])
     cfg["initial_voids"] = tuple(tuple(tuple(p) for p in poly) for poly in cfg.get("initial_voids", []))
     return TrenchDepoConfig(**cfg)
+
+
+def verified_sfo31_process_record():
+    """Read the shipped recipe without requiring a writable user library.
+
+    The normal process merge excludes geometry and keeps editable duration.
+    A same-name user save must never replace this application-provided recipe.
+    """
+    return {"name": "SFO3.1", "emulator_number": 0,
+            "config": asdict(verified_sfo31_config())}
+
+
+def is_verified_sfo31_process_record(record):
+    from .parameter_library import parameter_preset_application_values
+    cfg = verified_sfo31_config()
+    expected = asdict(cfg)
+    actual = parameter_preset_application_values(
+        record, cfg, include_run_defaults=True, include_calculation_settings=True)
+    return all(
+        (math.isclose(value, actual[key], rel_tol=1e-12, abs_tol=1e-12)
+         if isinstance(value, float) and isinstance(actual[key], (int, float))
+         else actual[key] == value)
+        for key, value in expected.items()
+    )
 
 
 def backup_library(path):

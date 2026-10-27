@@ -58,3 +58,70 @@ def test_structure_is_separate_and_apply_keeps_edited_cycle(window):
     # Excel round-trips decimal coordinates at about 1e-12 Å.
     np.testing.assert_allclose(window.current_config().points, verified_sfo31_config().points, rtol=0, atol=1e-10)
     assert window.current_config().cycles == 17
+
+
+def test_builtin_sfo_ignores_stale_same_name_recipe(window):
+    from gapsim.emulation.parameter_library import save_parameter_preset
+    from gapsim.emulation.trench_depo import TrenchDepoConfig
+    # An existing PC can contain defaults saved under the SFO3.1 name.
+    save_parameter_preset(window._parameter_library_path, 'SFO3.1',
+                          TrenchDepoConfig(), emulator_number=0)
+    saved_bytes = window._parameter_library_path.read_bytes()
+    window.refresh_parameter_presets(show_status=False)
+    window.cmb_parameter_preset.setCurrentIndex(window.cmb_parameter_preset.findData('SFO3.1'))
+    window.btn_apply_parameter_preset.click()
+    cfg = window.current_config()
+    assert cfg.angstrom_per_cycle == .56
+    assert cfg.front_scheme == 'angular_godunov_v1'
+    assert cfg.sputter_enabled and cfg.redepo_enabled and cfg.inhibition_enabled
+    assert window._parameter_library_path.read_bytes() == saved_bytes
+
+
+@pytest.mark.parametrize('contents', ['{"version":2,"presets":{}}', '{broken json'])
+def test_builtin_sfo_does_not_depend_on_writable_library(window, contents):
+    window._parameter_library_path.write_text(contents, encoding='utf-8')
+    window.refresh_parameter_presets(show_status=False)
+    index = window.cmb_parameter_preset.findData('SFO3.1')
+    assert index >= 0
+    window.cmb_parameter_preset.setCurrentIndex(index)
+    window.btn_apply_parameter_preset.click()
+    assert window.current_config().angstrom_per_cycle == .56
+    assert window._parameter_library_path.read_text(encoding='utf-8') == contents
+
+
+def test_saved_same_name_remains_accessible_and_builtin_cannot_be_deleted(window):
+    from gapsim.emulation.sfo31_verified import SAVED_PRESET_KEY
+    window.btn_apply_parameter_preset.click()
+    window.spin_angstrom_per_cycle.setValue(4)
+    window.edit_parameter_preset_name.setText('SFO3.1')
+    window.btn_save_parameter_preset.click()
+    assert window.cmb_parameter_preset.currentText() == 'SFO3.1 (저장본)'
+    assert window.cmb_parameter_preset.findData(SAVED_PRESET_KEY) >= 0
+    window.spin_angstrom_per_cycle.setValue(10)
+    window.btn_apply_parameter_preset.click()
+    assert window.current_config().angstrom_per_cycle == 4
+    assert window.btn_delete_parameter_preset.isEnabled()
+    window.cmb_parameter_preset.setCurrentIndex(window.cmb_parameter_preset.findData('SFO3.1'))
+    assert not window.btn_delete_parameter_preset.isEnabled()
+    window.btn_apply_parameter_preset.click()
+    assert window.current_config().angstrom_per_cycle == .56
+
+    # Removing a user copy keeps the built-in entry and clears its active label.
+    from unittest.mock import patch
+    from PySide6.QtWidgets import QMessageBox
+    window.cmb_parameter_preset.setCurrentIndex(window.cmb_parameter_preset.findData(SAVED_PRESET_KEY))
+    window.btn_apply_parameter_preset.click()
+    with patch('gapsim.emulation.trench_depo_ui.QMessageBox.question', return_value=QMessageBox.StandardButton.Yes):
+        window.btn_delete_parameter_preset.click()
+    assert window.cmb_parameter_preset.findData('SFO3.1') >= 0
+    assert window._active_parameter_preset_name == ''
+
+
+def test_failed_application_cannot_claim_success(window, monkeypatch):
+    from unittest.mock import patch
+    monkeypatch.setattr(window, '_apply_parameter_config_values', lambda values: None)
+    with patch('gapsim.emulation.trench_depo_ui.QMessageBox.warning') as warning:
+        window.btn_apply_parameter_preset.click()
+    warning.assert_called_once()
+    assert window._active_parameter_preset_name == ''
+    assert '적용된 프리셋: 없음' in window.lbl_parameter_preset_active.text()

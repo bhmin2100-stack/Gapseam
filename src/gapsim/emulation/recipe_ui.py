@@ -155,7 +155,7 @@ def install_recipe_layout(w):
     w.btn_apply_parameter_preset.setText("파라미터 적용")
     w.btn_apply_parameter_preset.setToolTip("선택한 공정 파라미터를 적용합니다. 구조는 유지하며, 적용 후 Cycle 수를 직접 바꿀 수 있습니다.")
     w.lbl_parameter_preset_active.setWordWrap(True)
-    w.preset_usage_note = QLabel("구조: 1 구조에서 별도 선택 · 적용 후 Cycle 수 직접 조절\n저장된 cycle·시간 불러오기를 끄면 현재 횟수·시간을 유지합니다.")
+    w.preset_usage_note = QLabel("SFO3.1은 프로그램에 포함된 원본 레시피입니다.\n구조: 1 구조에서 별도 선택 · 적용 후 Cycle 수 직접 조절\n저장된 cycle·시간 불러오기를 끄면 현재 횟수·시간을 유지합니다.")
     w.preset_usage_note.setWordWrap(True)
     w.parameter_preset_group.layout().addWidget(w.preset_usage_note)
     p.buttons[0].setText("공정·계산")

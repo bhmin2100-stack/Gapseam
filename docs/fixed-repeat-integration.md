@@ -15,6 +15,15 @@ unless the optional saved-duration checkbox is checked, and never locks dose
 editing. Existing library
 files are backed up before an explicit replacement; unrelated entries remain.
 
+Since 0.2.1, selecting **SFO3.1** reads the shipped `sfo31_verified.json`
+directly. It does not depend on successful registration into a writable local
+library. Older or user-edited same-name recipes appear as **SFO3.1 (저장본)**;
+they remain available without overwriting the original library. Identical
+saved copies are omitted from the menu to avoid duplicate entries. A fresh or
+unreadable library still offers the built-in process. User saves remain editable.
+Applying the built-in process verifies GPC, model, key switches and cycles before
+showing success. The input structure is still selected separately.
+
 ## Controls
 
 - **Front solver** is a numerical method, not a physical process parameter.
