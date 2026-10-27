@@ -1,24 +1,16 @@
 # GFE 0.2.1
 
-## SFO3.1 process application
+## 공정 프리셋 적용 개선
 
-An existing local recipe named SFO3.1 could shadow the shipped reference with
-different coefficients, including GPC 10 and disabled etch/redeposition.
-Registration failures could also leave only the generic default recipe visible.
-The SFO3.1 menu entry now reads the recipe bundled with the application directly,
-so it works independently of the local recipe library. A changed same-name user
-recipe remains accessible as SFO3.1 (저장본); applying the built-in entry never
-rewrites or deletes it. Applying checks the resulting core settings before
-reporting success.
+- 기본 제공 프리셋을 프로그램에서 직접 불러오도록 개선했습니다. 기존 저장 파일의 동명 조건이나 파일 읽기 문제로 기본값이 적용되던 경로를 수정했습니다.
+- 사용자 저장 조건을 보존하고, 기본 제공 조건과 구분해 선택할 수 있습니다.
+- 적용 후 핵심 설정값을 확인하고 문제가 있으면 오류를 표시합니다.
+- 공정 적용 시 구조는 유지됩니다. 사이클은 적용 후 직접 조절할 수 있으며, 저장된 횟수는 선택해서 불러옵니다.
 
-1. In `3 진행`, open `내 조건 · 불러오기 / 저장` and select `SFO3.1`.
-2. Click `파라미터 적용`. GPC must become 0.560 Å/cycle and etch, redeposition,
-   and inhibition must be ON.
-3. Set the desired ALD cycles and click `시뮬레이션 실행`.
+## 사용 방법
 
-The existing structure and cycle count remain by default. To load the reference
-1045 cycles, enable the saved-cycle checkbox before applying. Cycles remain
-editable afterward. Structure selection stays in `1 구조`.
+1. `3 진행` → `내 조건 · 불러오기 / 저장`에서 원하는 조건을 선택합니다.
+2. `파라미터 적용`을 누릅니다.
+3. 사이클이나 시간을 조절한 뒤 `시뮬레이션 실행`을 누릅니다.
 
-The fixed-repeat coefficients and numerical solver are unchanged. This release
-fixes recipe loading and packaging; it is not a new physical calibration.
+Windows에서는 `Gapseam.zip`을 새 폴더에 풀고 `GFE/GFE.exe`를 실행하세요. 실행 파일만 따로 복사하지 말고 `GFE` 폴더 전체를 사용하세요. 기존 개인 데이터 폴더는 그대로 선택할 수 있습니다.

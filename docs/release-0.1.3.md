@@ -1,6 +1,5 @@
-# GFE 0.1.3 · SFO3.1
+# GFE 0.1.3
 
-- ‘내 조건’에 **SFO3.1 하나**로 통합. 기본 누적 증착량 300 Å, 적용 시 Split OFF, 현재 구조와 사용자가 저장한 값 유지.
 - Conformal / Typical CVD / Etch + redeposition / Inhibition 입력과 상세 설명 정리.
 - 이온 가림·재증착, 단면 평활화·수송 계산 개선 및 실제 계산 단면으로 설명 보강.
 - 설명 말풍선 ON/OFF 설정과 새 GFE 아이콘 (실행 파일·창·작업표시줄).

@@ -23,25 +23,6 @@ GFE(Gap Fill Emulator)는 Gap Fill 공정 아이디어를 빠르게 실험하기
 
 모델 범위와 검증 항목은 [검증 기준](docs/recipe-release-acceptance.md)을 참고하세요.
 
-## SFO3.1 · ALD 보정 프리셋
-
-`3 진행` → `내 조건 · 불러오기 / 저장`에서 **SFO3.1**을 선택하고
-`적용` → `시뮬레이션 실행`을 누릅니다. 기존 구조는 유지됩니다.
-두께별 프리셋을 나누지 않으며, 저장된 기본 실행량은 300 Å (150 cycle × 2 Å/cycle)입니다.
-기본 실행량까지 불러오려면 `저장된 cycle·시간도 불러오기`를 켭니다.
-GPC와 cycle 수를 직접 조절하고 같은 이름 또는 새 이름으로 저장할 수 있습니다.
-SFO3.1 적용 시 Split은 꺼집니다. 사용자가 저장한 수정값과 다른 조건은 보존됩니다.
-
-- 열린 입사 방향의 이온 공급량, 표면 입사각, 수율을 적분해 식각 및 재증착 source를 계산합니다.
-- 기준 조건: 증착 2Å/cycle, 최대 식각 8/3Å/cycle, σ 10°, 25방향, 재증착 보정률 90%, 재샘플 간격 5Å.
-- 표시된 두께는 **식각 전 누적 증착량**이며 최종 평탄부 순막두께가 아닙니다.
-- 기존 경험적 깊이 감쇠를 대체하는 선택형 모델입니다. 기존 프리셋은 자동으로 바뀌지 않습니다.
-- 재부착을 꺼도 입사 이온 가림은 유지할 수 있습니다.
-- 기존 형상을 보존하는 유효 보정 모델입니다. ALD 흡착·퍼지·반응을 모두 직접 해석하는 모델은 아니며 LF 전력, 이온 에너지, 대전은 직접 예측하지 않습니다.
-
-자동 검증은 `tests/test_incident_ions.py`, `tests/test_incident_preset_ui.py`에 포함됩니다.
-결과 JSON 저장·불러오기에서도 입사 가림 조건을 유지합니다.
-
 ## Windows에서 바로 실행
 
 회사 PC에서 소스 ZIP으로 확인할 때는 아래 순서만 따르면 됩니다.
@@ -67,7 +48,9 @@ SFO3.1 적용 시 Split은 꺼집니다. 사용자가 저장한 수정값과 다
 
 ## Python 없이 실행하는 배포 ZIP
 
-Python 설치가 없는 PC에 배포하려면 GitHub Actions가 만든 portable ZIP을 사용합니다.
+Python 설치 없이 실행하려면 [최신 배포판](https://github.com/bhmin2100-stack/Gapseam/releases/latest)의 `Gapseam.zip`을 받아 압축을 풀고 `GFE/GFE.exe`를 실행합니다.
+
+GitHub Actions의 개발 빌드도 다음 방법으로 받을 수 있습니다.
 
 1. GitHub 저장소의 **Actions** 탭으로 이동합니다.
 2. **Build GFE Windows Portable EXE** 워크플로를 엽니다.
