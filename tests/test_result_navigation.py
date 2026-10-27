@@ -93,6 +93,8 @@ def test_loading_saved_result_keeps_interval_and_original_dose(window, tmp_path)
     path = save_trench_depo_result_json(config, sample([0, 5, 17]), results_root=tmp_path)
     window.load_replay_json(path)
     nav = window.result_navigation
+    assert nav.previous.isEnabled()
+    assert not nav.next.isEnabled()
     nav.interval.setCurrentIndex(nav.interval.findData(100))
     window.spin_angstrom_per_cycle.setValue(10)
     window.slider_frame.setValue(1)
@@ -102,6 +104,8 @@ def test_loading_saved_result_keeps_interval_and_original_dose(window, tmp_path)
     assert window.lbl_result_dose.text() == "누적 증착량 9.520 Å"
     window.load_replay_json(path)
     assert nav.step() == 100
+    assert nav.previous.isEnabled()
+    assert not nav.next.isEnabled()
 
 
 def test_actual_ald_cvd_continuation_dose_survives_reload_and_split(window, tmp_path):

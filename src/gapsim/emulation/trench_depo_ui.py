@@ -2609,7 +2609,7 @@ class SplitTestWindow(QMainWindow):
         self.btn_play.setEnabled(max_idx > 0)
         self.btn_play.clicked.connect(self.toggle_playback)
         self.result_navigation = ResultFrameNavigation(self.slider_frame)
-        self.result_navigation.setEnabled(max_idx > 0)
+        self.result_navigation.set_available(max_idx > 0)
         self.result_navigation.manualNavigation.connect(self._stop_playback)
         self.lbl_frame = QLabel("Frame 0/0")
         self.btn_overlay_compare = QPushButton("한 그래프 보기")
@@ -9089,7 +9089,7 @@ class TrenchDepoWindow(QMainWindow):
             return
         enabled = bool(available)
         self.btn_result_play.setEnabled(enabled)
-        self.result_navigation.setEnabled(enabled)
+        self.result_navigation.set_available(enabled)
         if self._result is None:
             self.lbl_result_dose.setText("누적 증착량 —")
         if not enabled:

@@ -106,6 +106,11 @@ class ResultFrameNavigation(QWidget):
     def step(self) -> int:
         return int(self.interval.currentData())
 
+    def set_available(self, available: bool) -> None:
+        self.setEnabled(available)
+        # Loading replaces the slider range/value with its signals blocked.
+        self._update_buttons()
+
     def next_index(self, *, loop: bool = False) -> int:
         if loop and self.slider.value() >= self.slider.maximum():
             return self.slider.minimum()
