@@ -4,7 +4,7 @@ from . import __version__
 
 APP_VERSION = __version__
 BUILD_COMMIT = "local"
-BUILD_ID = "result-navigation-20261028-source"
+BUILD_ID = "run-history-20261028-source"
 BUILD_DATE = "2026-10-28"
 UPDATE_CHANNEL = "personal"
 

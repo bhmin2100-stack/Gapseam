@@ -26,6 +26,7 @@ from PySide6.QtGui import (
     QPainterPath,
     QPen,
     QShortcut,
+    QTransform,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -126,6 +127,7 @@ from gapsim.emulation.trench_depo_export import (
     export_trench_depo_run,
     export_trench_depo_sweep_runs,
     load_trench_depo_run,
+    load_trench_depo_history,
     load_trench_depo_split_group,
     save_trench_depo_result_json,
 )
@@ -3069,6 +3071,7 @@ class TrenchDepoWindow(QMainWindow):
         self._emulator_run_timer.setInterval(150)
         self._emulator_run_timer.timeout.connect(self._run_deferred_emulator_preview)
         self._result_config: Optional[TrenchDepoConfig] = None
+        self._history_path: Optional[Path] = None
         self._result_playback_timer = QTimer(self)
         self._result_playback_timer.setInterval(220)
         self._result_playback_timer.timeout.connect(self._advance_result_playback)
@@ -3519,7 +3522,7 @@ class TrenchDepoWindow(QMainWindow):
         self.btn_run.setStyleSheet("font-weight: 700;")
         self.btn_reset = QPushButton("초기화")
         self.btn_open_json = QPushButton("불러오기")
-        self.btn_open_json.setToolTip("저장된 run JSON을 열어 파라미터와 결과 프레임을 다시 불러옵니다.")
+        self.btn_open_json.setToolTip("저장한 실행 이력의 구조·공정 파라미터·전체 결과·결과창 상태를 불러옵니다.")
         self.progress_run = QProgressBar()
         self.progress_run.setRange(0, 100)
         self.progress_run.setValue(0)
@@ -3560,10 +3563,10 @@ class TrenchDepoWindow(QMainWindow):
         self.lbl_run_dir.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.btn_open_run_dir = QPushButton("결과 폴더")
         self.btn_open_run_dir.setEnabled(False)
-        self.btn_save_result_json = QPushButton("JSON 저장")
+        self.btn_save_result_json = QPushButton("저장")
         self.btn_save_result_json.setEnabled(False)
         self.btn_save_result_json.setToolTip(
-            "현재 결과의 구조, 진행/공정 파라미터, 전체 결과 frame을 날짜별 JSON 파일로 저장합니다."
+            "계산에 사용한 구조·공정 파라미터·전체 결과와 보고 있는 이미지·이동 간격·확대 위치를 하나의 파일로 저장합니다."
         )
 
         self.cmb_emulator_default_preset = QComboBox()
@@ -4650,6 +4653,18 @@ class TrenchDepoWindow(QMainWindow):
         self.addToolBar(toolbar)
         self.action_check_updates = QAction("업데이트 확인", self)
         self.action_check_updates.triggered.connect(self.check_updates_manually)
+        self.action_save_history = QAction("저장", self)
+        self.action_save_history.setShortcut(QKeySequence.StandardKey.Save)
+        self.action_save_history.setToolTip(self.btn_save_result_json.toolTip())
+        self.action_save_history.setEnabled(False)
+        self.action_save_history.triggered.connect(self.save_current_result_json)
+        self.action_open_history = QAction("불러오기", self)
+        self.action_open_history.setShortcut(QKeySequence.StandardKey.Open)
+        self.action_open_history.setToolTip(self.btn_open_json.toolTip())
+        self.action_open_history.triggered.connect(self.open_replay_json_dialog)
+        toolbar.addAction(self.action_save_history)
+        toolbar.addAction(self.action_open_history)
+        toolbar.addSeparator()
         toolbar.addAction(self.action_check_updates)
         from gapsim.emulation.help_preferences import install_help_settings
         install_help_settings(self, toolbar)
@@ -6087,6 +6102,7 @@ class TrenchDepoWindow(QMainWindow):
 
     def _invalidate_result_for_input_change(self, *, fit: bool = False) -> None:
         self._stop_result_playback()
+        self._history_path = None
         self._result = None
         self._result_config = None
         if not hasattr(self, "slider_frame"):
@@ -8573,6 +8589,7 @@ class TrenchDepoWindow(QMainWindow):
         self._result = result
         self._result_config = config
         self._last_run_dir = run_dir.resolve() if run_dir is not None else None
+        self._history_path = None
         solid_playback = _use_solid_playback(result)
         self.view.set_frames(
             result.frame_profiles,
@@ -9090,6 +9107,8 @@ class TrenchDepoWindow(QMainWindow):
         enabled = bool(available)
         self.btn_result_play.setEnabled(enabled)
         self.result_navigation.set_available(enabled)
+        if hasattr(self, "action_save_history"):
+            self.action_save_history.setEnabled(self._result is not None and self._result_config is not None)
         if self._result is None:
             self.lbl_result_dose.setText("누적 증착량 —")
         if not enabled:
@@ -9136,10 +9155,13 @@ class TrenchDepoWindow(QMainWindow):
         self.addonFrameShown.emit(idx)
 
     def load_replay_json(self, path: Path | str) -> None:
-        self._stop_result_playback()
-        self._clear_continuation_context()
+        if self._emulation_thread is not None:
+            raise RuntimeError("실행 중에는 이력을 불러올 수 없습니다. 실행을 마친 뒤 불러오세요.")
         replay_path = Path(path).resolve()
-        config, result, note = load_trench_depo_run(replay_path)
+        config, result, note, view_state = load_trench_depo_history(replay_path)
+        self._stop_result_playback()
+        self._emulator_run_timer.stop()
+        self._clear_continuation_context()
         self._enable_recipe_precision()
         if config.front_scheme == "angular_godunov_v1":
             replay_emulator = 0
@@ -9251,6 +9273,7 @@ class TrenchDepoWindow(QMainWindow):
         self.edit_request_note.setPlainText(note)
         self._result = result
         self._result_config = config
+        self._history_path = replay_path
         self._last_run_dir = replay_path.parent
         solid_playback = _use_solid_playback(result)
         self.view.set_frames(
@@ -9268,50 +9291,93 @@ class TrenchDepoWindow(QMainWindow):
         max_idx = max(0, len(result.frame_profiles) - 1)
         self.slider_frame.blockSignals(True)
         self.slider_frame.setRange(0, max_idx)
-        self.slider_frame.setValue(max_idx)
+        selected_frame = view_state.get("frame_index", max_idx)
+        self.slider_frame.setValue(selected_frame)
         self.slider_frame.setEnabled(max_idx > 0)
         self.slider_frame.blockSignals(False)
         self._set_result_playback_available(max_idx > 0)
         self._set_next_depo_button_state()
         self.btn_save_result_json.setEnabled(True)
         self._update_result_parameter_summary(config, result)
-        self.show_frame(max_idx)
+        interval_index = self.result_navigation.interval.findData(view_state.get("frame_interval", self.result_navigation.step()))
+        self.result_navigation.interval.setCurrentIndex(interval_index)
+        self.chk_show_etch_overlay.setChecked(view_state.get("show_etch", self.chk_show_etch_overlay.isChecked()))
+        self.chk_show_redepo_overlay.setChecked(view_state.get("show_redepo", self.chk_show_redepo_overlay.isChecked()))
+        self._sync_field_overlay_toggles()
+        self.show_frame(selected_frame)
         self.addonResultApplied.emit(config, result)
         self._set_workflow_step("results")
-        QTimer.singleShot(0, self.view.fit_content)
+        viewport = view_state.get("viewport")
+        if viewport:
+            self._restore_history_viewport(result, viewport)
+            QTimer.singleShot(0, lambda: self._restore_history_viewport(result, viewport))
+        else:
+            QTimer.singleShot(0, self.view.fit_content)
         self._set_run_dir_label(self._last_run_dir)
         self.btn_open_run_dir.setEnabled(True)
-        self.statusBar().showMessage(f"Run 불러오기 완료: {replay_path}", 5000)
+        self.lbl_parameter_preset_active.setText("활성: 불러온 실행 이력")
+        self.statusBar().showMessage(f"실행 이력 불러오기 완료: {replay_path}", 5000)
         self._open_split_group_for_replay(replay_path)
+
+    def _history_view_state(self) -> Dict[str, Any]:
+        viewport = self.view.viewport_state()
+        t, center = viewport["transform"], viewport["center_scene"]
+        return {
+            "frame_index": int(self.slider_frame.value()),
+            "frame_interval": self.result_navigation.step(),
+            "show_etch": self.chk_show_etch_overlay.isChecked(),
+            "show_redepo": self.chk_show_redepo_overlay.isChecked(),
+            "viewport": {"matrix": [t.m11(), t.m12(), t.m13(), t.m21(), t.m22(), t.m23(), t.m31(), t.m32(), t.m33()],
+                         "center": [center.x(), center.y()]},
+        }
+
+    def _restore_history_viewport(self, result: TrenchDepoResult, viewport: Dict[str, Any]) -> None:
+        if self._result is result:
+            self.view.apply_viewport_state({"transform": QTransform(*viewport["matrix"]),
+                                            "center_scene": QPointF(*viewport["center"])})
 
     def save_current_result_json(self, _checked: bool = False) -> None:
         if self._result is None or self._result_config is None:
-            QMessageBox.information(self, "결과 JSON 저장", "저장할 실행 결과가 없습니다. 먼저 실행을 완료하세요.")
+            QMessageBox.information(self, "실행 이력 저장", "저장할 실행 결과가 없습니다. 먼저 실행을 완료하세요.")
             self.btn_save_result_json.setEnabled(False)
             return
+        if self._emulation_thread is not None:
+            QMessageBox.information(self, "실행 이력 저장", "실행을 마친 뒤 이력을 저장하세요.")
+            return
+        self._stop_result_playback()
+        suggested = self._history_path or self._results_root / time.strftime("실행이력_%Y%m%d_%H%M%S.json")
+        path, _ = QFileDialog.getSaveFileName(self, "실행 이력 저장", str(suggested), "GFE 실행 이력 (*.json)")
+        if not path:
+            return
+        result_path = Path(path)
+        if result_path.suffix.lower() != ".json":
+            result_path = result_path.with_name(result_path.name + ".json")
         try:
             result_path = save_trench_depo_result_json(
                 self._result_config,
                 self._result,
                 request_note=self.edit_request_note.toPlainText(),
                 results_root=self._results_root,
+                path=result_path,
+                view_state=self._history_view_state(),
             )
         except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(self, "결과 JSON 저장", f"결과 저장 실패:\n{exc}")
+            QMessageBox.critical(self, "실행 이력 저장", f"이력 저장 실패:\n{exc}")
             return
 
         self._last_run_dir = result_path.parent.resolve()
+        self._history_path = result_path.resolve()
         self.lbl_run_dir.setText(f"결과 저장: {_elide_middle(result_path.name, 34)}")
         self.lbl_run_dir.setToolTip(str(result_path.resolve()))
         self.btn_open_run_dir.setEnabled(True)
-        self.statusBar().showMessage(f"결과 JSON 저장 완료: {result_path}", 5000)
+        self.statusBar().showMessage(f"실행 이력 저장 완료: {result_path}", 5000)
 
     def open_replay_json_dialog(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self,
-            "저장된 Run 불러오기",
-            str(self._last_run_dir or self._runs_root),
-            "JSON (*.json);;All Files (*)",
+            "실행 이력 불러오기",
+            str(self._history_path or self._last_run_dir or self._results_root),
+            "GFE 실행 이력 (*.json);;모든 파일 (*)",
         )
         if not path:
             return

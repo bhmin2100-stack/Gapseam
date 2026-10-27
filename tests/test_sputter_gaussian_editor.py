@@ -1090,8 +1090,10 @@ class SputterGaussianEditorTest(unittest.TestCase):
                 self.assertEqual(window.slider_frame.value(), 0)
 
                 self.assertTrue(window.btn_save_result_json.isEnabled())
-                window.btn_save_result_json.click()
-                saved_files = list(Path(tmp_results).glob("*/트렌치결과_*.json"))
+                chosen_path = Path(tmp_results) / "saved-history.json"
+                with mock.patch("gapsim.emulation.trench_depo_ui.QFileDialog.getSaveFileName", return_value=(str(chosen_path), "")):
+                    window.btn_save_result_json.click()
+                saved_files = list(Path(tmp_results).glob("*.json"))
                 self.assertEqual(len(saved_files), 1)
                 payload = json.loads(saved_files[0].read_text(encoding="utf-8"))
                 self.assertEqual(payload["config"]["cycles"], 2)
@@ -1101,9 +1103,11 @@ class SputterGaussianEditorTest(unittest.TestCase):
                 self.assertIn("결과 저장", window.lbl_run_dir.text())
                 self.assertEqual(window.lbl_run_dir.toolTip(), str(saved_files[0].resolve()))
 
-                window.btn_result_play.click()
+                # Saving freezes the selected frame; replay can be started again.
                 self.assertFalse(window._result_playback_timer.isActive())
                 self.assertEqual(window.btn_result_play.text(), "반복재생")
+                window.btn_result_play.click()
+                self.assertTrue(window._result_playback_timer.isActive())
             finally:
                 window.close()
 
@@ -2644,7 +2648,7 @@ class SputterGaussianEditorTest(unittest.TestCase):
         ]
         with (
             mock.patch("gapsim.emulation.trench_depo_ui.run_trench_depo", return_value=result),
-            mock.patch("gapsim.emulation.trench_depo_ui.load_trench_depo_run", return_value=(TrenchDepoConfig(cycles=0), result, "note")),
+            mock.patch("gapsim.emulation.trench_depo_ui.load_trench_depo_history", return_value=(TrenchDepoConfig(cycles=0), result, "note", {})),
             mock.patch("gapsim.emulation.trench_depo_ui.load_trench_depo_split_group", return_value=split_cases),
             mock.patch("gapsim.emulation.trench_depo_ui.QTimer.singleShot"),
         ):

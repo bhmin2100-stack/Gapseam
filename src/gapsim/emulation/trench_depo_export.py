@@ -4,9 +4,12 @@ from dataclasses import asdict
 from datetime import datetime
 from io import BytesIO
 import json
+import math
+import os
 from pathlib import Path
 import re
 import sys
+import tempfile
 from typing import Any, Dict, List, Sequence, Tuple
 
 from gapsim.emulation.data_paths import configured_data_paths
@@ -245,18 +248,89 @@ def load_trench_depo_run(path: Path | str) -> Tuple[TrenchDepoConfig, TrenchDepo
     return payload_to_trench_run(payload)
 
 
+def load_trench_depo_history(path: Path | str) -> Tuple[TrenchDepoConfig, TrenchDepoResult, str, Dict[str, Any]]:
+    payload = json.loads(Path(path).read_text(encoding="utf-8-sig"))
+    config, result, note = payload_to_trench_run(payload)
+    state = _validated_result_view_state(payload.get("view_state"), len(result.frame_profiles))
+    return config, result, note, state
+
+
+def _validated_result_view_state(raw: Any, frame_count: int) -> Dict[str, Any]:
+    """Validate optional display data before touching the current UI."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError("Invalid history: view_state must be an object.")
+    state: Dict[str, Any] = {}
+    for name in ("frame_index", "frame_interval"):
+        if name not in raw:
+            continue
+        value = raw[name]
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"Invalid history: {name} must be an integer.")
+        if name == "frame_index":
+            state[name] = max(0, min(value, max(0, frame_count - 1)))
+        elif value in (1, 2, 3, 5, 10, 100):
+            state[name] = value
+        else:
+            raise ValueError("Invalid history: unsupported frame interval.")
+    for name in ("show_etch", "show_redepo"):
+        if name in raw:
+            if not isinstance(raw[name], bool):
+                raise ValueError(f"Invalid history: {name} must be a boolean.")
+            state[name] = raw[name]
+    if "viewport" in raw:
+        viewport = raw["viewport"]
+        if not isinstance(viewport, dict):
+            raise ValueError("Invalid history: viewport must be an object.")
+        values = {}
+        for key, size in (("matrix", 9), ("center", 2)):
+            entries = viewport.get(key)
+            if (not isinstance(entries, list) or len(entries) != size
+                or any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) for v in entries)):
+                raise ValueError(f"Invalid history: viewport {key} is invalid.")
+            values[key] = list(entries)
+        # The result view only supports a finite, positive scale and translation.
+        m = values["matrix"]
+        if not (0 < m[0] <= 1e8 and 0 < m[4] <= 1e8 and m[1:4] == [0, 0, 0] and m[5] == 0 and m[8] == 1):
+            raise ValueError("Invalid history: unsupported viewport transform.")
+        state["viewport"] = values
+    return state
+
+
+def _write_history_json_atomic(path: Path, payload: Dict[str, Any]) -> None:
+    """A failed save must leave an existing history file intact."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
+                                         prefix=f".{path.name}.", suffix=".tmp", delete=False) as stream:
+            temporary = Path(stream.name)
+            json.dump(payload, stream, ensure_ascii=False, indent=2, allow_nan=False)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink()
+
+
 def save_trench_depo_result_json(
     config: TrenchDepoConfig,
     result: TrenchDepoResult,
     *,
     request_note: str = "",
     results_root: Path | str = DEFAULT_RESULTS_ROOT,
+    path: Path | str | None = None,
+    view_state: Dict[str, Any] | None = None,
 ) -> Path:
     payload = result_to_payload(config, result, request_note=_coerce_note(request_note))
     payload["save_type"] = "result_panel_json"
-    path = create_result_json_path(results_root)
+    path = Path(path).resolve() if path is not None else create_result_json_path(results_root)
+    if view_state is not None:
+        payload["view_state"] = _validated_result_view_state(view_state, len(result.frame_profiles))
     payload["result_json_path"] = str(path)
-    write_json(path, payload)
+    _write_history_json_atomic(path, payload)
     return path
 
 
