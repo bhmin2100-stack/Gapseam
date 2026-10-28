@@ -1218,12 +1218,13 @@ def _state_reparam_ds_from_meta(state: SimulationState) -> float:
     return max(0.5, min(200.0, float(state.meta.get("reparam_ds", REPARAM_DS_A) or REPARAM_DS_A)))
 
 
-def _apply_depth_post_closure_fill(
+def _apply_depth_post_closure_fill_base(
     state: SimulationState,
     cfg: TrenchDepoConfig,
     *,
     nominal_depo_a: float,
     cycle_index: int,
+    area_fill=None,
 ) -> None:
     if not bool(cfg.deposition_depth_enabled or cfg.inhibition_enabled) or nominal_depo_a <= 0.0:
         return
@@ -1283,11 +1284,21 @@ def _apply_depth_post_closure_fill(
     target_area = min(max(0.0, candidate_area), remaining_budget)
     if bool(cfg.deposition_conserve_volume):
         target_area = min(target_area, current_void_area)
-    filled_area = _fill_voids_by_area_budget(state, voids_i, target_fill_area_a2=target_area)
+    fill = _fill_voids_by_area_budget if area_fill is None else area_fill
+    filled_area = fill(state, voids_i, target_fill_area_a2=target_area)
     if filled_area <= 0.0:
         return
     state.meta["depth_post_closure_budget_used_area_a2"] = min(allowed_area, used_area + filled_area)
     state.meta["depth_post_closure_last_fill_area_a2"] = float(filled_area)
+
+
+def _apply_depth_post_closure_fill(state, cfg, *, nominal_depo_a, cycle_index):
+    from .sfo310_model import MODEL, apply_post_closure
+    if cfg.recipe_model == MODEL:
+        return apply_post_closure(state, cfg, nominal_depo_a=nominal_depo_a,
+                                  cycle_index=cycle_index, base_fill=_apply_depth_post_closure_fill_base)
+    return _apply_depth_post_closure_fill_base(state, cfg, nominal_depo_a=nominal_depo_a,
+                                               cycle_index=cycle_index)
 
 
 def _advance_recipe_growth(points, flux, deposition_a, cfg):
@@ -1441,6 +1452,17 @@ def _apply_inhibition_deposition_step(
     flux = model.compute_flux(state)
     if len(flux) != len(pts):
         flux = [1.0 for _ in pts]
+    if cfg.recipe_model == "sfo310_calibrated_v1":
+        from .sfo310_model import growth_response
+        flux = growth_response(state, cfg, flux, cycle_index=cycle_index)
+        # Show the actual calibrated deposition field in the result overlays.
+        fields = state.meta["inhibition_debug_fields_last"]
+        deposited = [float(deposition_a) * float(v) for v in flux]
+        fields["growth_ratio_field"] = [round(float(v), 6) for v in flux]
+        fields["depo_field"] = [round(v, 6) for v in deposited]
+        summary = state.meta["inhibition_debug_summary_last"]
+        summary["growth_ratio"] = _field_summary_by_depth(state.surface.points, flux)
+        summary["depo"] = _field_summary_by_depth(state.surface.points, deposited)
     if cfg.cvd_enabled:
         _apply_typical_cvd_step(state, cfg, deposition_a=deposition_a,
                                reparam_ds_a=reparam_ds_a, inhibition_flux=flux)
@@ -4448,7 +4470,7 @@ def run_trench_depo(
     if not math.isfinite(cfg.ion_growth_fraction) or not 0 <= cfg.ion_growth_fraction <= 1:
         raise ValueError("Ion growth fraction must be in [0, 1]")
     if cfg.front_scheme != "legacy":
-        if cfg.recipe_model != "legacy_calibrated_v1" or cfg.process_type != "ald" or cfg.emulator_number != 0:
+        if cfg.recipe_model not in ("legacy_calibrated_v1", "sfo310_calibrated_v1") or cfg.process_type != "ald" or cfg.emulator_number != 0:
             raise ValueError("SFO fixed-repeat front requires the integrated ALD calibrated model")
         if cfg.sputter_enabled and (not cfg.redepo_incident_los_enabled or cfg.ion_transmission_enabled):
             raise ValueError("SFO fixed-repeat front requires geometric ion visibility without the older attenuation law")
@@ -5408,7 +5430,7 @@ def run_trench_depo(
             "front_scheme": cfg.front_scheme,
             "ion_growth_fraction": cfg.ion_growth_fraction,
             "orientation_front_audit": dict(state.meta.get("orientation_front_audit", {})),
-            "recipe_model": "legacy_calibrated_v1",
+            "recipe_model": cfg.recipe_model,
             "recipe_config": asdict(cfg),
             "process_type": "ald",
             "growth_basis": "gross",

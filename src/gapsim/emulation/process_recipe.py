@@ -22,7 +22,7 @@ from gapsim.engine.surface_kinetics import (
     adsorption_coverage, build_neutral_kernel, sputtered_redeposition,
 )
 
-RECIPE_MODELS = ('legacy_calibrated_v1', 'ideal_conformal_v1', 'physical_transport_v1')
+RECIPE_MODELS = ('legacy_calibrated_v1', 'sfo310_calibrated_v1', 'ideal_conformal_v1', 'physical_transport_v1')
 
 
 def apply_initial_voids(state,voids):
@@ -89,8 +89,10 @@ def dispatch_recipe(config, *, progress_cb=None, detail_cb=None, cancel_check=No
         raise ValueError(f'Unsupported recipe model: {config.recipe_model}')
     if config.growth_basis not in ('gross','net_planar'):
         raise ValueError('growth_basis must be gross or net_planar')
+    if config.recipe_model == 'sfo310_calibrated_v1' and config.process_type != 'ald':
+        raise ValueError('SFO3.10 is calibrated for ALD only')
     dose=recipe_nominal_dose(config)
-    if config.recipe_model != 'legacy_calibrated_v1':
+    if config.recipe_model not in ('legacy_calibrated_v1', 'sfo310_calibrated_v1'):
         return run_physical_recipe(config,progress_cb=progress_cb,detail_cb=detail_cb,cancel_check=cancel_check)
     if config.process_type == 'ald' and config.growth_basis == 'gross':
         return None
@@ -110,7 +112,15 @@ def dispatch_recipe(config, *, progress_cb=None, detail_cb=None, cancel_check=No
     if config.growth_basis == 'net_planar':
         inner=replace(inner,angstrom_per_cycle=(inner.angstrom_per_cycle+_planar_legacy_etch(inner))
                       /_planar_legacy_growth_ratio(inner))
-    result=run_trench_depo(inner,progress_cb=progress_cb,detail_cb=detail_cb,cancel_check=cancel_check)
+    if config.recipe_model == 'sfo310_calibrated_v1':
+        from .sfo310_model import nominal_gpc
+        token = nominal_gpc.set(float(config.angstrom_per_cycle))
+        try:
+            result=run_trench_depo(inner,progress_cb=progress_cb,detail_cb=detail_cb,cancel_check=cancel_check)
+        finally:
+            nominal_gpc.reset(token)
+    else:
+        result=run_trench_depo(inner,progress_cb=progress_cb,detail_cb=detail_cb,cancel_check=cancel_check)
     metadata=dict(result.meta,process_type=config.process_type,recipe_model=config.recipe_model,
                   recipe_config=asdict(config),
                   growth_basis=config.growth_basis,nominal_dose_a=dose,

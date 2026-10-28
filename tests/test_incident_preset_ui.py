@@ -41,7 +41,8 @@ def test_single_sfo_preset_applies_without_changing_geometry(window):
     assert window.windowTitle() == 'GFE'
     points=window._current_geometry_points()
     cycles=window.spin_cycles.value()
-    assert window.cmb_parameter_preset.count()==1
+    assert window.cmb_parameter_preset.count()==2
+    assert window.cmb_parameter_preset.findData('SFO3.10') >= 0
     assert window.cmb_parameter_preset.currentText()=='SFO3.1'
     assert not hasattr(window,'cmb_incident_preset')
     window.btn_split_options.setChecked(True)

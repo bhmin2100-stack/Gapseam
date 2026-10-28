@@ -15,6 +15,8 @@ from .trench_depo import TrenchDepoConfig
 STRUCTURE_NAME = "SFO3.1 CD242 R42 H702"
 VERSION = "fixed-repeat-20261008"
 SAVED_PRESET_KEY = ("saved", "SFO3.1")
+SFO310_NAME = "SFO3.10"
+SAVED_PRESET_KEY_310 = ("saved", SFO310_NAME)
 
 
 def verified_sfo31_config():
@@ -35,9 +37,21 @@ def verified_sfo31_process_record():
             "config": asdict(verified_sfo31_config())}
 
 
-def is_verified_sfo31_process_record(record):
+def sfo310_config():
+    """Empirical 3.10 research model; 3.1's structure and recipe stay intact."""
+    return replace(verified_sfo31_config(), recipe_model="sfo310_calibrated_v1",
+                   sputter_strength_a_per_cycle=2.836082033553756,
+                   deposition_depth_decay_k=0.391434488877684,
+                   deposition_residual_fill_distribution="uniform_below_closure")
+
+
+def sfo310_process_record():
+    return {"name": SFO310_NAME, "emulator_number": 0, "config": asdict(sfo310_config())}
+
+
+def is_verified_sfo31_process_record(record, *, model="SFO3.1"):
     from .parameter_library import parameter_preset_application_values
-    cfg = verified_sfo31_config()
+    cfg = sfo310_config() if model == SFO310_NAME else verified_sfo31_config()
     expected = asdict(cfg)
     actual = parameter_preset_application_values(
         record, cfg, include_run_defaults=True, include_calculation_settings=True)

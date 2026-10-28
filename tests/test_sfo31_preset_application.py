@@ -125,3 +125,44 @@ def test_failed_application_cannot_claim_success(window, monkeypatch):
     warning.assert_called_once()
     assert window._active_parameter_preset_name == ''
     assert '적용된 프리셋: 없음' in window.lbl_parameter_preset_active.text()
+
+
+def test_sfo310_builtin_preserves_geometry_and_legacy_preset(window):
+    from gapsim.emulation.sfo31_verified import sfo310_config
+    from gapsim.emulation.parameter_library import GEOMETRY_PARAMETER_FIELDS
+    before = asdict(window.current_config())
+    window.spin_cycles.setValue(23)
+    window.cmb_parameter_preset.setCurrentIndex(window.cmb_parameter_preset.findData('SFO3.10'))
+    assert not window.btn_delete_parameter_preset.isEnabled()
+    window.btn_apply_parameter_preset.click()
+    cfg = window.current_config()
+    expected = sfo310_config()
+    assert cfg.recipe_model == 'sfo310_calibrated_v1'
+    assert cfg.deposition_residual_fill_distribution == 'uniform_below_closure'
+    assert cfg.angstrom_per_cycle == expected.angstrom_per_cycle
+    assert cfg.sputter_strength_a_per_cycle == pytest.approx(expected.sputter_strength_a_per_cycle, abs=1e-12)
+    assert cfg.deposition_depth_decay_k == pytest.approx(expected.deposition_depth_decay_k, abs=1e-12)
+    assert cfg.cycles == 23
+    assert {key: asdict(cfg)[key] for key in GEOMETRY_PARAMETER_FIELDS} == {key: before[key] for key in GEOMETRY_PARAMETER_FIELDS}
+    assert 'SFO3.10' in window.lbl_parameter_preset_active.text()
+    assert 'SFO3.1 동일 반복' not in window.lbl_parameter_preset_active.text()
+    window.cmb_parameter_preset.setCurrentIndex(window.cmb_parameter_preset.findData('SFO3.1'))
+    window.btn_apply_parameter_preset.click()
+    assert window.current_config().recipe_model == 'legacy_calibrated_v1'
+
+
+def test_sfo310_user_copy_is_separate_and_replayable(window):
+    from gapsim.emulation.sfo31_verified import SAVED_PRESET_KEY_310
+    window.cmb_parameter_preset.setCurrentIndex(window.cmb_parameter_preset.findData('SFO3.10'))
+    window.btn_apply_parameter_preset.click()
+    window.spin_angstrom_per_cycle.setValue(1.5)
+    window.edit_parameter_preset_name.setText('SFO3.10')
+    window.btn_save_parameter_preset.click()
+    assert window.cmb_parameter_preset.findData(SAVED_PRESET_KEY_310) >= 0
+    assert window.cmb_parameter_preset.currentText() == 'SFO3.10 (저장본)'
+    window.spin_angstrom_per_cycle.setValue(3.0)
+    window.btn_apply_parameter_preset.click()
+    cfg = window.current_config()
+    assert cfg.recipe_model == 'sfo310_calibrated_v1'
+    assert cfg.deposition_residual_fill_distribution == 'uniform_below_closure'
+    assert cfg.angstrom_per_cycle == 1.5

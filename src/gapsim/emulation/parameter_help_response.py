@@ -114,7 +114,7 @@ def growth_response(points, c):
 
 
 def los_active(c):
-    if getattr(c, 'recipe_model', 'legacy_calibrated_v1') != 'legacy_calibrated_v1':
+    if getattr(c, 'recipe_model', 'legacy_calibrated_v1') not in ('legacy_calibrated_v1', 'sfo310_calibrated_v1'):
         return c.sputter_enabled and c.sputter_strength_a_per_cycle > 0
     return (c.sputter_enabled and c.sputter_strength_a_per_cycle > 0
             and c.redepo_enabled and c.redepo_incident_los_enabled)
@@ -134,6 +134,7 @@ def application_note(key, c):
     """Semantic gates: a collapsed/disabled editor is not a disabled process."""
     etch = c.sputter_enabled and c.sputter_strength_a_per_cycle > 0
     model = getattr(c, 'recipe_model', 'legacy_calibrated_v1')
+    legacy = model in ('legacy_calibrated_v1', 'sfo310_calibrated_v1')
     process = getattr(c, 'process_type', 'ald')
     if key in ('spin_cycles', 'spin_angstrom_per_cycle', 'spin_ald_exposure'):
         if process != 'ald':
@@ -146,13 +147,13 @@ def application_note(key, c):
     if key == 'spin_precursor_sticking':
         return '현재 적용: 중성 전구체 수송·반응' if model == 'physical_transport_v1' else '현재 미적용: 수송·표면 반응 모델에서 사용'
     if key in ('spin_inhibitor_sticking', 'spin_inhibitor_exposure'):
-        return '현재 적용: 억제제 수송·흡착 피복' if model != 'legacy_calibrated_v1' and c.inhibition_enabled else '현재 미적용: Conformal/수송 모델에서 증착 억제 ON 필요'
+        return '현재 적용: 억제제 수송·흡착 피복' if not legacy and c.inhibition_enabled else '현재 미적용: Conformal/수송 모델에서 증착 억제 ON 필요'
     if key == 'spin_numerical_step':
-        return '계산 정확도 설정 · 실제 공정 cycle/시간과 별개' if model != 'legacy_calibrated_v1' else '현재 미적용: 기존 보정 모델은 저장된 계산 순서 유지'
+        return '계산 정확도 설정 · 실제 공정 cycle/시간과 별개' if not legacy else '현재 미적용: 기존 보정 모델은 저장된 계산 순서 유지'
     if key == 'spin_transport_rays':
         active = model == 'physical_transport_v1' or model == 'ideal_conformal_v1' and (c.inhibition_enabled or etch and c.redepo_enabled)
         return '현재 적용: 방향 적분 정확도' if active else '현재 미적용: 중성 수송·억제 또는 재부착 수송 경로 없음'
-    if model != 'legacy_calibrated_v1':
+    if not legacy:
         if key.startswith(('cvd_', 'spin_inhibition_', 'spin_depth_', 'cmb_depth_', 'spin_ion_', 'slider_ion_')) or key in ('chk_typical_cvd', 'chk_depth_deposition', 'chk_ion_transmission', 'spin_sputter_smoothing', 'spin_sputter_peak_pct', 'spin_redepo_emit_power', 'spin_redepo_distance_power', 'spin_redepo_max_distance', 'spin_redepo_soft_los'):
             return '현재 미적용: 기존 보정 모델 전용 설정'
         if key.startswith(('spin_incident_', 'chk_incident_')):
@@ -176,6 +177,8 @@ def application_note(key, c):
     if key.startswith('spin_sputter_'):
         return '적용 조건: 식각 ON (식각량·수율이 0이면 제거 없음)' if c.sputter_enabled else '현재 미적용: 식각 OFF'
     if key.startswith(('spin_depth_post_', 'spin_depth_line_open', 'spin_depth_residual')):
+        if model == 'sfo310_calibrated_v1' and key.startswith(('spin_depth_post_', 'spin_depth_line_open')):
+            return 'SFO3.10은 폐쇄 깊이에 따른 고정 보정식을 사용하며 이 값은 충전 한도에 적용되지 않습니다.'
         if c.cvd_enabled or not (c.deposition_depth_enabled or c.inhibition_enabled) or c.angstrom_per_cycle <= 0:
             return '현재 미적용: CVD OFF · 기존 감쇠/억제 ON · 증착량 > 0 필요'
         return '실제 폐공간 생성 후에만 적용 · 아래는 채움 예산 비교'
@@ -185,6 +188,8 @@ def application_note(key, c):
         if key == 'spin_depth_feature_length' and c.deposition_feature_type != 'line':
             return '현재 미적용: Hole은 Line 기준 길이를 사용하지 않음'
         if key == 'spin_depth_feature_depth':
+            if model == 'sfo310_calibrated_v1':
+                return '현재 적용: SFO3.10의 기준 깊이 / 입구 폭 비율'
             return '현재 적용: CVD의 바닥 성장률 기준 깊이' if c.cvd_enabled and c.angstrom_per_cycle > 0 else '현재 CVD 기준 깊이 미적용 (CVD OFF 또는 증착량 0)'
         active = c.angstrom_per_cycle > 0 and (
             c.deposition_depth_enabled and not c.cvd_enabled or c.inhibition_enabled or
