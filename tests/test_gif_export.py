@@ -2,11 +2,14 @@ import json
 import math
 import time
 from dataclasses import asdict
+from io import BytesIO
 from unittest import mock
 
 import pytest
 from PIL import Image
 from PySide6.QtCore import Qt
+from PySide6.QtCore import QBuffer, QByteArray
+from PySide6.QtGui import QColor, QImage
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog
 
@@ -21,6 +24,67 @@ def result_fixture(count=7):
                 for i in range(count)]
     return TrenchDepoResult(list(range(count)), profiles, [[] for _ in profiles], profiles[-1],
                             {'cycles': count - 1, 'process_type': 'ald', 'angstrom_per_cycle': 1.})
+
+
+def png_round_trip(image):
+    data = QByteArray()
+    stream = QBuffer(data)
+    assert stream.open(QBuffer.OpenModeFlag.WriteOnly)
+    try:
+        assert image.save(stream, 'PNG')
+    finally:
+        stream.close()
+    with Image.open(BytesIO(bytes(data))) as decoded:
+        return decoded.convert('RGB')
+
+
+@pytest.mark.parametrize('width', [1, 3, 8, 19])
+def test_direct_pixels_match_png_with_padding_and_own_their_memory(width):
+    source = QImage(width, 7, QImage.Format.Format_ARGB32)
+    for y in range(7):
+        for x in range(width):
+            source.setPixelColor(x, y, QColor(x * 11 % 256, y * 37 % 256, (x + y) * 13 % 256))
+    expected = png_round_trip(source)
+    actual = ex._qimage_to_rgb(source)
+    source.fill(Qt.GlobalColor.black)
+    del source
+    try:
+        assert actual.mode == 'RGB'
+        assert actual.tobytes() == expected.tobytes()
+    finally:
+        actual.close()
+        expected.close()
+
+
+@pytest.mark.parametrize('mixed', [False, True])
+def test_fast_export_matches_old_render_and_encoded_gif(window, tmp_path, mixed):
+    config = TrenchDepoConfig(cycles=6, angstrom_per_cycle=1.)
+    result = result_fixture()
+    if mixed:
+        # Both deposition and erosion, with a cavity and per-frame overlays.
+        result.frame_profiles[4] = [(-30., 2.), (-12., -16.), (12., -16.), (30., 2.)]
+        result.frame_voids[3] = [[(-3., -17.), (0., -19.), (3., -17.)]]
+        result.meta.update(sputter_active=True,
+                           frame_redepo_overlays=[[(0., -20. + i, 1.)] for i in range(7)],
+                           frame_etch_overlays=[[(-10., -20. + i, .5)] for i in range(7)])
+    before = json.dumps(asdict(result), sort_keys=True)
+    original_set = ex.ResultVectorView.set_frames
+    def old_start(view, frames, **kwargs):
+        kwargs['initial_index'] = -1
+        return original_set(view, frames, **kwargs)
+    with mock.patch.object(ex, '_qimage_to_rgb', side_effect=png_round_trip), \
+         mock.patch.object(ex.ResultVectorView, 'set_frames', old_start):
+        old = ex.export_trench_depo_gif(config, result, tmp_path / 'old.gif', frame_interval=2)
+    calls = []
+    original_show = ex.ResultVectorView.show_frame
+    def show(view, index, **kwargs):
+        calls.append(index)
+        return original_show(view, index, **kwargs)
+    with mock.patch.object(ex.ResultVectorView, 'show_frame', show):
+        new = ex.export_trench_depo_gif(config, result, tmp_path / 'new.gif', frame_interval=2)
+    assert calls == [0, 0, 2, 4, 6]
+    assert new.read_bytes() == old.read_bytes()
+    assert json.dumps(asdict(result), sort_keys=True) == before
 
 
 @pytest.mark.parametrize('count', [0, 1, 2, 99, 100, 101, 124, 1046, 1000000])

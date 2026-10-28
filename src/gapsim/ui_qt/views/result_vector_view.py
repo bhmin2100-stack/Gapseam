@@ -327,6 +327,7 @@ class ResultVectorView(QGraphicsView):
         dynamic_substrate_fill: bool = False,
         solid_fill_flags: Optional[Sequence[bool]] = None,
         history_mode: str = "film",
+        initial_index: int = -1,
     ) -> None:
         self._frame_profiles_raw = []
         for f in frames:
@@ -438,7 +439,10 @@ class ResultVectorView(QGraphicsView):
         self._current_index = -1
         self._build_scene_items()
         if self._frame_profiles_raw:
-            self.show_frame(len(self._frame_profiles_raw) - 1, fit=True)
+            # Playback export starts at zero; avoid clipping every history layer
+            # against the final profile just to immediately move back to zero.
+            index = len(self._frame_profiles_raw) - 1 if initial_index < 0 else initial_index
+            self.show_frame(index, fit=True)
         else:
             self._scene.setSceneRect(-1000, -1000, 2000, 2000)
 
@@ -513,6 +517,7 @@ class ResultVectorView(QGraphicsView):
         stage_seen: Dict[int, int] = {}
         use_ghost_history = self._history_mode == "ghost_lines"
         use_mixed_etch_history = self._history_mode == "mixed_etch"
+        prev_fill = self._profile_fill_path(base, floor_y) if use_mixed_etch_history else None
         for li in range(1, len(self._frame_profiles_raw)):
             cur = self._cache_get_profile_scene(li)
             item: Optional[QGraphicsPathItem] = None
@@ -530,10 +535,11 @@ class ResultVectorView(QGraphicsView):
                     self._stage_layer_totals.get(stage_id, 1),
                 )
                 if use_mixed_etch_history:
-                    prev_fill = self._profile_fill_path(prev, floor_y)
                     cur_fill = self._profile_fill_path(cur, floor_y)
                     added_path = cur_fill.subtracted(prev_fill)
                     eroded_path = prev_fill.subtracted(cur_fill)
+                    # The next layer has this exact same previous surface.
+                    prev_fill = cur_fill
                     if self._path_has_area(added_path) and self._stage_visible(stage_id):
                         layer_base_path = added_path
                         item = QGraphicsPathItem(layer_base_path)

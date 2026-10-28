@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from datetime import datetime
-from io import BytesIO
 import json
 import math
 import os
@@ -483,6 +482,18 @@ def _gif_panel_lines(
     ]
 
 
+def _qimage_to_rgb(qimage: Any) -> Any:
+    """Copy Qt pixels into an owned Pillow image without a PNG round trip."""
+    from PIL import Image
+    from PySide6.QtGui import QImage
+
+    # RGB888 defines channel order on every platform. Qt rows can contain padding;
+    # frombytes honors that stride and copies before the temporary QImage dies.
+    rgb = qimage.convertToFormat(QImage.Format.Format_RGB888)
+    return Image.frombytes("RGB", (rgb.width(), rgb.height()), rgb.constBits(),
+                           "raw", "RGB", rgb.bytesPerLine(), 1)
+
+
 def _render_gif_frames(
     result: TrenchDepoResult,
     config: TrenchDepoConfig,
@@ -497,7 +508,7 @@ def _render_gif_frames(
         raise RuntimeError("Pillow가 없어 GIF를 만들 수 없습니다.") from exc
 
     try:
-        from PySide6.QtCore import QBuffer, QByteArray, QPoint, Qt
+        from PySide6.QtCore import QPoint, Qt
         from PySide6.QtGui import QFont, QImage, QPainter
         from PySide6.QtWidgets import QApplication, QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
     except Exception as exc:  # noqa: BLE001
@@ -567,6 +578,7 @@ def _render_gif_frames(
         void_mode="current",
         dynamic_substrate_fill=bool(result.meta.get("sputter_active")),
         history_mode="mixed_etch" if bool(result.meta.get("sputter_active")) else "film",
+        initial_index=0,
     )
     view.setFont(QFont(font_family, 13))
     host_layout.addWidget(view, 1)
@@ -626,21 +638,7 @@ def _render_gif_frames(
             finally:
                 painter.end()
 
-            png_bytes = QByteArray()
-            buffer = QBuffer(png_bytes)
-            if not buffer.open(QBuffer.OpenModeFlag.WriteOnly):
-                raise RuntimeError("GIF export용 메모리 버퍼를 열지 못했습니다.")
-            try:
-                ok = qimage.save(buffer, "PNG")
-            finally:
-                buffer.close()
-            if not ok:
-                raise RuntimeError("GIF export frame을 렌더하지 못했습니다.")
-
-            frame = Image.open(BytesIO(bytes(png_bytes)))
-            frame.load()
-            rendered.append(frame.convert("RGB"))
-            frame.close()
+            rendered.append(_qimage_to_rgb(qimage))
         if progress_cb is not None:
             progress_cb(len(indices), len(indices))
     except BaseException:
