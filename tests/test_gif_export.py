@@ -146,6 +146,7 @@ def test_actual_run_button_displays_result_before_json_export_and_never_renders_
     assert list(tmp_path.rglob('*.json'))
     assert not list(tmp_path.rglob('*.gif'))
     assert window.btn_run.isEnabled()
+    assert 'Cycle 3 / 3' in window.lbl_status.text()
 
 
 def test_manual_gif_button_uses_executed_config_and_requested_interval(window, tmp_path):

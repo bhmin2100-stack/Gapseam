@@ -131,7 +131,8 @@ def test_ui_roundtrip(tmp_path, monkeypatch):
             assert w._emulation_thread is None
         error.assert_not_called()
         np.testing.assert_allclose(w._result.final_profile,result.final_profile,rtol=0,atol=1e-8)
-        assert list(w._runs_root.rglob('*.gif'))
+        assert not list(w._runs_root.rglob('*.gif'))
+        assert list(w._runs_root.rglob('*.json'))
         assert list(w._runs_root.rglob('*.json'))
     finally:
         if w._emulation_thread is not None:

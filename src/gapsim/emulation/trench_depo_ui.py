@@ -8666,7 +8666,7 @@ class TrenchDepoWindow(QMainWindow):
                 self._last_run_dir = run_dir.resolve()
                 self._set_run_dir_label(self._last_run_dir)
                 self.btn_open_run_dir.setEnabled(True)
-                self._update_run_progress(1, 1, label="저장")
+                self.statusBar().showMessage(f"실행 이력 저장 완료: {self._last_run_dir}", 5000)
             except Exception as exc:  # noqa: BLE001
                 QMessageBox.warning(
                     self,
