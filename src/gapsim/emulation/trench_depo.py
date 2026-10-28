@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from dataclasses import asdict, dataclass, replace
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from gapsim.emulation.calibrated_response import ResponseParameters
 
 from gapsim.engine.deposition_pipeline import (
     FluxModel,
@@ -188,6 +189,8 @@ class TrenchDepoConfig:
     # Versioned per-run solver; no global research hooks or terminal finishing.
     front_scheme: str = "legacy"
     ion_growth_fraction: float = 0.0
+    # Explicit generic calibration settings; None preserves old saved recipes.
+    empirical_response: Optional[Dict[str, Any] | ResponseParameters] = None
 
 
 @dataclass(frozen=True)
@@ -1297,6 +1300,10 @@ def _apply_depth_post_closure_fill(state, cfg, *, nominal_depo_a, cycle_index):
     if cfg.recipe_model == MODEL:
         return apply_post_closure(state, cfg, nominal_depo_a=nominal_depo_a,
                                   cycle_index=cycle_index, base_fill=_apply_depth_post_closure_fill_base)
+    if cfg.recipe_model == "calibrated_response_v1":
+        from .calibrated_response import apply_post_closure as generic_fill
+        return generic_fill(state, cfg, nominal_depo_a=nominal_depo_a,
+                            cycle_index=cycle_index, base_fill=_apply_depth_post_closure_fill_base)
     return _apply_depth_post_closure_fill_base(state, cfg, nominal_depo_a=nominal_depo_a,
                                                cycle_index=cycle_index)
 
@@ -1452,8 +1459,12 @@ def _apply_inhibition_deposition_step(
     flux = model.compute_flux(state)
     if len(flux) != len(pts):
         flux = [1.0 for _ in pts]
-    if cfg.recipe_model == "sfo310_calibrated_v1":
-        from .sfo310_model import growth_response
+    from .calibrated_response import parameters as response_parameters
+    if cfg.recipe_model == "sfo310_calibrated_v1" or (cfg.recipe_model == "calibrated_response_v1" and response_parameters(cfg).growth_enabled):
+        if cfg.recipe_model == "sfo310_calibrated_v1":
+            from .sfo310_model import growth_response
+        else:
+            from .calibrated_response import growth_response
         flux = growth_response(state, cfg, flux, cycle_index=cycle_index)
         # Show the actual calibrated deposition field in the result overlays.
         fields = state.meta["inhibition_debug_fields_last"]
@@ -4465,12 +4476,20 @@ def run_trench_depo(
     cancel_check: Optional[Callable[[], bool]] = None,
 ) -> TrenchDepoResult:
     cfg = config or TrenchDepoConfig()
+    if cfg.recipe_model in ("sfo310_calibrated_v1", "calibrated_response_v1"):
+        from .calibrated_response import parameters as response_parameters, load_parameters
+        response = load_parameters(asdict(response_parameters(cfg)))
+        # Normalize once; legacy 3.10 None keeps its original preset identity.
+        if cfg.empirical_response is not None:
+            cfg = replace(cfg, empirical_response=response)
+    elif cfg.empirical_response is not None:
+        raise ValueError("Empirical response requires its calibrated model")
     if cfg.front_scheme not in ("legacy", "angular_godunov_v1"):
         raise ValueError("Unknown front scheme")
     if not math.isfinite(cfg.ion_growth_fraction) or not 0 <= cfg.ion_growth_fraction <= 1:
         raise ValueError("Ion growth fraction must be in [0, 1]")
     if cfg.front_scheme != "legacy":
-        if cfg.recipe_model not in ("legacy_calibrated_v1", "sfo310_calibrated_v1") or cfg.process_type != "ald" or cfg.emulator_number != 0:
+        if cfg.recipe_model not in ("legacy_calibrated_v1", "sfo310_calibrated_v1", "calibrated_response_v1") or cfg.process_type != "ald" or cfg.emulator_number != 0:
             raise ValueError("SFO fixed-repeat front requires the integrated ALD calibrated model")
         if cfg.sputter_enabled and (not cfg.redepo_incident_los_enabled or cfg.ion_transmission_enabled):
             raise ValueError("SFO fixed-repeat front requires geometric ion visibility without the older attenuation law")

@@ -241,6 +241,9 @@ def payload_to_trench_run(payload: Dict[str, Any]) -> Tuple[TrenchDepoConfig, Tr
             if not isinstance(value, (list, tuple)):
                 raise ValueError("Invalid replay payload: initial_voids must be a list.")
             values[name] = tuple(tuple(_load_points(list(poly), min_count=3)) for poly in value)
+        elif name == "empirical_response":
+            from .calibrated_response import load_parameters
+            values[name] = None if value is None else asdict(load_parameters(value))
         elif isinstance(default, bool):
             if not isinstance(value, (bool, int)) or value not in (False, True, 0, 1):
                 raise ValueError(f"Invalid replay payload: {name} must be a boolean.")

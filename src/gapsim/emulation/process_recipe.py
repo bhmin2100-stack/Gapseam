@@ -1,6 +1,6 @@
 """ALD/CVD recipe execution with physical units separate from solver steps.
 
-Three versioned models share one recipe interface. The calibrated legacy model
+Versioned models share one recipe interface. The calibrated legacy model
 replays historical SFO3.1; the ideal conformal model is a uniform-growth limit;
 the transport model adds collisionless neutral supply and ALD site saturation.
 All are feature-scale effective models, not reactor/plasma chemistry solvers.
@@ -22,7 +22,7 @@ from gapsim.engine.surface_kinetics import (
     adsorption_coverage, build_neutral_kernel, sputtered_redeposition,
 )
 
-RECIPE_MODELS = ('legacy_calibrated_v1', 'sfo310_calibrated_v1', 'ideal_conformal_v1', 'physical_transport_v1')
+RECIPE_MODELS = ('legacy_calibrated_v1', 'sfo310_calibrated_v1', 'calibrated_response_v1', 'ideal_conformal_v1', 'physical_transport_v1')
 
 
 def apply_initial_voids(state,voids):
@@ -91,8 +91,10 @@ def dispatch_recipe(config, *, progress_cb=None, detail_cb=None, cancel_check=No
         raise ValueError('growth_basis must be gross or net_planar')
     if config.recipe_model == 'sfo310_calibrated_v1' and config.process_type != 'ald':
         raise ValueError('SFO3.10 is calibrated for ALD only')
+    if config.recipe_model == 'calibrated_response_v1' and config.process_type != 'ald':
+        raise ValueError('Explicit calibrated response is currently validated for ALD only')
     dose=recipe_nominal_dose(config)
-    if config.recipe_model not in ('legacy_calibrated_v1', 'sfo310_calibrated_v1'):
+    if config.recipe_model not in ('legacy_calibrated_v1', 'sfo310_calibrated_v1', 'calibrated_response_v1'):
         return run_physical_recipe(config,progress_cb=progress_cb,detail_cb=detail_cb,cancel_check=cancel_check)
     if config.process_type == 'ald' and config.growth_basis == 'gross':
         return None
@@ -112,8 +114,8 @@ def dispatch_recipe(config, *, progress_cb=None, detail_cb=None, cancel_check=No
     if config.growth_basis == 'net_planar':
         inner=replace(inner,angstrom_per_cycle=(inner.angstrom_per_cycle+_planar_legacy_etch(inner))
                       /_planar_legacy_growth_ratio(inner))
-    if config.recipe_model == 'sfo310_calibrated_v1':
-        from .sfo310_model import nominal_gpc
+    if config.recipe_model in ('sfo310_calibrated_v1', 'calibrated_response_v1'):
+        from .calibrated_response import nominal_gpc
         token = nominal_gpc.set(float(config.angstrom_per_cycle))
         try:
             result=run_trench_depo(inner,progress_cb=progress_cb,detail_cb=detail_cb,cancel_check=cancel_check)
