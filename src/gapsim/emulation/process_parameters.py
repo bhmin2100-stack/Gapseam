@@ -58,7 +58,7 @@ class ProcessPageStack(QWidget):
 
 
 class ProcessParameterPanel(QWidget):
-    TITLES = ('1  Conformal depo', '2  Typical CVD', '3  Etch + redeposition', '4  Inhibition')
+    TITLES = ('실행 조건', '성장·수송', '식각·재부착', '억제', '보정 응답', '계산 정확도')
 
     def __init__(self,w,base_group,parent_layout):
         super().__init__()

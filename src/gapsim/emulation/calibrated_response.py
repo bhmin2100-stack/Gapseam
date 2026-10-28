@@ -2,7 +2,7 @@
 
 This parameterizes the existing calibration algebra without claiming a new
 physical mechanism. In particular closed-void filling remains empirical.
-Evaluation candidate: the desktop parameter editor does not yet expose this.
+The same coefficients are editable for every calibrated recipe.
 """
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, fields, replace
@@ -50,11 +50,21 @@ class ResponseParameters:
     fill_peak2_gain: float = .65
     include_new_void_budget: bool = True
     fill_order: str = 'deep_first'
+    har_enabled: bool = False
+    har_start_ar: float = 7.
+    har_end_ar: float = 10.
+    har_growth_floor: float = 7.
+    har_depth_power: float = .9
+    har_upper_center_cd: float = 1.1
+    har_upper_halfwidth_cd: float = .7
+    har_upper_gain: float = 1.4
+    har_fill_extra: float = .25
+    har_fill_rate_gain: float = 1.
 
 
 def load_parameters(value):
     if isinstance(value, ResponseParameters):
-        return value
+        value = asdict(value)
     if value is None:
         return ResponseParameters()
     if not isinstance(value, dict):
@@ -79,7 +89,8 @@ def load_parameters(value):
     if p.fill_order not in ('deep_first', 'uniform'):
         raise ValueError('Unsupported fill order')
     for name in ('aspect_width','dose_width_a','deep_halfwidth_cd','upper_halfwidth_cd',
-                 'relief_halfwidth_cd','fill_transition_width_nm','fill_peak1_width_nm','fill_peak2_width_nm'):
+                 'relief_halfwidth_cd','fill_transition_width_nm','fill_peak1_width_nm','fill_peak2_width_nm',
+                 'har_upper_halfwidth_cd', 'har_depth_power'):
         if getattr(p,name) <= 0:
             raise ValueError(f'{name} must be positive')
     for name in ('static_aspect_weight','fill_base','fill_shallow','fill_deep'):
@@ -87,6 +98,11 @@ def load_parameters(value):
             raise ValueError(f'{name} must be in [0, 1]')
     if not 0 <= p.dose_start_a <= p.dose_end_a:
         raise ValueError('Dose transition order must be nonnegative and increasing')
+    if not 0 <= p.har_start_ar < p.har_end_ar:
+        raise ValueError('Aspect transition must be nonnegative and increasing')
+    for name in ('har_growth_floor', 'har_upper_gain', 'har_fill_extra', 'har_fill_rate_gain'):
+        if getattr(p, name) < 0:
+            raise ValueError(f'{name} must be nonnegative')
     return p
 
 
@@ -103,6 +119,14 @@ def parameters(cfg):
 
 def _surface_y(state, cfg, p):
     return max(y for _,y in (cfg.points if p.depth_reference=='initial_top' else state.surface.points))
+
+
+def aspect_extension_weight(cfg, p):
+    if not p.har_enabled:
+        return 0.
+    aspect = float(cfg.deposition_feature_depth_a) / float(cfg.deposition_feature_width_a)
+    t = max(0., min(1., (aspect-p.har_start_ar)/(p.har_end_ar-p.har_start_ar)))
+    return t*t*(3.-2.*t)
 
 
 def growth_response(state, cfg, values, *, cycle_index):
@@ -140,7 +164,22 @@ def growth_response(state, cfg, values, *, cycle_index):
         relief=(1-q*q)**2 if abs(q)<1 else 0.
         adjustment-=(1-weight)*p.relief_gain*relief
         out.append(float(ratio)*max(0.,1+adjustment))
-    return out
+    factor = aspect_extension_weight(cfg, p)
+    if factor == 0.:
+        return out
+    result = []
+    field_ratio = out[0]
+    feature_depth = float(cfg.deposition_feature_depth_a)
+    if feature_depth <= 0:
+        raise ValueError('Response reference depth must be positive')
+    for value, (_, y) in zip(out, pts):
+        depth_a = max(0., surface-y)
+        z = max(0., min(1., depth_a/feature_depth))
+        u = (depth_a/width-p.har_upper_center_cd)/p.har_upper_halfwidth_cd
+        bump = (1-u*u)**2 if abs(u)<1 else 0.
+        candidate = max(value, field_ratio*p.har_growth_floor*z**p.har_depth_power)*(1+p.har_upper_gain*bump)
+        result.append(candidate if factor == 1. else value+factor*(candidate-value))
+    return result
 
 
 def fill_fraction(depth_nm, p=None):
@@ -160,6 +199,10 @@ def apply_post_closure(state,cfg,*,nominal_depo_a,cycle_index,base_fill):
     p=parameters(cfg)
     if not p.closure_enabled:
         return base_fill(state,cfg,nominal_depo_a=nominal_depo_a,cycle_index=cycle_index)
+    factor = aspect_extension_weight(cfg, p)
+    def allowed_fraction(depth_nm):
+        original = fill_fraction(depth_nm, p)
+        return min(1., original+factor*p.har_fill_extra) if factor else original
     voids=engine.OffsetBoolean.collect_void_air(state)
     previous=state.meta.get('_research_previous_voids',[])
     if p.include_new_void_budget and state.meta.get('depth_closure_detected',False) and voids:
@@ -183,13 +226,13 @@ def apply_post_closure(state,cfg,*,nominal_depo_a,cycle_index,base_fill):
             area_a2=max(0.,area_i2)/(state.scale**2)
             if area_a2<=1.:continue
             depth_nm=max(0.,(surface_y-max(y/state.scale for _,y in region))/10.)
-            state.meta['depth_post_closure_allowed_fill_area_a2']+=area_a2*fill_fraction(depth_nm,p)
+            state.meta['depth_post_closure_allowed_fill_area_a2']+=area_a2*allowed_fraction(depth_nm)
     use=cfg
     if not state.meta.get('depth_closure_detected',False) and voids:
         surface_y=_surface_y(state,cfg,p)
         top_y=max(y/state.scale for v in voids for _,y in v)
         depth_nm=max(0.,(surface_y-top_y)/10.)
-        use=replace(cfg,deposition_post_closure_fill_pct_line=fill_fraction(depth_nm,p))
+        use=replace(cfg,deposition_post_closure_fill_pct_line=allowed_fraction(depth_nm))
     def deep_first(state,voids_i,*,target_fill_area_a2):
         remaining=max(0.,float(target_fill_area_a2));filled=0.
         for void in sorted(voids_i,key=lambda path:max(y for _,y in path)):
@@ -198,7 +241,8 @@ def apply_post_closure(state,cfg,*,nominal_depo_a,cycle_index,base_fill):
             if amount>remaining+1e-6:raise RuntimeError('Empirical fill exceeded its area budget')
             filled+=amount;remaining=max(0.,remaining-amount)
         return filled
-    result=base_fill(state,use,nominal_depo_a=nominal_depo_a,cycle_index=cycle_index,
+    fill_dose = nominal_depo_a*(1.+factor*p.har_fill_rate_gain) if factor else nominal_depo_a
+    result=base_fill(state,use,nominal_depo_a=fill_dose,cycle_index=cycle_index,
                      area_fill=deep_first if p.fill_order=='deep_first' else None)
     state.meta['_research_previous_voids']=engine.OffsetBoolean.collect_void_air(state)
     return result

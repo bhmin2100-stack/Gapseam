@@ -145,6 +145,17 @@ def install_extended_help(owner,manager=None):
     for button in getattr(owner, 'workflow_buttons', []):
         manager.bind(button,spec('작업 단계',button.text()+' 화면으로 이동합니다.',
                                 '현재 화면','선택한 화면','display','단계 이동만으로 입력 조건이나 결과를 바꾸지 않습니다.'))
+    from .response_ui import SECTIONS
+    for _,rows in SECTIONS:
+        for key,title,meaning in rows:
+            control=getattr(owner,'response_controls',{}).get(key)
+            if control is not None:
+                manager.bind(control,spec(title,meaning,'해당 계수 또는 선택 변경','변경된 응답식으로 다음 실행에 적용','display',
+                    '형상 보정용 경험식입니다. 계수의 영향은 깊이·증착량·구조 및 다른 응답과 함께 결정됩니다.'))
+    residual=getattr(owner,'cmb_residual_distribution',None)
+    if residual is not None:
+        manager.bind(residual,spec('충전 분포','폐쇄 후 남은 공간의 충전 예산을 깊이별로 배분하는 경험식입니다.',
+            '폐쇄점부터 감쇠','폐쇄점 아래 균일','display','외부 공급이 검증된 재부착 물리가 아닙니다.'))
     for widget in owner.findChildren(QWidget):
         if manager.bubble.isAncestorOf(widget):continue
         if isinstance(widget,QGroupBox) and widget.isCheckable():

@@ -89,13 +89,14 @@ def test_ui_roundtrip(tmp_path, monkeypatch):
         w=TrenchDepoWindow()
     try:
         w.load_sfo31_reference()
-        actual=asdict(w.current_config());expected=asdict(verified_sfo31_config())
+        from gapsim.emulation.response_ui import normalized_values
+        actual=asdict(w.current_config());expected=normalized_values(asdict(verified_sfo31_config()))
         ignored={'points','initial_voids','inhibition_process_model'}
         diffs={k:(expected[k],actual[k]) for k in expected if k not in ignored and expected[k]!=actual[k] and not (isinstance(expected[k],float) and isinstance(actual[k],float) and abs(expected[k]-actual[k])<1e-12)}
         assert not diffs, diffs
         assert actual['inhibition_process_model']=='ald'
         summary=w._format_result_parameters(w.current_config(),None)
-        assert 'SFO3.1 동일 반복' in summary
+        assert '공통 응답 · 매 cycle 동일 계산식' in summary
         assert '누적 기준량 (기준면 순성장): 585.2 A' in summary
         np.testing.assert_allclose(actual['points'],expected['points'],atol=1e-10,rtol=0)
         old=w._preview_cache_key(w.current_config())

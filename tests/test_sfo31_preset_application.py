@@ -13,7 +13,8 @@ def test_apply_all_process_fields_and_edit_cycle(window):
     assert window.chk_preset_calculation_settings.isChecked()
     assert not window.chk_preset_run_defaults.isChecked()
     assert not hasattr(window, 'btn_load_sfo31_reference')
-    expected = parameter_preset_application_values(record, before, include_calculation_settings=True)
+    from gapsim.emulation.response_ui import normalized_values
+    expected = normalized_values(parameter_preset_application_values(record, before, include_calculation_settings=True))
     window.cmb_parameter_preset.setCurrentIndex(window.cmb_parameter_preset.findData('SFO3.1'))
     window.btn_apply_parameter_preset.click()
     actual = asdict(window.current_config())
@@ -137,7 +138,7 @@ def test_sfo310_builtin_preserves_geometry_and_legacy_preset(window):
     window.btn_apply_parameter_preset.click()
     cfg = window.current_config()
     expected = sfo310_config()
-    assert cfg.recipe_model == 'sfo310_calibrated_v1'
+    assert cfg.recipe_model == 'calibrated_response_v1'
     assert cfg.deposition_residual_fill_distribution == 'uniform_below_closure'
     assert cfg.angstrom_per_cycle == expected.angstrom_per_cycle
     assert cfg.sputter_strength_a_per_cycle == pytest.approx(expected.sputter_strength_a_per_cycle, abs=1e-12)
@@ -148,7 +149,7 @@ def test_sfo310_builtin_preserves_geometry_and_legacy_preset(window):
     assert 'SFO3.1 동일 반복' not in window.lbl_parameter_preset_active.text()
     window.cmb_parameter_preset.setCurrentIndex(window.cmb_parameter_preset.findData('SFO3.1'))
     window.btn_apply_parameter_preset.click()
-    assert window.current_config().recipe_model == 'legacy_calibrated_v1'
+    assert window.current_config().recipe_model == 'calibrated_response_v1'
 
 
 def test_sfo310_user_copy_is_separate_and_replayable(window):
@@ -163,6 +164,6 @@ def test_sfo310_user_copy_is_separate_and_replayable(window):
     window.spin_angstrom_per_cycle.setValue(3.0)
     window.btn_apply_parameter_preset.click()
     cfg = window.current_config()
-    assert cfg.recipe_model == 'sfo310_calibrated_v1'
+    assert cfg.recipe_model == 'calibrated_response_v1'
     assert cfg.deposition_residual_fill_distribution == 'uniform_below_closure'
     assert cfg.angstrom_per_cycle == 1.5

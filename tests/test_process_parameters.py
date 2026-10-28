@@ -95,7 +95,7 @@ def window(tmp_path,monkeypatch):
 
 def test_four_group_navigation_and_dependencies(window):
     p=window.process_parameter_panel
-    assert len(p.buttons)==4
+    assert len(p.buttons)==6
     for i,button in enumerate(p.buttons):
         QTest.mouseClick(button,Qt.LeftButton)
         assert p.stack.currentIndex()==i and button.isChecked()

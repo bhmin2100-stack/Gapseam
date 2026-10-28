@@ -41,7 +41,7 @@ def test_single_sfo_preset_applies_without_changing_geometry(window):
     assert window.windowTitle() == 'GFE'
     points=window._current_geometry_points()
     cycles=window.spin_cycles.value()
-    assert window.cmb_parameter_preset.count()==2
+    assert window.cmb_parameter_preset.count()==3
     assert window.cmb_parameter_preset.findData('SFO3.10') >= 0
     assert window.cmb_parameter_preset.currentText()=='SFO3.1'
     assert not hasattr(window,'cmb_incident_preset')
@@ -51,7 +51,7 @@ def test_single_sfo_preset_applies_without_changing_geometry(window):
     assert not window.btn_split_options.isChecked()
     cfg=window.current_config()
     assert cfg.cycles==cycles and cfg.angstrom_per_cycle==.56
-    assert cfg.process_type=='ald' and cfg.recipe_model=='legacy_calibrated_v1'
+    assert cfg.process_type=='ald' and cfg.recipe_model=='calibrated_response_v1'
     assert cfg.redepo_incident_los_enabled
     from gapsim.emulation.sfo31_verified import verified_sfo31_config
     expected=verified_sfo31_config()
@@ -109,7 +109,7 @@ def test_actual_ui_run_and_result_json_roundtrip(window,tmp_path):
     window.load_replay_json(path)
     assert window.current_config().redepo_incident_los_enabled
     assert window._result.final_profile==result.final_profile
-    assert '입사 이온 가림 연구 모델' in window.edit_result_parameters.toPlainText()
+    assert '공통 보정 응답' in window.edit_result_parameters.toPlainText()
 
 
 def test_source_controls_gated_and_rays_odd(window):

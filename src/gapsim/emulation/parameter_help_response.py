@@ -114,7 +114,7 @@ def growth_response(points, c):
 
 
 def los_active(c):
-    if getattr(c, 'recipe_model', 'legacy_calibrated_v1') not in ('legacy_calibrated_v1', 'sfo310_calibrated_v1'):
+    if getattr(c, 'recipe_model', 'legacy_calibrated_v1') not in ('legacy_calibrated_v1', 'sfo310_calibrated_v1', 'calibrated_response_v1'):
         return c.sputter_enabled and c.sputter_strength_a_per_cycle > 0
     return (c.sputter_enabled and c.sputter_strength_a_per_cycle > 0
             and c.redepo_enabled and c.redepo_incident_los_enabled)
@@ -134,7 +134,9 @@ def application_note(key, c):
     """Semantic gates: a collapsed/disabled editor is not a disabled process."""
     etch = c.sputter_enabled and c.sputter_strength_a_per_cycle > 0
     model = getattr(c, 'recipe_model', 'legacy_calibrated_v1')
-    legacy = model in ('legacy_calibrated_v1', 'sfo310_calibrated_v1')
+    legacy = model in ('legacy_calibrated_v1', 'sfo310_calibrated_v1', 'calibrated_response_v1')
+    from .calibrated_response import parameters
+    response = parameters(c)
     process = getattr(c, 'process_type', 'ald')
     if key in ('spin_cycles', 'spin_angstrom_per_cycle', 'spin_ald_exposure'):
         if process != 'ald':
@@ -177,8 +179,8 @@ def application_note(key, c):
     if key.startswith('spin_sputter_'):
         return '적용 조건: 식각 ON (식각량·수율이 0이면 제거 없음)' if c.sputter_enabled else '현재 미적용: 식각 OFF'
     if key.startswith(('spin_depth_post_', 'spin_depth_line_open', 'spin_depth_residual')):
-        if model == 'sfo310_calibrated_v1' and key.startswith(('spin_depth_post_', 'spin_depth_line_open')):
-            return 'SFO3.10은 폐쇄 깊이에 따른 고정 보정식을 사용하며 이 값은 충전 한도에 적용되지 않습니다.'
+        if response.closure_enabled and key.startswith(('spin_depth_post_', 'spin_depth_line_open')):
+            return '깊이별 충전 응답이 켜져 있습니다. Trench 충전 한도는 보정 응답의 깊이별 비율이 정합니다.'
         if c.cvd_enabled or not (c.deposition_depth_enabled or c.inhibition_enabled) or c.angstrom_per_cycle <= 0:
             return '현재 미적용: CVD OFF · 기존 감쇠/억제 ON · 증착량 > 0 필요'
         return '실제 폐공간 생성 후에만 적용 · 아래는 채움 예산 비교'
@@ -188,8 +190,8 @@ def application_note(key, c):
         if key == 'spin_depth_feature_length' and c.deposition_feature_type != 'line':
             return '현재 미적용: Hole은 Line 기준 길이를 사용하지 않음'
         if key == 'spin_depth_feature_depth':
-            if model == 'sfo310_calibrated_v1':
-                return '현재 적용: SFO3.10의 기준 깊이 / 입구 폭 비율'
+            if response.growth_enabled:
+                return '현재 적용: 보정 응답의 기준 깊이 / 입구 폭 비율'
             return '현재 적용: CVD의 바닥 성장률 기준 깊이' if c.cvd_enabled and c.angstrom_per_cycle > 0 else '현재 CVD 기준 깊이 미적용 (CVD OFF 또는 증착량 0)'
         active = c.angstrom_per_cycle > 0 and (
             c.deposition_depth_enabled and not c.cvd_enabled or c.inhibition_enabled or

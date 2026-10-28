@@ -2,7 +2,8 @@
 
 UI category is deliberately independent of preset application policy: moving
 calibration smoothing to Numerical must not make it optional on preset load.
-The name is descriptive only, never an engine switch. No application UI yet.
+The name is descriptive only, never an engine switch. The desktop editor uses
+the same explicit response block and preserves old records on read.
 """
 from dataclasses import asdict
 from copy import deepcopy

@@ -7,6 +7,9 @@ from __future__ import annotations
 
 from PySide6.QtCore import QSignalBlocker
 from PySide6.QtWidgets import QCheckBox, QComboBox, QDoubleSpinBox, QGridLayout, QGroupBox, QLabel, QPushButton, QSpinBox, QWidget
+from .calibrated_response import MODEL
+from .response_ui import (init_response_controls, response_values, apply_response_values,
+                          normalized_values, install_response_layout, sync_response_layout)
 
 
 RECIPE_WIDGETS = {
@@ -29,6 +32,7 @@ RECIPE_WIDGETS = {
 
 
 def init_recipe_controls(w):
+    init_response_controls(w)
     def combo(name, items):
         control = QComboBox()
         control.setObjectName(name)
@@ -49,10 +53,11 @@ def init_recipe_controls(w):
 
     combo("cmb_process_type", [("ALD", "ald"), ("CVD", "cvd")])
     combo("cmb_recipe_model", [("Conformal · 균일 증착", "ideal_conformal_v1"),
-        ("수송·표면 반응", "physical_transport_v1"), ("기존 보정 모델", "legacy_calibrated_v1"),
-        ("SFO3.10 보정 모델", "sfo310_calibrated_v1")])
+        ("수송·표면 반응", "physical_transport_v1"), ("보정 응답 · ALD", MODEL),
+        ("이전 CVD 보정 · 호환", "legacy_calibrated_v1")])
     combo("cmb_growth_basis", [("기준면 순성장량", "net_planar"), ("식각 전 증착량", "gross")])
-    combo("cmb_front_scheme", [("기존 계산", "legacy"), ("SFO3.1 동일 반복", "angular_godunov_v1")])
+    combo("cmb_front_scheme", [("기본 이동", "legacy"), ("각도 응답 · 동일 반복", "angular_godunov_v1")])
+    combo("cmb_residual_distribution", [("폐쇄점부터 감쇠", "exponential_from_closure"), ("폐쇄점 아래 균일", "uniform_below_closure")])
     combo("cmb_inhibition_process_model", [("ALD", "ald"), ("복합", "hybrid"), ("PEALD", "peald")])
     spin("spin_ion_growth_fraction", 0, 0, 1, "", 15)
     spin("spin_redepo_max_distance", 1800, 1, 1e7, " Å", 15)
@@ -83,13 +88,19 @@ def recipe_values(w):
     # A typed odd value can reach Run before editingFinished on keyboard shortcuts.
     rays = int(values.get("transport_ray_count", 32))
     values["transport_ray_count"] = min(256, rays + rays % 2)
-    if values.get("recipe_model") not in ("legacy_calibrated_v1", "sfo310_calibrated_v1") or values.get("process_type") != "ald":
+    if values.get("recipe_model") not in ("legacy_calibrated_v1", "sfo310_calibrated_v1", MODEL) or values.get("process_type") != "ald":
         values["front_scheme"] = "legacy"
         values["ion_growth_fraction"] = 0.
+    values['empirical_response'] = response_values(w) if values.get('recipe_model')==MODEL else None
+    values['deposition_residual_fill_distribution'] = w.cmb_residual_distribution.currentData()
     return values
 
 
 def apply_recipe_values(w, values):
+    values = normalized_values(values)
+    apply_response_values(w, values)
+    distribution = values.get('deposition_residual_fill_distribution', 'exponential_from_closure')
+    w.cmb_residual_distribution.setCurrentIndex(w.cmb_residual_distribution.findData(distribution))
     # Missing fields mean an older calibrated run, never the current UI mode.
     defaults = {"process_type": "ald", "recipe_model": "legacy_calibrated_v1", "growth_basis": "gross",
                 "front_scheme": "legacy", "ion_growth_fraction": 0., "redepo_max_distance_a": 1800.,
@@ -156,10 +167,10 @@ def install_recipe_layout(w):
     w.btn_apply_parameter_preset.setText("파라미터 적용")
     w.btn_apply_parameter_preset.setToolTip("선택한 공정 파라미터를 적용합니다. 구조는 유지하며, 적용 후 Cycle 수를 직접 바꿀 수 있습니다.")
     w.lbl_parameter_preset_active.setWordWrap(True)
-    w.preset_usage_note = QLabel("SFO3.1과 SFO3.10은 프로그램에 포함된 공정 레시피입니다.\n구조: 1 구조에서 별도 선택 · 적용 후 Cycle 수 직접 조절\n저장된 cycle·시간 불러오기를 끄면 현재 횟수·시간을 유지합니다.")
+    w.preset_usage_note = QLabel("프리셋은 아래 공통 파라미터에 값을 채웁니다. 수정 후 다른 이름으로 저장할 수 있습니다.\n구조는 1 구조에서 별도 선택 · Cycle 수는 적용 후 조절 가능합니다.")
     w.preset_usage_note.setWordWrap(True)
     w.parameter_preset_group.layout().addWidget(w.preset_usage_note)
-    p.buttons[0].setText("공정·계산")
+    p.buttons[0].setText("실행 조건")
     p.buttons[1].setText("성장·수송")
     p.buttons[2].setText("식각·재부착")
     p.buttons[3].setText("억제")
@@ -177,7 +188,7 @@ def install_recipe_layout(w):
     p.layouts[0].insertWidget(1, w.recipe_basis_group)
     p.recipe_note = p.note("")
     p.layouts[0].insertWidget(2, p.recipe_note)
-    w.fixed_repeat_group, _ = _group("SFO3.1 반복 계산", [
+    w.fixed_repeat_group, _ = _group("표면 이동 계산", [
         ("front", "계산 방식", w.cmb_front_scheme),
         ("growth", "이온 성장 기여율", w.spin_ion_growth_fraction),
     ])
@@ -221,6 +232,8 @@ def install_recipe_layout(w):
     p.conformal_button.setToolTip("균일 증착을 선택하고 식각·재부착·억제를 끕니다. 공정 종류와 GPC/D/R, 구조는 유지합니다.")
     # Reparent the numerical ion resolution once, next to the other solver inputs.
     w.recipe_numerical_fold.layout().itemAt(0).widget().layout().addWidget(p.advanced_folds["rays"])
+    install_response_layout(w)
+    w.cmb_residual_distribution.currentIndexChanged.connect(lambda *_: _changed(w))
     for name in RECIPE_WIDGETS.values():
         widget = getattr(w, name)
         signal = widget.currentIndexChanged if isinstance(widget, QComboBox) else widget.valueChanged
@@ -236,7 +249,7 @@ def recipe_split_options(w, legacy_options):
     model = w.cmb_recipe_model.currentData()
     amount = [("GPC (Å/cycle)", "angstrom_per_cycle"), ("Cycle 수", "cycles")] if ald else [
         ("증착속도 D/R (Å/s)", "cvd_rate_a_per_s"), ("증착시간 (s)", "cvd_duration_s")]
-    if model in ("legacy_calibrated_v1", "sfo310_calibrated_v1"):
+    if model in ("legacy_calibrated_v1", "sfo310_calibrated_v1", MODEL):
         obsolete = {"sputter_peak_pct", "angstrom_per_cycle", "cycles"}
         extra = [("이온 성장 기여율", "ion_growth_fraction")] if w.cmb_front_scheme.currentData() != "legacy" else []
         return amount + extra + [(label, key) for label, key in legacy_options if key not in obsolete]
@@ -271,9 +284,9 @@ def sync_recipe_layout(w):
         return
     ald = w.cmb_process_type.currentData() == "ald"
     model = w.cmb_recipe_model.currentData()
-    legacy = model in ("legacy_calibrated_v1", "sfo310_calibrated_v1")
+    legacy = model in ("legacy_calibrated_v1", "sfo310_calibrated_v1", MODEL)
     w.fixed_repeat_group.setVisible(legacy and ald)
-    w.recipe_numerical_fold.setTitle(("계산 · SFO3.10 설정" if model == "sfo310_calibrated_v1" else "계산 · SFO3.1 설정") if legacy and ald else "계산 정확도")
+    w.recipe_numerical_fold.setTitle("계산 정확도")
     w.redepo_distance_group.setVisible(legacy)
     w.inhibition_law_group.setVisible(legacy)
     transport = model == "physical_transport_v1"
@@ -294,7 +307,7 @@ def sync_recipe_layout(w):
     p.recipe_note.setText(
         "SFO3.10은 증착량과 구조에 따라 성장 응답이 달라지고 폐쇄 후 잔류 충전을 허용하는 경험식입니다. 물리적 검증과 다른 구조의 예측력은 별도입니다."
         if model == "sfo310_calibrated_v1" else
-        "형상 보정용 유효 모델입니다. SFO3.1 동일 반복은 매 cycle 같은 계수를 사용합니다. GPC 기준은 위의 순성장/식각 전 선택을 따릅니다. 실제 재료 물성의 독립 검증은 별도입니다."
+        "공통 보정 모델입니다. 매 cycle 같은 식을 적용하며 추가 응답은 보정 응답에서 조절합니다. 폐쇄 후 충전은 경험식입니다. 실제 물성 및 다른 구조의 예측력은 별도 검증이 필요합니다."
         if legacy else
         "기준면 순성장량은 평탄면의 제거량을 반영해 보정합니다. 트랜치의 국소 두께와 재부착은 실제 구조에서 따로 계산합니다."
     )
@@ -332,6 +345,12 @@ def sync_recipe_layout(w):
     p.dose_label.setText(f"{basis} 증착량 {amount:g} Å ({amount/10:g} nm) · 트랜치 국소 두께는 결과에서 확인")
     p.summary.setText(f"{'ALD' if ald else 'CVD'} · {w.cmb_recipe_model.currentText()} · 식각 {'ON' if etch else 'OFF'} / 재부착 {'ON' if etch and w.chk_redepo.isChecked() else 'OFF'} / 억제 {'ON' if inh else 'OFF'}")
     w.process_geometry_fold.setTitle("기존 보정 모델의 기준 형상")
+    if hasattr(w, 'response_folds'):
+        sync_response_layout(w)
+    # A calibrated ALD model cannot be run as CVD. Select the supported default
+    # on a process change, while keeping the entered coefficients available.
+    if not ald and model == MODEL:
+        w.cmb_recipe_model.setCurrentIndex(w.cmb_recipe_model.findData('ideal_conformal_v1'))
     for label in w.incident_model_group.findChildren(QLabel):
         if "기존 이온 감쇠" in label.text():
             label.setText("이온 도달량은 현재 형상의 가림으로 계산합니다. 재부착 OFF에서도 식각 가림을 유지합니다.")
@@ -342,13 +361,13 @@ def recipe_result_summary(config, result=None):
     ald = config.process_type == "ald"
     amount = config.cycles*config.angstrom_per_cycle if ald else config.cvd_rate_a_per_s*config.cvd_duration_s
     model_name = {"ideal_conformal_v1":"Conformal · 균일 증착", "physical_transport_v1":"수송·표면 반응",
-                  "legacy_calibrated_v1":"기존 보정 모델", "sfo310_calibrated_v1":"SFO3.10 보정 모델"}.get(config.recipe_model, config.recipe_model)
+                  "legacy_calibrated_v1":"기존 보정 모델", "sfo310_calibrated_v1":"SFO3.10 보정 모델", MODEL:"공통 보정 응답"}.get(config.recipe_model, config.recipe_model)
     basis_name = "기준면 순성장량" if config.growth_basis == "net_planar" else "식각 전 증착량"
     lines = [f"공정: {'ALD' if ald else 'CVD'}", f"성장 모델: {model_name}",
              f"GPC {config.angstrom_per_cycle:g} Å/cycle × {config.cycles} cycle" if ald else
              f"증착속도 D/R {config.cvd_rate_a_per_s:g} Å/s × {config.cvd_duration_s:g} s",
              f"기준 증착량: {amount:g} Å", f"증착량 기준: {basis_name}"]
-    if config.recipe_model not in ("legacy_calibrated_v1", "sfo310_calibrated_v1"):
+    if config.recipe_model not in ("legacy_calibrated_v1", "sfo310_calibrated_v1", MODEL):
         lines += [f"표면 반응확률: {config.precursor_sticking:g}" if config.recipe_model == "physical_transport_v1" else "열린 표면 균일 성장",
                   f"식각: {'ON' if config.sputter_enabled else 'OFF'} · 재부착: {'ON' if config.redepo_enabled else 'OFF'} · 억제: {'ON' if config.inhibition_enabled else 'OFF'}",
                   f"계산 간격: 최대 {config.numerical_step_a:g} Å / 표면 점 {config.reparam_ds_a:g} Å",
@@ -364,7 +383,7 @@ def recipe_result_summary(config, result=None):
         if config.inhibition_enabled:
             lines.append(f"억제제 반응확률: {config.inhibitor_sticking:g} · 노출량: {config.inhibitor_exposure:g} (무차원)")
     if config.front_scheme == "angular_godunov_v1":
-        lines += [("SFO3.10 · 증착량별 응답 및 폐쇄 후 충전 경험식" if config.recipe_model == "sfo310_calibrated_v1" else "SFO3.1 동일 반복 · 종료 후 추가 처리 없음"),
+        lines += [("공통 응답 · 매 cycle 동일 계산식 · 추가 응답은 저장된 파라미터 사용" if config.recipe_model == MODEL else "SFO3.10 · 증착량별 응답 및 폐쇄 후 충전 경험식" if config.recipe_model == "sfo310_calibrated_v1" else "SFO3.1 동일 반복 · 종료 후 추가 처리 없음"),
                   f"이온 성장 기여율: {config.ion_growth_fraction*100:g}%",
                   "형상 보정용 유효 모델 · 실제 물성/다른 구조의 예측력은 별도 검증 필요"]
     if result:

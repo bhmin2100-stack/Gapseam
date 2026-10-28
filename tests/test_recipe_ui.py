@@ -61,7 +61,7 @@ def test_sfo_preset_is_ald_and_preserves_target_geometry_and_runtime(window):
     window.apply_selected_parameter_preset()
     cfg=window.current_config()
     assert tuple(cfg.points)==points
-    assert cfg.process_type=='ald' and cfg.recipe_model=='legacy_calibrated_v1'
+    assert cfg.process_type=='ald' and cfg.recipe_model=='calibrated_response_v1'
     assert cfg.cycles==47 and cfg.cvd_duration_s==123
     assert cfg.angstrom_per_cycle==.56 and cfg.redepo_enabled
     assert cfg.front_scheme=='angular_godunov_v1' and cfg.growth_basis=='net_planar'

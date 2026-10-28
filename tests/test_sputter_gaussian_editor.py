@@ -1695,13 +1695,14 @@ class SputterGaussianEditorTest(unittest.TestCase):
                 window.refresh_structure_library(show_status=False)
 
                 window.export_default_structures_to_library()
-                self.assertEqual(window.cmb_structure_library.count(), 1)
+                from gapsim.emulation.builtin_presets import STRUCTURE_NAMES
+                self.assertEqual(window.cmb_structure_library.count(), 1 + len(STRUCTURE_NAMES))
                 self.assertEqual(
                     [
                         window.cmb_structure_library.itemText(idx)
                         for idx in range(window.cmb_structure_library.count())
                     ],
-                    ["기본 트렌치"],
+                    [*STRUCTURE_NAMES, "기본 트렌치"],
                 )
                 default_idx = window.cmb_structure_library.findData("em00_integrated_depo_etch_depth")
                 self.assertGreaterEqual(default_idx, 0)

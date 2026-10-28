@@ -69,6 +69,8 @@ from gapsim.emulation.result_navigation import DOSE_TOOLTIP, ResultFrameNavigati
 from gapsim.emulation.resolution_dialog import ResolutionDialog, estimate_resolution, POINT_WARNING_THRESHOLD
 from gapsim.emulation.research_registry import MAX_EMULATOR_NUMBER
 from gapsim.emulation.incident_presets import SFO31_PRESET_NAME, ensure_sfo31_preset
+from gapsim.emulation.builtin_presets import RECIPE_NAMES, SAVED_RECIPE_KEYS, STRUCTURE_NAMES, recipe_record, structure_config, structure_values
+from gapsim.emulation.response_ui import normalized_values, remember_precision, exact_config
 from gapsim.emulation.app_icon import gfe_icon, set_taskbar_identity
 from gapsim.emulation.process_parameters import init_cvd_controls, cvd_values, apply_cvd_values, ProcessParameterPanel
 from gapsim.emulation.recipe_ui import (recipe_values, apply_recipe_values,
@@ -4684,6 +4686,11 @@ class TrenchDepoWindow(QMainWindow):
         toolbar.addAction(self.action_check_updates)
         from gapsim.emulation.help_preferences import install_help_settings
         install_help_settings(self, toolbar)
+        from gapsim.build_info import APP_VERSION, BUILD_ID
+        self.version_label = QLabel(f'  GFE {APP_VERSION}  ')
+        self.version_label.setToolTip(f'빌드: {BUILD_ID}')
+        toolbar.addSeparator()
+        toolbar.addWidget(self.version_label)
         self._install_value_control_wheel_guards()
 
         self.btn_run.clicked.connect(self.run_emulation)
@@ -4922,6 +4929,7 @@ class TrenchDepoWindow(QMainWindow):
                 QMessageBox.warning(self, "구조 라이브러리", f"구조 워크북 읽기 실패:\n{exc}")
 
         previous = self._selected_structure_sheet_name()
+        names = list(dict.fromkeys([*STRUCTURE_NAMES, *names]))
         self.cmb_structure_library.blockSignals(True)
         try:
             self.cmb_structure_library.clear()
@@ -4971,7 +4979,7 @@ class TrenchDepoWindow(QMainWindow):
             QMessageBox.information(self, "구조 라이브러리", "선택된 구조 프리셋이 없습니다.")
             return
         try:
-            points = read_structure_points(self._structure_library_path, sheet_name)
+            points = list(structure_config(sheet_name).points) if sheet_name in STRUCTURE_NAMES else read_structure_points(self._structure_library_path, sheet_name)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "구조 라이브러리", f"구조 '{sheet_name}' 불러오기 실패:\n{exc}")
             return
@@ -4981,7 +4989,7 @@ class TrenchDepoWindow(QMainWindow):
         self._record_structure_undo_before_change()
         self._set_structure_points(points, fit=True, preserve_on_emulator_switch=True)
         from gapsim.emulation.sfo31_verified import structure_metadata
-        metadata = structure_metadata(sheet_name, points)
+        metadata = structure_values(sheet_name) if sheet_name in STRUCTURE_NAMES else structure_metadata(sheet_name, points)
         if metadata:
             self._set_combo_data(self.cmb_depth_feature_type, metadata["deposition_feature_type"])
             self.spin_depth_feature_width.setValue(metadata["deposition_feature_width_a"])
@@ -5002,6 +5010,8 @@ class TrenchDepoWindow(QMainWindow):
             or f"structure_{self.active_emulator_number():02d}"
         )
         try:
+            if sheet_name in STRUCTURE_NAMES:
+                sheet_name = sanitize_structure_name(sheet_name[:26] + ' 사용자')
             saved_name = save_structure_points(self._structure_library_path, sheet_name, points)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "구조 라이브러리", f"구조 저장 실패:\n{exc}")
@@ -5017,6 +5027,9 @@ class TrenchDepoWindow(QMainWindow):
 
     def delete_selected_structure_from_library(self, _checked: bool = False) -> None:
         sheet_name = self._selected_structure_sheet_name()
+        if sheet_name in STRUCTURE_NAMES:
+            self.statusBar().showMessage('기본 제공 구조입니다. 수정 후 다른 이름으로 저장할 수 있습니다.', 5000)
+            return
         if not sheet_name:
             QMessageBox.information(self, "구조 라이브러리", "삭제할 구조 프리셋이 없습니다.")
             return
@@ -5230,16 +5243,18 @@ class TrenchDepoWindow(QMainWindow):
         try:
             self.cmb_parameter_preset.clear()
             # Always available, including a fresh, read-only, or damaged library.
-            self.cmb_parameter_preset.addItem(SFO31_PRESET_NAME, SFO31_PRESET_NAME)
-            self.cmb_parameter_preset.addItem(SFO310_NAME, SFO310_NAME)
+            for name in RECIPE_NAMES:
+                self.cmb_parameter_preset.addItem(name, name)
             for name in names:
-                if name in (SFO31_PRESET_NAME, SFO310_NAME):
+                if name in RECIPE_NAMES:
                     try:
-                        same = is_verified_sfo31_process_record(read_parameter_preset(self._parameter_library_path, name), model=name)
+                        record = read_parameter_preset(self._parameter_library_path, name)
+                        expected = recipe_record(name)
+                        same = normalized_values(parameter_preset_application_values(record, structure_config(STRUCTURE_NAMES[0]), include_run_defaults=True, include_calculation_settings=True)) == expected['config']
                     except Exception:
                         same = False
                     if not same:
-                        self.cmb_parameter_preset.addItem(f"{name} (저장본)", SAVED_PRESET_KEY if name == SFO31_PRESET_NAME else SAVED_PRESET_KEY_310)
+                        self.cmb_parameter_preset.addItem(f"{name} (저장본)", SAVED_RECIPE_KEYS[name])
                     continue
                 self.cmb_parameter_preset.addItem(name, name)
             idx = self.cmb_parameter_preset.findData(previous)
@@ -5271,7 +5286,7 @@ class TrenchDepoWindow(QMainWindow):
         if name:
             self.edit_parameter_preset_name.setText(name)
         self.btn_delete_parameter_preset.setEnabled(
-            bool(name) and self.cmb_parameter_preset.currentData() not in (SFO31_PRESET_NAME, "SFO3.10"))
+            bool(name) and self.cmb_parameter_preset.currentData() not in RECIPE_NAMES)
 
     def _update_parameter_preset_active_label(self) -> None:
         active = self._active_parameter_preset_name or "없음"
@@ -5310,7 +5325,7 @@ class TrenchDepoWindow(QMainWindow):
         self.edit_parameter_preset_name.setText(saved_name)
         self.refresh_parameter_presets(show_status=False)
         from gapsim.emulation.sfo31_verified import SAVED_PRESET_KEY, SAVED_PRESET_KEY_310
-        selection = SAVED_PRESET_KEY if saved_name == SFO31_PRESET_NAME else SAVED_PRESET_KEY_310 if saved_name == "SFO3.10" else saved_name
+        selection = SAVED_RECIPE_KEYS[saved_name] if saved_name in RECIPE_NAMES else saved_name
         idx = self.cmb_parameter_preset.findData(selection)
         if idx < 0:
             idx = self.cmb_parameter_preset.findData(saved_name)
@@ -5325,6 +5340,8 @@ class TrenchDepoWindow(QMainWindow):
             combo.setCurrentIndex(idx)
 
     def _apply_parameter_config_values(self, values: Mapping[str, object]) -> None:
+        values = normalized_values(values)
+        self._recipe_exact_cache = {}
         self._enable_recipe_precision()
         apply_recipe_values(self, values)
         supports_sputter = self._active_emulator_supports_sputter()
@@ -5377,7 +5394,7 @@ class TrenchDepoWindow(QMainWindow):
             bool(supports_closure and b("closure_redepo_enabled", self.chk_closure_redepo.isChecked()))
         )
 
-        gain = f("sputter_peak_pct", 100.0) / 100.0 if self.cmb_recipe_model.currentData() in ("legacy_calibrated_v1", "sfo310_calibrated_v1") else 1.0
+        gain = f("sputter_peak_pct", 100.0) / 100.0 if self.cmb_recipe_model.currentData() in ("legacy_calibrated_v1", "sfo310_calibrated_v1", "calibrated_response_v1") else 1.0
         self.spin_sputter_strength.setValue(f("sputter_strength_a_per_cycle", self.spin_sputter_strength.value()) * gain)
         self.spin_sputter_peak_pct.setValue(100.0)
         self.spin_sputter_peak.setValue(f("sputter_peak_angle_deg", self.spin_sputter_peak.value()))
@@ -5482,6 +5499,7 @@ class TrenchDepoWindow(QMainWindow):
         self.sync_etch_control_availability()
         self._populate_split_parameters()
         self._invalidate_result_for_input_change()
+        remember_precision(self, values)
 
     def _enable_recipe_precision(self):
         # Loading must not silently round calibrated coefficients to 0.1/0.01.
@@ -5511,14 +5529,13 @@ class TrenchDepoWindow(QMainWindow):
 
     def apply_selected_parameter_preset(self, _checked: bool = False) -> None:
         name = self._selected_parameter_preset_name()
-        builtin = self.cmb_parameter_preset.currentData() in (SFO31_PRESET_NAME, "SFO3.10")
+        builtin = self.cmb_parameter_preset.currentData() in RECIPE_NAMES
         if not name:
             QMessageBox.information(self, "공정 파라미터 프리셋", "적용할 파라미터 프리셋이 없습니다.")
             return
         try:
             if builtin:
-                from gapsim.emulation.sfo31_verified import verified_sfo31_process_record, sfo310_process_record
-                record = sfo310_process_record() if name == "SFO3.10" else verified_sfo31_process_record()
+                record = recipe_record(name)
             else:
                 record = read_parameter_preset(self._parameter_library_path, name)
         except Exception as exc:  # noqa: BLE001
@@ -5551,7 +5568,7 @@ class TrenchDepoWindow(QMainWindow):
             QMessageBox.warning(self, "공정 파라미터 프리셋", f"파라미터 적용 실패:\n{exc}")
             return
         self._active_parameter_preset_name = self.cmb_parameter_preset.currentText()
-        if name in (SFO31_PRESET_NAME, "SFO3.10"):
+        if name in RECIPE_NAMES:
             self.btn_split_options.setChecked(False)
         self.edit_parameter_preset_name.setText(name)
         self._update_parameter_preset_active_label()
@@ -5560,7 +5577,7 @@ class TrenchDepoWindow(QMainWindow):
             f"현재 {self.spin_cycles.value()} cycle (직접 변경 가능)", 10000)
 
     def delete_selected_parameter_preset(self, _checked: bool = False) -> None:
-        if self.cmb_parameter_preset.currentData() in (SFO31_PRESET_NAME, "SFO3.10"):
+        if self.cmb_parameter_preset.currentData() in RECIPE_NAMES:
             return  # The application-provided recipe is independent of user saves.
         name = self._selected_parameter_preset_name()
         if not name:
@@ -6049,7 +6066,7 @@ class TrenchDepoWindow(QMainWindow):
         next_stage = self._next_depo_stage_index() if has_result else max(2, int(self._continuation_stage_index or 2))
         self.btn_next_depo.setText(f"다음 Depo: {next_stage}차")
         self.btn_next_depo.setEnabled(has_result)
-        if has_result and self._result.meta.get("recipe_model") == "sfo310_calibrated_v1":
+        if has_result and self._result.meta.get("recipe_model") in ("sfo310_calibrated_v1", "calibrated_response_v1"):
             self.btn_next_depo.setToolTip("다음 Depo는 새 공정 단계입니다. SFO3.10의 증착량 응답과 폐쇄 후 충전 이력은 이어지지 않으므로 연속 계산과 결과가 다를 수 있습니다.")
         else:
             self.btn_next_depo.setToolTip("현재 결과의 마지막 profile에서 다음 Depo 차수를 이어서 시작합니다.")
@@ -7782,6 +7799,7 @@ class TrenchDepoWindow(QMainWindow):
             self.process_parameter_panel.sync()
 
     def reset_defaults(self) -> None:
+        self._recipe_exact_cache = {}
         apply_cvd_values(self, {})
         self._clear_continuation_context()
         supports_sputter = self._active_emulator_supports_sputter()
@@ -8017,7 +8035,7 @@ class TrenchDepoWindow(QMainWindow):
         etch_enabled = bool(supports_sputter and self.chk_sputter.isChecked())
         depth_feature_type = str(self.cmb_depth_feature_type.currentData() or "hole")
         depth_feature_length = float(self.spin_depth_feature_length.value())
-        return TrenchDepoConfig(
+        config = TrenchDepoConfig(
             points=self._current_geometry_points(),
             initial_voids=self._initial_voids,
             symmetry_mode="auto" if self.chk_symmetry.isChecked() else "off",
@@ -8119,7 +8137,6 @@ class TrenchDepoWindow(QMainWindow):
             deposition_post_closure_fill_pct_line=float(self.spin_depth_post_fill_line_pct.value()) / 100.0,
             deposition_line_open_path_factor=float(self.spin_depth_line_open_path.value()),
             deposition_residual_fill_decay_length_a=float(self.spin_depth_residual_decay.value()),
-            deposition_residual_fill_distribution=("uniform_below_closure" if self.cmb_recipe_model.currentData() == "sfo310_calibrated_v1" else "exponential_from_closure"),
             deposition_conserve_volume=True,
             inhibition_enabled=bool(
                 supports_inhibition and self.chk_inhibition_deposition.isChecked()
@@ -8133,6 +8150,7 @@ class TrenchDepoWindow(QMainWindow):
             inhibition_peald_recombination_pct=float(self.spin_inhibition_recombination.value()),
             inhibition_smoothing_a=float(self.spin_inhibition_smoothing.value()),
         )
+        return exact_config(self, config)
 
     @staticmethod
     def _fmt_a(value: float) -> str:
@@ -8151,7 +8169,7 @@ class TrenchDepoWindow(QMainWindow):
         config: TrenchDepoConfig,
         result: Optional[TrenchDepoResult],
     ) -> str:
-        if config.recipe_model != "legacy_calibrated_v1":
+        if config.recipe_model not in ("legacy_calibrated_v1", "sfo310_calibrated_v1", "calibrated_response_v1"):
             return recipe_result_summary(config, result)
         meta = dict(result.meta) if result is not None else {}
         number = self.active_emulator_number()
@@ -8299,6 +8317,13 @@ class TrenchDepoWindow(QMainWindow):
                 f"각도 σ: {config.redepo_incident_sigma_deg:g}° / 방향 수: {config.redepo_incident_ray_count}",
                 f"누적 기준량 ({'기준면 순성장' if config.growth_basis == 'net_planar' else '식각 전'}): {config.cycles * config.angstrom_per_cycle:g} A",
                 "기존 경험적 깊이 감쇠 대체 / 실제 LF·이온 에너지 미보정"])
+        if config.recipe_model == 'calibrated_response_v1':
+            from gapsim.emulation.response_ui import SECTIONS
+            from gapsim.emulation.calibrated_response import parameters
+            values=asdict(parameters(config))
+            for title,rows in SECTIONS:
+                lines.extend(['', '['+title+']'])
+                lines.extend(f'{label}: {values[key]}' for key,label,_ in rows)
         return recipe_result_summary(config) + "\n\n" + "\n".join(lines)
 
     def _update_result_parameter_summary(
@@ -9244,7 +9269,8 @@ class TrenchDepoWindow(QMainWindow):
         else:
             replay_emulator = 1
         self.set_active_emulator_number(replay_emulator, run=False)
-        apply_recipe_values(self, {key: getattr(config, key) for key in RECIPE_WIDGETS})
+        self._recipe_exact_cache = {}
+        apply_recipe_values(self, asdict(config))
         apply_cvd_values(self, typical_cvd.config_values(config))
         self._set_structure_points(config.points, preserve_on_emulator_switch=True, initial_voids=config.initial_voids)
         self._clear_structure_undo_stack()
@@ -9324,7 +9350,7 @@ class TrenchDepoWindow(QMainWindow):
         self.spin_inhibition_bottom_boost.setValue(float(config.inhibition_bottom_boost_pct))
         self.spin_inhibition_recombination.setValue(float(config.inhibition_peald_recombination_pct))
         self.spin_inhibition_smoothing.setValue(float(config.inhibition_smoothing_a))
-        gain = config.sputter_peak_pct / 100.0 if config.recipe_model in ("legacy_calibrated_v1", "sfo310_calibrated_v1") else 1.0
+        gain = config.sputter_peak_pct / 100.0 if config.recipe_model in ("legacy_calibrated_v1", "sfo310_calibrated_v1", "calibrated_response_v1") else 1.0
         self.spin_sputter_strength.setValue(float(config.sputter_strength_a_per_cycle) * gain)
         self.spin_sputter_peak_pct.setValue(100.0)
         self.spin_sputter_peak.setValue(float(config.sputter_peak_angle_deg))
@@ -9370,6 +9396,7 @@ class TrenchDepoWindow(QMainWindow):
         self.addonResultApplied.emit(config, result)
         self._set_workflow_step("results")
         viewport = view_state.get("viewport")
+        remember_precision(self, normalized_values(asdict(config)))
         if viewport:
             self._restore_history_viewport(result, viewport)
             QTimer.singleShot(0, lambda: self._restore_history_viewport(result, viewport))

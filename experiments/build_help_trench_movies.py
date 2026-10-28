@@ -29,6 +29,9 @@ def engine_fingerprint():
     recipe_path = ROOT/'src/gapsim/emulation/process_recipe.py'
     if recipe_path.exists():
         paths.append(recipe_path)
+    for name in ('calibrated_response.py','sfo310_model.py'):
+        path=ROOT/'src/gapsim/emulation'/name
+        if path.exists():paths.append(path)
     h = hashlib.sha256()
     for path in paths:
         h.update(str(path.relative_to(ROOT)).replace('\\', '/').encode())

@@ -5,7 +5,7 @@ import pytest
 
 
 def test_toggle_and_original_preset_roundtrip(window):
-    window.process_parameter_panel.select(0)
+    window.process_parameter_panel.select(5)
     assert window.chk_symmetry.isVisible()
     window.chk_symmetry.setChecked(True)
     auto = window.current_config()
