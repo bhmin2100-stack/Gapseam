@@ -125,6 +125,9 @@ from gapsim.emulation.trench_depo_export import (
     DEFAULT_RESULTS_ROOT,
     DEFAULT_RUNS_ROOT,
     export_trench_depo_run,
+    export_trench_depo_gif,
+    gif_frame_indices,
+    GifExportCanceled,
     export_trench_depo_sweep_runs,
     load_trench_depo_run,
     load_trench_depo_history,
@@ -3568,6 +3571,9 @@ class TrenchDepoWindow(QMainWindow):
         self.btn_save_result_json.setToolTip(
             "계산에 사용한 구조·공정 파라미터·전체 결과와 보고 있는 이미지·이동 간격·확대 위치를 하나의 파일로 저장합니다."
         )
+        self.btn_save_gif = QPushButton("GIF 저장…")
+        self.btn_save_gif.setEnabled(False)
+        self.btn_save_gif.setToolTip("이미지 간격을 직접 정해 GIF를 저장합니다. 처음·마지막을 포함해 최대 100장이며 전체 계산 결과는 유지됩니다.")
 
         self.cmb_emulator_default_preset = QComboBox()
         self.cmb_emulator_default_preset.setToolTip("선택한 에뮬레이터의 기본 공정값을 불러옵니다.")
@@ -4568,6 +4574,7 @@ class TrenchDepoWindow(QMainWindow):
         result_save_row = QHBoxLayout()
         result_save_row.setContentsMargins(0, 0, 0, 0)
         result_save_row.addWidget(self.btn_save_result_json)
+        result_save_row.addWidget(self.btn_save_gif)
         result_save_row.addStretch(1)
         result_summary_layout.addLayout(result_save_row)
         self.result_summary_group.setLayout(result_summary_layout)
@@ -4675,6 +4682,7 @@ class TrenchDepoWindow(QMainWindow):
         self.btn_open_json.clicked.connect(self.open_replay_json_dialog)
         self.btn_open_run_dir.clicked.connect(self.open_last_run_dir)
         self.btn_save_result_json.clicked.connect(self.save_current_result_json)
+        self.btn_save_gif.clicked.connect(self.save_current_result_gif)
         self.btn_run_split.clicked.connect(self.run_split_test)
         self.btn_run_compare.clicked.connect(self.run_compare_for_active_emulator)
         self.btn_split_options.toggled.connect(self._on_split_options_toggled)
@@ -8641,34 +8649,32 @@ class TrenchDepoWindow(QMainWindow):
             self.btn_cancel_run.hide()
         run_dir: Optional[Path] = None
         result = self._merge_result_if_continuation(result)
+        self._preview_result_cache[cache_key] = result
+        self._apply_emulation_result(config, result, None, use_preview_cache=bool(use_preview_cache))
+        # Paint the computed result before writing the automatic replay files.
+        QApplication.processEvents()
         if bool(save_artifacts):
             try:
-                self._start_run_progress("run 저장 중")
+                self._start_run_progress("이력 저장 중")
                 run_dir = export_trench_depo_run(
                     config,
                     result,
                     request_note=str(request_note),
                     runs_root=self._runs_root,
+                    include_gif=False,
                 )
+                self._last_run_dir = run_dir.resolve()
+                self._set_run_dir_label(self._last_run_dir)
+                self.btn_open_run_dir.setEnabled(True)
                 self._update_run_progress(1, 1, label="저장")
             except Exception as exc:  # noqa: BLE001
-                self.btn_run.setEnabled(True)
-                self._finish_run_progress(success=False)
-                QMessageBox.critical(
+                QMessageBox.warning(
                     self,
-                    "트렌치 Depo 에뮬레이션",
-                    f"Run 저장 실패:\n{exc}",
+                    "자동 이력 저장",
+                    f"계산은 완료됐지만 자동 이력 저장에 실패했습니다. 결과창의 저장 버튼으로 다시 저장할 수 있습니다.\n{exc}",
                 )
-                return
-        self._preview_result_cache[cache_key] = result
         self.btn_run.setEnabled(True)
         self._finish_run_progress(success=True)
-        self._apply_emulation_result(
-            config,
-            result,
-            run_dir,
-            use_preview_cache=bool(use_preview_cache),
-        )
         self._clear_continuation_context()
 
     def _on_emulation_worker_failed(self, message: str) -> None:
@@ -8815,6 +8821,7 @@ class TrenchDepoWindow(QMainWindow):
                 cases,
                 request_note=self.edit_request_note.toPlainText(),
                 runs_root=self._runs_root,
+                include_gif=False,
             )
             self._update_run_progress(1, 1, label="저장")
             success = True
@@ -9109,6 +9116,8 @@ class TrenchDepoWindow(QMainWindow):
         self.result_navigation.set_available(enabled)
         if hasattr(self, "action_save_history"):
             self.action_save_history.setEnabled(self._result is not None and self._result_config is not None)
+        if hasattr(self, "btn_save_gif"):
+            self.btn_save_gif.setEnabled(self._result is not None and self._result_config is not None)
         if self._result is None:
             self.lbl_result_dose.setText("누적 증착량 —")
         if not enabled:
@@ -9335,6 +9344,58 @@ class TrenchDepoWindow(QMainWindow):
         if self._result is result:
             self.view.apply_viewport_state({"transform": QTransform(*viewport["matrix"]),
                                             "center_scene": QPointF(*viewport["center"])})
+
+    def save_current_result_gif(self, _checked: bool = False) -> None:
+        if self._result is None or self._result_config is None:
+            return
+        if self._emulation_thread is not None:
+            QMessageBox.information(self, "GIF 저장", "실행을 마친 뒤 GIF를 저장하세요.")
+            return
+        from gapsim.emulation.gif_export_dialog import GifExportDialog
+
+        self._stop_result_playback()
+        config, result = self._result_config, self._result
+        settings = GifExportDialog(len(result.frame_profiles), self.result_navigation.step(), self)
+        accepted = settings.exec()
+        interval = settings.interval.value()
+        settings.deleteLater()
+        if accepted != QDialog.DialogCode.Accepted:
+            return
+        folder = self._last_run_dir or self._results_root
+        suggested = folder / time.strftime("결과_%Y%m%d_%H%M%S.gif")
+        filename, _ = QFileDialog.getSaveFileName(self, "GIF 저장", str(suggested), "GIF 이미지 (*.gif)")
+        if not filename:
+            return
+        path = Path(filename)
+        if path.suffix.lower() != ".gif":
+            path = path.with_name(path.name + ".gif")
+        count = len(gif_frame_indices(len(result.frame_profiles), interval))
+        progress = QProgressDialog("GIF 이미지 준비 중…", "취소", 0, count + 1, self)
+        progress.setWindowTitle("GIF 저장")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+
+        def update(done: int, total: int) -> None:
+            progress.setValue(done)
+            progress.setLabelText(f"GIF 이미지 {done}/{total}장" if done < total else "GIF 압축·저장 중…")
+            QApplication.processEvents()
+            if progress.wasCanceled():
+                raise GifExportCanceled()
+
+        try:
+            export_trench_depo_gif(config, result, path,
+                request_note=self.edit_request_note.toPlainText(), frame_interval=interval, progress_cb=update)
+        except GifExportCanceled:
+            self.statusBar().showMessage("GIF 저장을 취소했습니다.", 5000)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "GIF 저장", f"GIF 저장 실패:\n{exc}")
+        else:
+            self.statusBar().showMessage(f"GIF 저장 완료: {count}장 · {interval}장 간격 · {path}", 8000)
+        finally:
+            progress.close()
+            progress.deleteLater()
 
     def save_current_result_json(self, _checked: bool = False) -> None:
         if self._result is None or self._result_config is None:

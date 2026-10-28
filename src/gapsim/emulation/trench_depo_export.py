@@ -10,7 +10,7 @@ from pathlib import Path
 import re
 import sys
 import tempfile
-from typing import Any, Dict, List, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Sequence, Tuple
 
 from gapsim.emulation.data_paths import configured_data_paths
 from gapsim.emulation.trench_depo import (
@@ -24,6 +24,28 @@ from gapsim.engine.run_logger import write_json
 from gapsim.ui_qt.views.result_vector_view import ResultVectorView
 
 Point = Tuple[float, float]
+GIF_MAX_FRAMES = 100
+
+
+class GifExportCanceled(Exception):
+    pass
+
+
+def minimum_gif_interval(frame_count: int) -> int:
+    """Reserve one slot for the final frame, even when the interval misses it."""
+    return max(1, (frame_count - 2 + GIF_MAX_FRAMES - 1) // (GIF_MAX_FRAMES - 1))
+
+
+def gif_frame_indices(frame_count: int, interval: int = 1) -> List[int]:
+    if isinstance(interval, bool) or not isinstance(interval, int) or interval < 1:
+        raise ValueError("GIF 간격은 1 이상의 정수여야 합니다.")
+    if frame_count < 1:
+        return []
+    step = max(interval, minimum_gif_interval(frame_count))
+    indices = list(range(0, frame_count, step))
+    if indices[-1] != frame_count - 1:
+        indices.append(frame_count - 1)
+    return indices
 
 def _default_runs_root() -> Path:
     data_paths = configured_data_paths()
@@ -466,6 +488,8 @@ def _render_gif_frames(
     config: TrenchDepoConfig,
     *,
     request_note: str,
+    frame_interval: int = 1,
+    progress_cb: Callable[[int, int], None] | None = None,
 ) -> List[Any]:
     try:
         from PIL import Image
@@ -482,6 +506,9 @@ def _render_gif_frames(
     frames = result.frame_profiles
     if not frames:
         raise RuntimeError("GIF로 저장할 frame이 없습니다.")
+    indices = gif_frame_indices(len(frames), frame_interval)
+    if progress_cb is not None:
+        progress_cb(0, len(indices))
 
     app = QApplication.instance()
     temp_app = None
@@ -508,6 +535,7 @@ def _render_gif_frames(
     panel_width = 420
     rendered: List[Any] = []
     container = QWidget()
+    container.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
     container.resize(width, height)
     root = QVBoxLayout(container)
     root.setContentsMargins(18, 18, 18, 18)
@@ -580,7 +608,9 @@ def _render_gif_frames(
     app.processEvents()
 
     try:
-        for idx in range(len(frames)):
+        for number, idx in enumerate(indices):
+            if progress_cb is not None:
+                progress_cb(number, len(indices))
             view.show_frame(idx, fit=False)
             subtitle.setText(_frame_progress_label(result, config, idx))
             panel_text.setText("\n".join(_gif_panel_lines(result, config, request_note=request_note, frame_index=idx)))
@@ -611,6 +641,12 @@ def _render_gif_frames(
             frame.load()
             rendered.append(frame.convert("RGB"))
             frame.close()
+        if progress_cb is not None:
+            progress_cb(len(indices), len(indices))
+    except BaseException:
+        for frame in rendered:
+            frame.close()
+        raise
     finally:
         container.close()
         container.deleteLater()
@@ -621,12 +657,49 @@ def _render_gif_frames(
     return rendered
 
 
+def export_trench_depo_gif(
+    config: TrenchDepoConfig,
+    result: TrenchDepoResult,
+    path: Path | str,
+    *,
+    request_note: str = "",
+    frame_interval: int = 1,
+    progress_cb: Callable[[int, int], None] | None = None,
+) -> Path:
+    """Render at most 100 selected frames without changing any simulation data."""
+    target = Path(path).resolve()
+    indices = gif_frame_indices(len(result.frame_profiles), frame_interval)
+    if not indices:
+        raise ValueError("GIF로 저장할 결과가 없습니다.")
+    images = _render_gif_frames(result, config, request_note=request_note,
+                                frame_interval=frame_interval, progress_cb=progress_cb)
+    temporary = None
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=target.parent, prefix=f".{target.name}.", suffix=".gif", delete=False) as stream:
+            temporary = Path(stream.name)
+        images[0].save(str(temporary), format="GIF", save_all=True,
+                       append_images=images[1:], duration=180, loop=0,
+                       optimize=False, disposal=2)
+        if progress_cb is not None:
+            progress_cb(len(indices), len(indices))
+        os.replace(temporary, target)
+    finally:
+        for frame in images:
+            frame.close()
+        if temporary is not None and temporary.exists():
+            temporary.unlink()
+    return target
+
+
 def export_trench_depo_run(
     config: TrenchDepoConfig,
     result: TrenchDepoResult,
     *,
     request_note: str = "",
     runs_root: Path | str = DEFAULT_RUNS_ROOT,
+    include_gif: bool = True,
+    gif_interval: int = 1,
 ) -> Path:
     note = _coerce_note(request_note)
     run_dir = create_trench_run_dir(
@@ -719,24 +792,12 @@ def export_trench_depo_run(
         replay_path.name,
         meta_path.name,
         summary_path.name,
-        gif_path.name,
+        *([gif_path.name] if include_gif else []),
     ]
     summary_path.write_text("\n".join(summary_lines), encoding="utf-8")
 
-    images = _render_gif_frames(result, config, request_note=note)
-    try:
-        images[0].save(
-            str(gif_path),
-            save_all=True,
-            append_images=images[1:],
-            duration=180,
-            loop=0,
-            optimize=False,
-            disposal=2,
-        )
-    finally:
-        for image in images:
-            image.close()
+    if include_gif:
+        export_trench_depo_gif(config, result, gif_path, request_note=note, frame_interval=gif_interval)
 
     return run_dir
 
@@ -930,6 +991,8 @@ def export_trench_depo_sweep_runs(
     *,
     request_note: str = "",
     runs_root: Path | str = DEFAULT_RUNS_ROOT,
+    include_gif: bool = True,
+    gif_interval: int = 1,
 ) -> List[Path]:
     saved_dirs: List[Path] = []
     total = len(cases)
@@ -940,6 +1003,8 @@ def export_trench_depo_sweep_runs(
                 case.result,
                 request_note=split_case_request_note(request_note, case, index=idx, total=total),
                 runs_root=runs_root,
+                include_gif=include_gif,
+                gif_interval=gif_interval,
             )
         )
     _write_split_group_manifests(cases, saved_dirs, request_note=request_note)
