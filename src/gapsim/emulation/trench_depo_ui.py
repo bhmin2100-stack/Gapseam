@@ -66,6 +66,7 @@ from PySide6.QtWidgets import (
 
 from gapsim import updater
 from gapsim.emulation.result_navigation import DOSE_TOOLTIP, ResultFrameNavigation, frame_deposition_label
+from gapsim.emulation.resolution_dialog import ResolutionDialog, estimate_resolution, POINT_WARNING_THRESHOLD
 from gapsim.emulation.research_registry import MAX_EMULATOR_NUMBER
 from gapsim.emulation.incident_presets import SFO31_PRESET_NAME, ensure_sfo31_preset
 from gapsim.emulation.app_icon import gfe_icon, set_taskbar_identity
@@ -2877,6 +2878,7 @@ class _EmulationRunWorker(QObject):
         self._save_artifacts = bool(save_artifacts)
         self._use_preview_cache = bool(use_preview_cache)
         self._cancel_requested = Event()
+        self._last_internal_points = 0
 
     def cancel(self) -> None:
         self._cancel_requested.set()
@@ -2910,6 +2912,12 @@ class _EmulationRunWorker(QObject):
     def _emit_detail_progress(self, detail: Dict[str, Any]) -> None:
         if not isinstance(detail, dict):
             return
+        if "points" in detail:
+            self._last_internal_points = max(0, int(detail["points"]))
+        point_label = f" · 내부 점 {self._last_internal_points:,}개" if self._last_internal_points else ""
+        if detail.get("kind") == "cycle":
+            self.progress.emit(int(detail["step"]), int(detail["total"]), f"실행{point_label}")
+            return
         if "substep" not in detail or "substeps" not in detail:
             return
         cycles = max(1, int(detail.get("total", self._config.cycles)))
@@ -2922,7 +2930,7 @@ class _EmulationRunWorker(QObject):
         cycle_label = f"{step + 1} cycle" if self._config.process_type == "ald" else f"계산 구간 {step + 1}"
         sub_label = f"{substep}/{substeps}"
         suffix = "계산 중" if phase == "start" else "완료"
-        self.progress.emit(done, total, f"실행 {cycle_label} sub {sub_label} {suffix}")
+        self.progress.emit(done, total, f"실행 {cycle_label} sub {sub_label} {suffix}{point_label}")
 
 
 class DraggableParameterSectionLabel(QLabel):
@@ -3639,6 +3647,7 @@ class TrenchDepoWindow(QMainWindow):
 
         self.view_tabs = QTabWidget()
         self.lbl_progress_view_status = QLabel("진행 대기")
+        self.lbl_progress_view_status.setWordWrap(True)
         self.lbl_progress_view_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.progress_view_bar = QProgressBar()
         self.progress_view_bar.setRange(0, 1)
@@ -8704,6 +8713,25 @@ class TrenchDepoWindow(QMainWindow):
         self._emulation_thread = None
         self._emulation_worker = None
 
+    def _choose_run_resolution(self, config, *, automatic=False, split=False):
+        estimate = estimate_resolution(config.points)
+        if estimate.points_at(config.reparam_ds_a) <= POINT_WARNING_THRESHOLD:
+            return config
+        if automatic:
+            self.statusBar().showMessage("예상 내부 점이 많습니다. 실행 버튼에서 계산 해상도를 선택하세요.", 10000)
+            return None
+        dialog = ResolutionDialog(estimate, config.reparam_ds_a, self, split=split)
+        try:
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return None
+            spacing = dialog.selected_spacing_a()
+        finally:
+            dialog.deleteLater()
+        if spacing == config.reparam_ds_a:
+            return config
+        self._set_quality_mode_for_ds(spacing)
+        return replace(config, reparam_ds_a=spacing)
+
     def run_emulation(
         self,
         _checked: bool = False,
@@ -8716,12 +8744,20 @@ class TrenchDepoWindow(QMainWindow):
             return
         self._emulator_run_timer.stop()
         self._stop_result_playback()
-        self.btn_run.setEnabled(False)
         success = False
+        started = False
         try:
             config = self.current_config()
             run_dir: Optional[Path] = None
             cache_key = self._preview_cache_key(config)
+            cache_hit = use_preview_cache and not save_artifacts and cache_key in self._preview_result_cache
+            if not cache_hit:
+                config = self._choose_run_resolution(config, automatic=use_preview_cache)
+                if config is None:
+                    return
+                cache_key = self._preview_cache_key(config)
+            self.btn_run.setEnabled(False)
+            started = True
             if use_preview_cache and not save_artifacts and cache_key in self._preview_result_cache:
                 self._start_run_progress("캐시 run 불러오는 중")
                 result = self._preview_result_cache[cache_key]
@@ -8779,7 +8815,7 @@ class TrenchDepoWindow(QMainWindow):
             )
             return
         finally:
-            if self._emulation_thread is None:
+            if started and self._emulation_thread is None:
                 self.btn_run.setEnabled(True)
                 self._finish_run_progress(success=success)
 
@@ -8796,6 +8832,16 @@ class TrenchDepoWindow(QMainWindow):
             self._clear_continuation_context()
 
     def run_split_test(self, _checked: bool = False) -> None:
+        if self._emulation_thread is not None:
+            self.statusBar().showMessage("이미 시뮬레이션 실행 중입니다.", 2000)
+            return
+        try:
+            config = self._choose_run_resolution(self.current_config(), split=True)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "계산 해상도 선택", str(exc))
+            return
+        if config is None:
+            return
         self.btn_run_split.setEnabled(False)
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         self.statusBar().showMessage("Split test 계산 중...")
@@ -8804,7 +8850,7 @@ class TrenchDepoWindow(QMainWindow):
         try:
             parameter = str(self.cmb_split_parameter.currentData())
             cases = run_trench_depo_sweep(
-                self.current_config(),
+                config,
                 parameter,
                 float(self.spin_split_start.value()),
                 float(self.spin_split_end.value()),
