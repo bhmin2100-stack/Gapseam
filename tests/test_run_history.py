@@ -1,4 +1,5 @@
 import json
+import time
 from dataclasses import asdict, replace
 from unittest import mock
 
@@ -118,7 +119,12 @@ def test_save_and_open_buttons_restore_a_real_run_in_a_fresh_window(window, tmp_
     path = tmp_path / f"{process} 이력.json"
     # Edits after running must not replace the recipe used to produce the result.
     window.spin_angstrom_per_cycle.setValue(77)
-    with mock.patch("gapsim.emulation.trench_depo_ui.QFileDialog.getSaveFileName", return_value=(str(path), "")):
+    real_strftime = time.strftime
+    def ascii_locale_strftime(fmt, *args):
+        fmt.encode('ascii')
+        return real_strftime(fmt, *args)
+    with mock.patch('gapsim.emulation.trench_depo_ui.time.strftime', side_effect=ascii_locale_strftime), \
+         mock.patch("gapsim.emulation.trench_depo_ui.QFileDialog.getSaveFileName", return_value=(str(path), "")):
         QTest.mouseClick(window.btn_save_result_json, Qt.MouseButton.LeftButton)
     assert path.is_file()
     assert json.dumps(asdict(load_trench_depo_run(path)[0]), sort_keys=True) == json.dumps(asdict(config), sort_keys=True)

@@ -9415,7 +9415,7 @@ class TrenchDepoWindow(QMainWindow):
         if accepted != QDialog.DialogCode.Accepted:
             return
         folder = self._last_run_dir or self._results_root
-        suggested = folder / time.strftime("결과_%Y%m%d_%H%M%S.gif")
+        suggested = folder / f"결과_{time.strftime('%Y%m%d_%H%M%S')}.gif"
         filename, _ = QFileDialog.getSaveFileName(self, "GIF 저장", str(suggested), "GIF 이미지 (*.gif)")
         if not filename:
             return
@@ -9459,7 +9459,7 @@ class TrenchDepoWindow(QMainWindow):
             QMessageBox.information(self, "실행 이력 저장", "실행을 마친 뒤 이력을 저장하세요.")
             return
         self._stop_result_playback()
-        suggested = self._history_path or self._results_root / time.strftime("실행이력_%Y%m%d_%H%M%S.json")
+        suggested = self._history_path or self._results_root / f"실행이력_{time.strftime('%Y%m%d_%H%M%S')}.json"
         path, _ = QFileDialog.getSaveFileName(self, "실행 이력 저장", str(suggested), "GFE 실행 이력 (*.json)")
         if not path:
             return

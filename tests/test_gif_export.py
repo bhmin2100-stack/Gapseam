@@ -222,7 +222,12 @@ def test_manual_gif_button_uses_executed_config_and_requested_interval(window, t
     def choose(dialog):
         dialog.interval.setValue(4)
         return QDialog.DialogCode.Accepted
-    with mock.patch.object(GifExportDialog, 'exec', choose), \
+    real_strftime = time.strftime
+    def ascii_locale_strftime(fmt, *args):
+        fmt.encode('ascii')
+        return real_strftime(fmt, *args)
+    with mock.patch('gapsim.emulation.trench_depo_ui.time.strftime', side_effect=ascii_locale_strftime), \
+         mock.patch.object(GifExportDialog, 'exec', choose), \
          mock.patch('gapsim.emulation.trench_depo_ui.QFileDialog.getSaveFileName', return_value=(str(path), '')), \
          mock.patch('gapsim.emulation.trench_depo_ui.export_trench_depo_gif', wraps=ex.export_trench_depo_gif) as exporter:
         QTest.mouseClick(window.btn_save_gif, Qt.MouseButton.LeftButton)
