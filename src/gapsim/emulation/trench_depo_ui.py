@@ -3591,7 +3591,8 @@ class TrenchDepoWindow(QMainWindow):
         self.cmb_parameter_preset.setToolTip("저장된 공정 파라미터 프리셋입니다. 구조 좌표는 포함하지 않습니다.")
         self.edit_parameter_preset_name = QLineEdit()
         self.edit_parameter_preset_name.setPlaceholderText("공정 프리셋 이름")
-        self.btn_reload_parameter_presets = QPushButton("새로고침")
+        self.btn_reload_parameter_presets = QPushButton("목록 새로고침")
+        self.btn_reload_parameter_presets.setToolTip("저장 파일에서 프리셋 목록을 다시 읽습니다. 현재 공정값은 바꾸지 않습니다.")
         self.btn_apply_parameter_preset = QPushButton("적용")
         self.btn_save_parameter_preset = QPushButton("저장")
         self.btn_delete_parameter_preset = QPushButton("삭제")
@@ -4533,7 +4534,7 @@ class TrenchDepoWindow(QMainWindow):
         incident_note.setWordWrap(True)
         incident_layout.addWidget(incident_note, 3, 0, 1, 2)
         progress_panel_layout.addWidget(self.incident_model_group)
-        self.parameter_preset_group = QGroupBox("내 공정 프리셋 · 구조는 유지")
+        self.parameter_preset_group = QWidget()
         saved_layout = QVBoxLayout(self.parameter_preset_group)
         saved_layout.addWidget(self.cmb_parameter_preset)
         saved_row = QHBoxLayout()
@@ -5291,7 +5292,7 @@ class TrenchDepoWindow(QMainWindow):
     def _update_parameter_preset_active_label(self) -> None:
         active = self._active_parameter_preset_name or "없음"
         if not self._active_parameter_preset_name:
-            self.lbl_parameter_preset_active.setText("적용된 프리셋: 없음 · 선택 후 파라미터 적용을 누르세요.")
+            self.lbl_parameter_preset_active.setText("적용된 프리셋: 없음")
             return
         ald = self.cmb_process_type.currentData() == "ald"
         dose = (f"GPC {self.spin_angstrom_per_cycle.value():g} Å/cycle" if ald
@@ -5301,8 +5302,7 @@ class TrenchDepoWindow(QMainWindow):
                  else self.cmb_recipe_model.currentText())
         self.lbl_parameter_preset_active.setText(
             f"적용된 프리셋: {active}\n"
-            f"적용 시: {self.cmb_process_type.currentText()} · {model} · {dose}\n"
-            "구조 유지 · Cycle 수 / 시간은 아래에서 직접 조절"
+            f"적용 시: {self.cmb_process_type.currentText()} · {model} · {dose}"
         )
 
     def save_current_parameter_preset(self, _checked: bool = False) -> None:
@@ -9387,8 +9387,7 @@ class TrenchDepoWindow(QMainWindow):
         self._set_next_depo_button_state()
         self.btn_save_result_json.setEnabled(True)
         self._update_result_parameter_summary(config, result)
-        interval_index = self.result_navigation.interval.findData(view_state.get("frame_interval", self.result_navigation.step()))
-        self.result_navigation.interval.setCurrentIndex(interval_index)
+        self.result_navigation.interval.setValue(view_state.get("frame_interval", self.result_navigation.step()))
         self.chk_show_etch_overlay.setChecked(view_state.get("show_etch", self.chk_show_etch_overlay.isChecked()))
         self.chk_show_redepo_overlay.setChecked(view_state.get("show_redepo", self.chk_show_redepo_overlay.isChecked()))
         self._sync_field_overlay_toggles()

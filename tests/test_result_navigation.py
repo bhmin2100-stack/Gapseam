@@ -9,7 +9,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from tests.test_process_parameters import window
-from gapsim.emulation.result_navigation import FRAME_INTERVALS, frame_deposition_label
+from gapsim.emulation.result_navigation import frame_deposition_label
 from gapsim.emulation.trench_depo import TrenchDepoConfig, TrenchDepoResult, TrenchSweepResult, run_trench_depo
 from gapsim.emulation.trench_depo_export import save_trench_depo_result_json
 from gapsim.emulation.trench_depo_ui import SplitTestWindow, merge_continued_trench_result
@@ -52,14 +52,14 @@ def test_incomplete_history_does_not_apply_last_recipe_to_earlier_stages():
     assert frame_deposition_label(result, config, 2) == "누적 증착량 4.000 Å"
 
 
-@pytest.mark.parametrize("interval", FRAME_INTERVALS)
+@pytest.mark.parametrize("interval", (1, 2, 3, 5, 7, 10, 37, 100))
 def test_buttons_keyboard_playback_and_endpoints_share_interval(window, interval):
     config = TrenchDepoConfig(angstrom_per_cycle=.56, cycles=107)
     result = sample()
     before = json.dumps(vars(result), sort_keys=True)
     window._apply_emulation_result(config, result, None, use_preview_cache=False)
     nav = window.result_navigation
-    nav.interval.setCurrentIndex(nav.interval.findData(interval))
+    nav.interval.setValue(interval)
     window.slider_frame.setValue(0)
     assert not nav.previous.isEnabled()
     QTest.mouseClick(nav.next, Qt.MouseButton.LeftButton)
@@ -95,7 +95,7 @@ def test_loading_saved_result_keeps_interval_and_original_dose(window, tmp_path)
     nav = window.result_navigation
     assert nav.previous.isEnabled()
     assert not nav.next.isEnabled()
-    nav.interval.setCurrentIndex(nav.interval.findData(100))
+    nav.interval.setValue(100)
     window.spin_angstrom_per_cycle.setValue(10)
     window.slider_frame.setValue(1)
     assert window.lbl_result_dose.text() == "누적 증착량 2.800 Å"
@@ -128,7 +128,7 @@ def test_actual_ald_cvd_continuation_dose_survives_reload_and_split(window, tmp_
     split = SplitTestWindow(cases)
     try:
         split.show()
-        split.result_navigation.interval.setCurrentIndex(5)
+        split.result_navigation.interval.setValue(100)
         QTest.mouseClick(split.result_navigation.next, Qt.MouseButton.LeftButton)
         assert not split._timer.isActive()
         assert split.slider_frame.value() == len(joined.frame_profiles) - 1
@@ -145,3 +145,37 @@ def test_actual_ald_cvd_continuation_dose_survives_reload_and_split(window, tmp_
 def test_result_controls_disabled_without_a_result(window):
     assert not window.result_navigation.isEnabled()
     assert window.lbl_result_dose.text() == "누적 증착량 —"
+
+
+def test_interval_accepts_typed_number_and_moves_by_that_amount(window):
+    window._apply_emulation_result(TrenchDepoConfig(), sample(), None, use_preview_cache=False)
+    window.slider_frame.setValue(0)
+    box = window.result_navigation.interval
+    box.setFocus()
+    box.selectAll()
+    QTest.keyClicks(box, '37')
+    QTest.keyClick(box, Qt.Key.Key_Return)
+    assert window.result_navigation.step() == 37
+    assert window.slider_frame.singleStep() == 37
+    assert window.slider_frame.pageStep() == 37
+    QTest.mouseClick(window.result_navigation.next, Qt.MouseButton.LeftButton)
+    assert window.slider_frame.value() == 37
+
+
+def test_drag_renders_only_released_destination_and_keeps_exact_frame(window):
+    result = sample()
+    config = TrenchDepoConfig(angstrom_per_cycle=.56, cycles=107)
+    window._apply_emulation_result(config, result, None, use_preview_cache=False)
+    window.slider_frame.setValue(0)
+    window.result_navigation.interval.setValue(100)
+    shown = []
+    window.addonFrameShown.connect(shown.append)
+    window.slider_frame.setSliderDown(True)
+    for index in range(1, 78):
+        window.slider_frame.setSliderPosition(index)
+    assert shown == []
+    assert window.slider_frame.value() == 0
+    window.slider_frame.setSliderDown(False)
+    assert shown == [77]
+    assert window.slider_frame.value() == 77
+    assert window.lbl_result_dose.text() == '누적 증착량 43.120 Å'

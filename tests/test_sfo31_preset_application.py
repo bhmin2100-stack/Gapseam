@@ -152,15 +152,18 @@ def test_sfo310_builtin_preserves_geometry_and_legacy_preset(window):
     assert window.current_config().recipe_model == 'calibrated_response_v1'
 
 
-def test_sfo310_user_copy_is_separate_and_replayable(window):
+@pytest.mark.parametrize('name', ('SFO3.10', 'SFO3.11'))
+def test_calibrated_user_copy_is_separate_and_replayable(window, name):
     from gapsim.emulation.sfo31_verified import SAVED_PRESET_KEY_310
-    window.cmb_parameter_preset.setCurrentIndex(window.cmb_parameter_preset.findData('SFO3.10'))
+    from gapsim.emulation.builtin_presets import SAVED_RECIPE_KEYS
+    saved_key = SAVED_PRESET_KEY_310 if name == 'SFO3.10' else SAVED_RECIPE_KEYS[name]
+    window.cmb_parameter_preset.setCurrentIndex(window.cmb_parameter_preset.findData(name))
     window.btn_apply_parameter_preset.click()
     window.spin_angstrom_per_cycle.setValue(1.5)
-    window.edit_parameter_preset_name.setText('SFO3.10')
+    window.edit_parameter_preset_name.setText(name)
     window.btn_save_parameter_preset.click()
-    assert window.cmb_parameter_preset.findData(SAVED_PRESET_KEY_310) >= 0
-    assert window.cmb_parameter_preset.currentText() == 'SFO3.10 (저장본)'
+    assert window.cmb_parameter_preset.findData(saved_key) >= 0
+    assert window.cmb_parameter_preset.currentText() == f'{name} (저장본)'
     window.spin_angstrom_per_cycle.setValue(3.0)
     window.btn_apply_parameter_preset.click()
     cfg = window.current_config()

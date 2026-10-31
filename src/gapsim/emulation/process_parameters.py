@@ -207,6 +207,7 @@ class ProcessParameterPanel(QWidget):
         install_parameter_help(w,self)
         hint=self.note('ⓘ 항목 이름이나 입력값에 마우스를 올리면 움직이는 설명이 나옵니다. 키보드: F1')
         root.insertWidget(2,hint)
+        hint.hide()
         self.help_hint = hint
         self.help_manager.preferences.enabledChanged.connect(self.update_help_hint)
         self.update_help_hint(self.help_manager.enabled)

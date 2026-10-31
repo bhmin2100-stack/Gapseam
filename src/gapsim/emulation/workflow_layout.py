@@ -43,7 +43,7 @@ def install_workflow_layout(w):
         button.setText(button.text().lstrip('1234 '))
 
     # Shared presets and geometry stay INSIDE the process pane.
-    w.process_presets_fold = p.fold('내 조건 · 불러오기 / 저장', w.parameter_preset_group)
+    w.process_presets_fold = p.fold('프리셋', w.parameter_preset_group)
     w.progress_panel_content.layout().insertWidget(0, w.process_presets_fold)
     p.geometry_group = p.geometry_button.parentWidget()
     p.geometry_group.setTitle('공유 기준 형상')
@@ -95,6 +95,24 @@ def install_workflow_layout(w):
     execution.addWidget(w.progress_run)
     w.btn_run.setText('시뮬레이션 실행')
     w.btn_run.setMinimumHeight(36)
+    w.btn_run.setStyleSheet("""
+        QPushButton {
+            background-color: #15803d;
+            color: white;
+            border: 1px solid #166534;
+            border-radius: 4px;
+            padding: 6px 12px;
+            font-weight: 600;
+        }
+        QPushButton:hover { background-color: #166534; }
+        QPushButton:pressed { background-color: #14532d; }
+        QPushButton:focus { border: 2px solid #052e16; }
+        QPushButton:disabled {
+            background-color: #e5e7eb;
+            color: #6b7280;
+            border: 1px solid #d1d5db;
+        }
+    """)
     w.right_panel.layout().addWidget(w.process_execution_bar)
     w.action_group.setTitle('비교 / 결과 / 초기화')
     w.btn_open_json.setText('결과 불러오기')

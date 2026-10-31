@@ -4,8 +4,11 @@ from .sfo31_verified import verified_sfo31_config, sfo310_config, STRUCTURE_NAME
 from .sfo31_verified import SAVED_PRESET_KEY, SAVED_PRESET_KEY_310
 from .response_ui import normalized_values
 
-RECIPE_NAMES = ('SFO3.1', 'SFO3.10', 'SFO3.10-HAR (시험)')
-SAVED_RECIPE_KEYS = dict(zip(RECIPE_NAMES, (SAVED_PRESET_KEY, SAVED_PRESET_KEY_310, ('saved', RECIPE_NAMES[2]))))
+RECIPE_NAMES = ('SFO3.1', 'SFO3.10', 'SFO3.10-HAR (시험)', 'SFO3.11')
+# Qt stores these tuple keys as Python objects. Preserve the exported legacy
+# objects so callers can still locate an existing user copy with findData().
+SAVED_RECIPE_KEYS = dict(zip(RECIPE_NAMES[:2], (SAVED_PRESET_KEY, SAVED_PRESET_KEY_310)))
+SAVED_RECIPE_KEYS.update({name: ('saved', name) for name in RECIPE_NAMES[2:]})
 STRUCTURE_NAMES = (STRUCTURE_NAME, '사진 구조 CD365 H1839', '깊은 Trench CD230 H5000')
 
 
@@ -15,6 +18,16 @@ def recipe_config(name):
     cfg = verified_sfo31_config() if name=='SFO3.1' else sfo310_config()
     values = normalized_values(asdict(cfg))
     if name==RECIPE_NAMES[2]: values['empirical_response']['har_enabled']=True
+    if name=='SFO3.11':
+        # Frozen width/length candidate (2026-10-31). Empirical response only;
+        # no target contour and no post-closure filling. Geometry stays separate.
+        values['empirical_response'].update(
+            har_enabled=True, har_growth_floor=9.93533549067577,
+            har_depth_power=.7, closure_enabled=False,
+            upper_gain=0., relief_gain=0., deep_early_gain=0., deep_middle_gain=0.)
+        values['deposition_post_closure_fill_pct_hole']=0.
+        values['deposition_post_closure_fill_pct_line']=0.
+        values['reparam_ds_a']=50.  # Optional numerical default from the HAR replay.
     return replace(cfg, **values)
 
 

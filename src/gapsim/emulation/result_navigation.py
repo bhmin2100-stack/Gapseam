@@ -5,12 +5,11 @@ import math
 from typing import Optional
 
 from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QPushButton, QSlider, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QSlider, QSpinBox, QWidget
 
 from gapsim.emulation.trench_depo import TrenchDepoConfig, TrenchDepoResult
 
 
-FRAME_INTERVALS = (1, 2, 3, 5, 10, 100)
 DOSE_TOOLTIP = (
     "선택한 결과 시점까지의 기준 평면 증착량입니다. ALD는 GPC × 사이클, CVD는 D/R × 시간입니다.\n"
     "저장된 결과의 값을 사용하며, 실행 후 입력값을 바꿔도 변하지 않습니다.\n"
@@ -77,15 +76,20 @@ class ResultFrameNavigation(QWidget):
     def __init__(self, slider: QSlider, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.slider = slider
+        # Dragging selects a destination without synchronously rendering every
+        # intermediate frame. Keyboard/buttons/playback still update immediately.
+        self.slider.setTracking(False)
         self.previous = QPushButton("◀ 이전")
         self.next = QPushButton("다음 ▶")
-        self.interval = QComboBox()
+        self.interval = QSpinBox()
         self.interval.setAccessibleName("결과 이동 간격")
-        for value in FRAME_INTERVALS:
-            self.interval.addItem(f"{value}장", value)
+        self.interval.setRange(1, 2_147_483_647)
+        self.interval.setValue(1)
+        self.interval.setSuffix("장")
+        self.interval.setKeyboardTracking(False)
         self.setToolTip(
             "이전·다음, 슬라이더 방향키, 자동재생에 적용할 이미지 간격입니다.\n"
-            "슬라이더를 드래그하면 원하는 개별 이미지로 이동합니다.\n"
+            "슬라이더를 드래그한 뒤 놓으면 선택한 개별 이미지를 표시합니다.\n"
             "처음·마지막 이미지는 간격과 관계없이 확인할 수 있습니다. 계산 결과는 바뀌지 않습니다."
         )
         layout = QHBoxLayout(self)
@@ -96,7 +100,7 @@ class ResultFrameNavigation(QWidget):
         layout.addWidget(self.next)
         self.previous.clicked.connect(lambda: self.move(-1))
         self.next.clicked.connect(lambda: self.move(1))
-        self.interval.currentIndexChanged.connect(self._apply_interval)
+        self.interval.valueChanged.connect(self._apply_interval)
         self.slider.actionTriggered.connect(lambda _action: self.manualNavigation.emit())
         self.slider.sliderPressed.connect(self.manualNavigation.emit)
         self.slider.valueChanged.connect(self._update_buttons)
@@ -104,7 +108,7 @@ class ResultFrameNavigation(QWidget):
         self._apply_interval()
 
     def step(self) -> int:
-        return int(self.interval.currentData())
+        return self.interval.value()
 
     def set_available(self, available: bool) -> None:
         self.setEnabled(available)

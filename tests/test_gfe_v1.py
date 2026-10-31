@@ -109,3 +109,21 @@ def test_har_gate_and_invalid_ranges():
         assert aspect_extension_weight(c,p)==w
     with pytest.raises(ValueError):load_parameters({'har_start_ar':10.,'har_end_ar':7.})
     with pytest.raises(ValueError):load_parameters(replace(p,har_upper_halfwidth_cd=0))
+
+
+def test_sfo311_apply_keeps_geometry_duration_and_blocks_post_fill(window):
+    window.spin_cycles.setValue(73)
+    window.chk_preset_run_defaults.setChecked(False)
+    before=asdict(window.current_config())
+    window.cmb_parameter_preset.setCurrentIndex(window.cmb_parameter_preset.findData('SFO3.11'))
+    window.btn_apply_parameter_preset.click()
+    cfg=window.current_config()
+    assert cfg.cycles==73
+    assert all(asdict(cfg)[k]==before[k] for k in GEOMETRY_PARAMETER_FIELDS)
+    assert cfg.sputter_enabled and cfg.redepo_enabled and cfg.inhibition_enabled
+    assert not cfg.empirical_response['closure_enabled']
+    assert cfg.deposition_post_closure_fill_pct_hole==cfg.deposition_post_closure_fill_pct_line==0.
+    from gapsim.emulation.calibrated_response import aspect_extension_weight, load_parameters
+    p=load_parameters(cfg.empirical_response)
+    assert aspect_extension_weight(replace(cfg,deposition_feature_width_a=2420.,deposition_feature_depth_a=7020.),p)==0.
+    assert aspect_extension_weight(replace(cfg,deposition_feature_width_a=2300.,deposition_feature_depth_a=50000.),p)==1.

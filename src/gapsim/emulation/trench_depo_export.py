@@ -294,7 +294,7 @@ def _validated_result_view_state(raw: Any, frame_count: int) -> Dict[str, Any]:
             raise ValueError(f"Invalid history: {name} must be an integer.")
         if name == "frame_index":
             state[name] = max(0, min(value, max(0, frame_count - 1)))
-        elif value in (1, 2, 3, 5, 10, 100):
+        elif 1 <= value <= 2_147_483_647:
             state[name] = value
         else:
             raise ValueError("Invalid history: unsupported frame interval.")

@@ -167,6 +167,8 @@ class ResultVectorView(QGraphicsView):
         self._boundary_item: Optional[QGraphicsPathItem] = None
         self._last_draw_idx = -1
         self._last_solid_fill_mode = False
+        self._mixed_layer_clip = None
+        self._mixed_ghost_clip = None
 
         self._panning = False
         self._pan_start: Optional[QPointF] = None
@@ -594,6 +596,31 @@ class ResultVectorView(QGraphicsView):
             prev = cur
 
         # Trapped voids (prebuilt once, toggled per frame)
+        # Long mixed histories share one clipping mask instead of recomputing
+        # thousands of polygon intersections for each selected frame.
+        self._mixed_layer_clip = None
+        self._mixed_ghost_clip = None
+        if use_mixed_etch_history and len(self._layer_items) > 64:
+            bounds = QRectF()
+            for path in self._layer_base_paths + self._etch_ghost_base_paths:
+                bounds = bounds.united(path.boundingRect())
+            margin = max(bounds.width(), bounds.height(), 100.0)
+            self._mixed_clip_bounds = bounds.adjusted(-margin, -margin, margin, margin)
+            for attr, items, z in (
+                ('_mixed_layer_clip', self._layer_items, 2.0),
+                ('_mixed_ghost_clip', self._etch_ghost_items, 1.0),
+            ):
+                clip = QGraphicsPathItem()
+                clip.setPen(QPen(Qt.PenStyle.NoPen))
+                clip.setBrush(QBrush(Qt.BrushStyle.NoBrush))
+                clip.setFlag(QGraphicsItem.GraphicsItemFlag.ItemClipsChildrenToShape, True)
+                clip.setZValue(z)
+                self._scene.addItem(clip)
+                setattr(self, attr, clip)
+                for item in items:
+                    if item is not None:
+                        item.setParentItem(clip)
+
         for fi in range(len(self._frame_voids_raw)):
             frame_items: List[QGraphicsPathItem] = []
             for poly in self._cache_get_voids_scene(fi):
@@ -688,6 +715,18 @@ class ResultVectorView(QGraphicsView):
             item.setVisible(bool(visible))
 
     def _set_mixed_etch_layers_for_frame(self, draw_idx: int, current_fill: QPainterPath) -> None:
+        if self._mixed_layer_clip is not None:
+            self._mixed_layer_clip.setPath(current_fill)
+            outside = QPainterPath()
+            outside.addRect(self._mixed_clip_bounds)
+            self._mixed_ghost_clip.setPath(outside.subtracted(current_fill))
+            for li, item in enumerate(self._layer_items, 1):
+                if item is not None:
+                    item.setVisible(li <= draw_idx)
+            for li, item in enumerate(self._etch_ghost_items, 1):
+                if item is not None:
+                    item.setVisible(li <= draw_idx)
+            return
         for li in range(1, len(self._layer_items) + 1):
             idx = li - 1
             layer_item = self._layer_items[idx]

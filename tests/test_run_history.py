@@ -109,7 +109,7 @@ def test_save_and_open_buttons_restore_a_real_run_in_a_fresh_window(window, tmp_
     QApplication.processEvents()
     index = min(2, len(result.frame_profiles) - 1)
     window.slider_frame.setValue(index)
-    window.result_navigation.interval.setCurrentIndex(window.result_navigation.interval.findData(5))
+    window.result_navigation.interval.setValue(37)
     window.chk_show_etch_overlay.setChecked(False)
     window.chk_show_redepo_overlay.setChecked(True)
     window.view.scale(2, 2)
@@ -144,7 +144,7 @@ def test_save_and_open_buttons_restore_a_real_run_in_a_fresh_window(window, tmp_
         assert not differences
         assert fresh.slider_frame.value() == index
         assert fresh.lbl_result_dose.text() == dose
-        assert fresh.result_navigation.step() == 5
+        assert fresh.result_navigation.step() == 37
         assert not fresh.chk_show_etch_overlay.isChecked()
         assert fresh.chk_show_redepo_overlay.isChecked()
         restored_view = fresh._history_view_state()

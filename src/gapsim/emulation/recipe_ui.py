@@ -167,9 +167,6 @@ def install_recipe_layout(w):
     w.btn_apply_parameter_preset.setText("파라미터 적용")
     w.btn_apply_parameter_preset.setToolTip("선택한 공정 파라미터를 적용합니다. 구조는 유지하며, 적용 후 Cycle 수를 직접 바꿀 수 있습니다.")
     w.lbl_parameter_preset_active.setWordWrap(True)
-    w.preset_usage_note = QLabel("프리셋은 아래 공통 파라미터에 값을 채웁니다. 수정 후 다른 이름으로 저장할 수 있습니다.\n구조는 1 구조에서 별도 선택 · Cycle 수는 적용 후 조절 가능합니다.")
-    w.preset_usage_note.setWordWrap(True)
-    w.parameter_preset_group.layout().addWidget(w.preset_usage_note)
     p.buttons[0].setText("실행 조건")
     p.buttons[1].setText("성장·수송")
     p.buttons[2].setText("식각·재부착")
@@ -183,11 +180,10 @@ def install_recipe_layout(w):
         item = p.layouts[page].itemAt(0)
         if item and isinstance(item.widget(), QLabel):
             item.widget().setText(text)
+            if page == 2:
+                item.widget().hide()
 
-    w.recipe_basis_group, _ = _group("증착량 기준", [("basis", "GPC / D/R 기준", w.cmb_growth_basis)])
-    p.layouts[0].insertWidget(1, w.recipe_basis_group)
-    p.recipe_note = p.note("")
-    p.layouts[0].insertWidget(2, p.recipe_note)
+    w.recipe_basis_group, _ = _group("", [("basis", "증착량 기준", w.cmb_growth_basis)])
     w.fixed_repeat_group, _ = _group("표면 이동 계산", [
         ("front", "계산 방식", w.cmb_front_scheme),
         ("growth", "이온 성장 기여율", w.spin_ion_growth_fraction),
@@ -195,6 +191,7 @@ def install_recipe_layout(w):
     w.spin_ion_growth_fraction.setToolTip("0은 이온과 무관한 성장, 0.05는 성장의 5%가 이온 도달량에 따라 달라지는 유효 모델입니다. 매 사이클 동일하게 적용합니다.")
     w.redepo_distance_group, _ = _group("재부착 수송 범위", [("distance", "최대 이동 거리", w.spin_redepo_max_distance)])
     p.layouts[2].insertWidget(2, w.redepo_distance_group)
+    p.layouts[2].insertWidget(0, w.recipe_basis_group)
     w.inhibition_law_group, _ = _group("억제 계산", [("law", "억제 모델", w.cmb_inhibition_process_model)])
     p.layouts[3].insertWidget(2, w.inhibition_law_group)
     w.transport_group, w.transport_labels = _group("입자 수송 · 표면 반응", [
@@ -304,13 +301,6 @@ def sync_recipe_layout(w):
     p.conformal_button.setVisible(model != "ideal_conformal_v1" or etch or inh)
     w.spin_transport_rays.setEnabled(transport or inh or etch)
     w.cmb_growth_basis.setEnabled(True)
-    p.recipe_note.setText(
-        "SFO3.10은 증착량과 구조에 따라 성장 응답이 달라지고 폐쇄 후 잔류 충전을 허용하는 경험식입니다. 물리적 검증과 다른 구조의 예측력은 별도입니다."
-        if model == "sfo310_calibrated_v1" else
-        "공통 보정 모델입니다. 매 cycle 같은 식을 적용하며 추가 응답은 보정 응답에서 조절합니다. 폐쇄 후 충전은 경험식입니다. 실제 물성 및 다른 구조의 예측력은 별도 검증이 필요합니다."
-        if legacy else
-        "기준면 순성장량은 평탄면의 제거량을 반영해 보정합니다. 트랜치의 국소 두께와 재부착은 실제 구조에서 따로 계산합니다."
-    )
     # All empirical alternatives are one compatibility family, mutually hidden
     # from the transport/conformal route that does not consume them.
     for widget in [w.chk_typical_cvd, p.cvd_fields, p.advanced_folds["cvd"],
