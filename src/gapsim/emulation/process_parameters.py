@@ -3,7 +3,6 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QWidget, QLabel, QCheckBox, QDoubleSpinBox, QPushButton,
                               QVBoxLayout, QGridLayout, QGroupBox, QSizePolicy)
 from gapsim.engine.typical_cvd import DEFAULTS
-from gapsim.engine.typical_cvd import reference_geometry
 
 
 def init_cvd_controls(w):
@@ -68,6 +67,8 @@ class ProcessParameterPanel(QWidget):
         root=QVBoxLayout(self)
         root.setContentsMargins(0,0,0,0)
         nav=QGridLayout()
+        self.navigation_layout=nav
+        self.available_pages=None
         self.buttons=[]
         self.stack=ProcessPageStack()
         self.pages=[]
@@ -135,9 +136,6 @@ class ProcessParameterPanel(QWidget):
             cg.addWidget(text,i,0)
             cg.addWidget(w.cvd_spins[name],i,1)
         self.layouts[1].addWidget(self.cvd_fields)
-        self.geometry_label=QLabel()
-        self.geometry_label.setWordWrap(True)
-        self.layouts[1].addWidget(self.geometry_label)
         self.layouts[1].addWidget(self.note('새 CVD를 켜면 아래 기존 depth depletion은 이중 적용하지 않습니다. 기존 값은 보존됩니다. 닫힌 내부 void에는 추가 CVD 공급을 하지 않습니다.'))
         self.layouts[2].addWidget(self.note('Etch → 이온 공급/가림 → redep 순으로 설정합니다. 순수 Etch는 기본 증착량=0. 입사 가림을 유지한 무재증착 비교는 Redepo ON + 효율 0%. LF 전력·에너지 해석은 아닙니다.'))
         self.layouts[3].addWidget(self.note('증착 성장률에 적용되는 억제입니다. CVD와 함께 켜면 CVD 성장률 × inhibition 비율로 계산합니다. Bottom boost는 억제가 아니라 별도의 성장 보강 경험항입니다.'))
@@ -158,19 +156,21 @@ class ProcessParameterPanel(QWidget):
         # Inactive legacy models stay hidden as before, but are retained for compatibility.
         for key in ('lf','closure','reflected'):
             self.sections[key].hide()
-        geometry=QGroupBox('공유 기준 형상 · CVD / Inhibition')
+        geometry=QGroupBox()
+        self.geometry_group=geometry
         gg=QGridLayout(geometry)
-        self.geometry_widgets=[]
-        for row,(label,spin) in enumerate([(w.lbl_depth_feature_type,w.cmb_depth_feature_type),
-                                          (w.lbl_depth_feature_width,w.spin_depth_feature_width),
-                                          (w.lbl_depth_feature_depth,w.spin_depth_feature_depth),
-                                          (w.lbl_depth_feature_length,w.spin_depth_feature_length)]):
-            gg.addWidget(label,row,0)
-            gg.addWidget(spin,row,1)
-            self.geometry_widgets.extend((label,spin))
-        self.geometry_button=QPushButton('현재 구조에서 폭·깊이 가져오기')
-        self.geometry_button.clicked.connect(self.infer_geometry)
-        gg.addWidget(self.geometry_button,4,0,1,2)
+        self.geometry_widgets=[w.lbl_depth_feature_type,w.cmb_depth_feature_type]
+        gg.addWidget(w.lbl_depth_feature_type,0,0)
+        gg.addWidget(w.cmb_depth_feature_type,0,1)
+        # Retain internal controls for old result readers/curve editors, but
+        # never expose independent dimensions in the process UI.
+        self.geometry_compatibility=QWidget(self)
+        self.geometry_compatibility.hide()
+        for widget in (w.lbl_depth_feature_width,w.spin_depth_feature_width,
+                       w.lbl_depth_feature_depth,w.spin_depth_feature_depth,
+                       w.lbl_depth_feature_length,w.spin_depth_feature_length):
+            widget.setParent(self.geometry_compatibility)
+            widget.hide()
         self.layouts[1].insertWidget(4,geometry)
         for widget,page in [(w.incident_model_group,2),
                             (w.gaussian_group,2),(w.ion_map_group,2),(w.redepo_lobe_group,2),
@@ -239,6 +239,8 @@ class ProcessParameterPanel(QWidget):
         return label
 
     def select(self,n):
+        if self.available_pages is not None and n not in self.available_pages:
+            n=self.available_pages[0]
         self.stack.setCurrentIndex(n)
         for i,button in enumerate(self.buttons):button.setChecked(i==n)
         # Only the selected page contributes to the outer scroll area height.
@@ -246,6 +248,20 @@ class ProcessParameterPanel(QWidget):
         for i,page in enumerate(self.pages):
             page.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred if i==n else QSizePolicy.Ignored)
         self.stack.adjustSize()
+
+    def set_available_pages(self, indices):
+        """Keep stable page identities while compacting the visible menu."""
+        indices=tuple(indices)
+        if indices==self.available_pages:
+            return
+        self.available_pages=indices
+        for i,button in enumerate(self.buttons):
+            self.navigation_layout.removeWidget(button)
+            button.setVisible(i in indices)
+        for position,i in enumerate(indices):
+            span=2 if position==len(indices)-1 and position%2==0 else 1
+            self.navigation_layout.addWidget(self.buttons[i],position//2,position%2,1,span)
+        self.select(self.stack.currentIndex())
 
     def changed(self,*_):
         self.sync()
@@ -259,32 +275,18 @@ class ProcessParameterPanel(QWidget):
         self.w._invalidate_result_for_input_change()
         self.sync()
 
-    def infer_geometry(self):
-        try:
-            width,depth=reference_geometry(self.w._current_geometry_points())
-        except ValueError as exc:
-            self.w.statusBar().showMessage(str(exc),6000)
-            return
-        self.w.spin_depth_feature_width.setValue(width)
-        self.w.spin_depth_feature_depth.setValue(depth)
-        self.w._invalidate_result_for_input_change()
-        self.sync()
-
     def sync(self,*_):
         w=self.w
         cvd=w.chk_typical_cvd.isChecked()
         etch=w.chk_sputter.isChecked()
         inh=w.chk_inhibition_deposition.isChecked()
         self.cvd_fields.setEnabled(cvd)
-        self.geometry_label.setText(f'계산 기준: 폭 {w.spin_depth_feature_width.value():g} Å / 깊이 {w.spin_depth_feature_depth.value():g} Å\n폭은 아래 설정값, 깊이는 구조 입력에서 갱신됩니다. 실제 단면과 다르면 가져오기로 맞추세요.')
         for widget in self.geometry_widgets:
             widget.setVisible(True)
             widget.setEnabled(True)
-        line=str(w.cmb_depth_feature_type.currentData())=='line'
-        w.spin_depth_feature_length.setVisible(line)
-        w.lbl_depth_feature_length.setVisible(line)
-        w.cmb_depth_feature_type.setEnabled(not cvd)
-        w.spin_depth_feature_length.setEnabled(not cvd and line)
+        w.cmb_depth_feature_type.setEnabled(True)
+        self.geometry_compatibility.hide()
+        w.spin_depth_feature_length.setEnabled(False)
         w.lbl_depth_depo_section.setText('기존 Depth depletion · 호환 모델')
         w.chk_depth_deposition.setText('기존 깊이 감쇠 사용 (호환)')
         w.chk_ion_transmission.setText('기존 이온 깊이 감쇠 (호환)')

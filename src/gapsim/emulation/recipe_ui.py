@@ -150,6 +150,7 @@ def install_recipe_layout(w):
     w.params_group.hide()
     w.recipe_group, w.recipe_labels = _group("공정 · 실행 조건", [
         ("process_type", "공정", w.cmb_process_type),
+        ("feature_type", "형상", w.cmb_depth_feature_type),
         ("recipe_model", "성장 모델", w.cmb_recipe_model),
         ("gpc", "GPC", w.spin_angstrom_per_cycle),
         ("cycles", "Cycle 수", w.spin_cycles),
@@ -180,6 +181,8 @@ def install_recipe_layout(w):
         item = p.layouts[page].itemAt(0)
         if item and isinstance(item.widget(), QLabel):
             item.widget().setText(text)
+            if page == 1:
+                w.growth_model_note = item.widget()
             if page == 2:
                 item.widget().hide()
 
@@ -227,6 +230,9 @@ def install_recipe_layout(w):
     p.curve_folds[w.gaussian_group].hide()
     p.conformal_button.setText("순수 Conformal 증착")
     p.conformal_button.setToolTip("균일 증착을 선택하고 식각·재부착·억제를 끕니다. 공정 종류와 GPC/D/R, 구조는 유지합니다.")
+    # Common execution inputs already live in the pinned recipe header. Keep
+    # the optional reset action with the other secondary actions, not an empty page.
+    w.process_actions_fold.layout().itemAt(0).widget().layout().addWidget(p.conformal_button)
     # Reparent the numerical ion resolution once, next to the other solver inputs.
     w.recipe_numerical_fold.layout().itemAt(0).widget().layout().addWidget(p.advanced_folds["rays"])
     install_response_layout(w)
@@ -287,6 +293,10 @@ def sync_recipe_layout(w):
     w.redepo_distance_group.setVisible(legacy)
     w.inhibition_law_group.setVisible(legacy)
     transport = model == "physical_transport_v1"
+    w.growth_model_note.setText(
+        "입자 도달과 표면 반응을 조절합니다." if transport else
+        "깊이별 성장과 형상 보정 계수를 조절합니다." if legacy else
+        "Conformal은 추가 성장·수송 계수 없이 균일 증착합니다. 수송 효과는 위 성장 모델에서 ‘수송·표면 반응’을 선택하세요.")
     etch = w.chk_sputter.isChecked()
     inh = w.chk_inhibition_deposition.isChecked()
     for key, widget, visible in [("gpc",w.spin_angstrom_per_cycle,ald), ("cycles",w.spin_cycles,ald),
@@ -303,9 +313,13 @@ def sync_recipe_layout(w):
     w.cmb_growth_basis.setEnabled(True)
     # All empirical alternatives are one compatibility family, mutually hidden
     # from the transport/conformal route that does not consume them.
-    for widget in [w.chk_typical_cvd, p.cvd_fields, p.advanced_folds["cvd"],
-                   w.process_geometry_fold]:
+    for widget in [w.chk_typical_cvd, p.cvd_fields, p.advanced_folds["cvd"]]:
         widget.setVisible(legacy)
+    # Hole/Line is a common structure choice, visible in the execution header.
+    # The former geometry fold no longer owns any user-facing inputs.
+    w.process_geometry_fold.hide()
+    w.cmb_depth_feature_type.show()
+    w.cmb_depth_feature_type.setEnabled(True)
     p.section_containers["depth"].setVisible(legacy and not w.chk_typical_cvd.isChecked())
     p.section_containers["ion"].setVisible(legacy and not w.chk_incident_los.isChecked())
     p.advanced_folds["inhibition"].setVisible(legacy)
@@ -334,9 +348,11 @@ def sync_recipe_layout(w):
     basis = "식각 전" if w.cmb_growth_basis.currentData() == "gross" else "기준면 순성장"
     p.dose_label.setText(f"{basis} 증착량 {amount:g} Å ({amount/10:g} nm) · 트랜치 국소 두께는 결과에서 확인")
     p.summary.setText(f"{'ALD' if ald else 'CVD'} · {w.cmb_recipe_model.currentText()} · 식각 {'ON' if etch else 'OFF'} / 재부착 {'ON' if etch and w.chk_redepo.isChecked() else 'OFF'} / 억제 {'ON' if inh else 'OFF'}")
-    w.process_geometry_fold.setTitle("기존 보정 모델의 기준 형상")
     if hasattr(w, 'response_folds'):
         sync_response_layout(w)
+    # Keep category locations stable for every model. Only the redundant
+    # execution page is omitted; model-specific controls retain their own gates.
+    p.set_available_pages([1, 2, 3, 4, 5])
     # A calibrated ALD model cannot be run as CVD. Select the supported default
     # on a process change, while keeping the entered coefficients available.
     if not ald and model == MODEL:

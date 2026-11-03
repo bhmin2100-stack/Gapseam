@@ -41,6 +41,8 @@ def test_transport_controls_and_split_list_follow_physics(window):
     p.select(1)
     assert not window.transport_group.isVisible()
     select(window,'cmb_recipe_model','physical_transport_v1')
+    assert p.buttons[1].isVisible() and p.buttons[4].isVisible()
+    p.select(1)
     assert window.spin_precursor_sticking.isVisible() and window.spin_ald_exposure.isVisible()
     select(window,'cmb_process_type','cvd')
     assert not window.spin_ald_exposure.isVisible()
@@ -49,6 +51,17 @@ def test_transport_controls_and_split_list_follow_physics(window):
     assert not {'cycles','angstrom_per_cycle','sputter_peak_pct','cvd_overhang_pct'} & set(keys)
     assert p.section_containers['depth'].isHidden()
     assert window.process_geometry_fold.isHidden()
+    assert window.recipe_group.isAncestorOf(window.cmb_depth_feature_type)
+    assert window.cmb_depth_feature_type.isVisible()
+    assert window.cmb_depth_feature_type.isEnabled()
+    before=window.current_config()
+    for i in (1,2,3,4,5):
+        p.buttons[i].click()
+    assert window.current_config()==before
+    p.select(1)
+    select(window,'cmb_recipe_model','ideal_conformal_v1')
+    assert p.buttons[1].isVisible() and p.stack.currentIndex()==1
+    assert 'Conformal' in window.growth_model_note.text()
 
 
 def test_sfo_preset_is_ald_and_preserves_target_geometry_and_runtime(window):
@@ -65,6 +78,15 @@ def test_sfo_preset_is_ald_and_preserves_target_geometry_and_runtime(window):
     assert cfg.cycles==47 and cfg.cvd_duration_s==123
     assert cfg.angstrom_per_cycle==.56 and cfg.redepo_enabled
     assert cfg.front_scheme=='angular_godunov_v1' and cfg.growth_basis=='net_planar'
+    p=window.process_parameter_panel
+    assert p.buttons[1].isVisible() and p.buttons[4].isVisible()
+    p.select(4)
+    select(window,'cmb_recipe_model','ideal_conformal_v1')
+    assert p.buttons[4].isVisible() and p.stack.currentIndex()==4
+    assert window.response_model_note.isVisible()
+    assert all(not fold.isEnabled() for fold in window.response_folds)
+    window.apply_selected_parameter_preset()
+    assert window.response_model_note.isHidden()
     window.chk_preset_run_defaults.setChecked(True)
     window.chk_preset_calculation_settings.setChecked(True)
     window.spin_reparam_ds.setValue(20)

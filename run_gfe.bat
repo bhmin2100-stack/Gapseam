@@ -28,8 +28,27 @@ if not exist "%LOG_DIR%" (
   echo Log file: %LOG_FILE%
 )
 
+rem Normal launches use the packaged build from build_gfe_portable.bat.
+rem Developers can explicitly select this checkout's source with --source.
+if /I "%~1"=="--source" goto RUN_SOURCE
+if exist "%cd%\dist\GFE\GFE.exe" goto RUN_PACKAGED
+
+:RUN_SOURCE
+echo Launch mode: source>> "%LOG_FILE%"
 call :RUN_APP
 exit /b %errorlevel%
+
+:RUN_PACKAGED
+set "PACKAGED_DIR=%cd%\dist\GFE"
+echo Launch mode: packaged>> "%LOG_FILE%"
+echo Executable: %PACKAGED_DIR%\GFE.exe>> "%LOG_FILE%"
+echo Launching packaged %APP_NAME%...
+start "" /D "%PACKAGED_DIR%" "%PACKAGED_DIR%\GFE.exe"
+if errorlevel 1 (
+  set "FAIL_REASON=The packaged GFE executable could not be launched"
+  goto FAIL
+)
+exit /b 0
 
 :RUN_APP
 echo.

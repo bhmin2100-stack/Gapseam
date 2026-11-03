@@ -124,7 +124,7 @@ SHORT_NAMES = {
  'spin_inhibition_decay_power':'억제 감쇠 지수', 'spin_inhibition_min_growth':'최소 성장률 (%)',
  'spin_inhibition_bottom_boost':'바닥 성장 보강 (%)', 'spin_inhibition_recombination':'재결합 손실 (%)',
  'spin_inhibition_smoothing':'성장률 평활화 (Å)',
- 'cmb_depth_feature_type':'기준 형상', 'spin_depth_feature_width':'기준 폭 (Å)',
+ 'cmb_depth_feature_type':'형상', 'spin_depth_feature_width':'기준 폭 (Å)',
  'spin_depth_feature_depth':'기준 깊이 (Å)', 'spin_depth_feature_length':'기준 길이 (Å)',
  'spin_depth_decay_k':'감쇠 강도', 'spin_depth_decay_power':'감쇠 지수',
  'spin_depth_min_ratio_pct':'최소 증착률 (%)', 'spin_depth_closure_threshold':'닫힘 진단 간격 (Å)',

@@ -12,7 +12,7 @@ class HelpPreferences(QObject):
     def __init__(self, settings=None, parent=None):
         super().__init__(parent)
         self.settings = settings if settings is not None else QSettings('Gapseam', 'GFE')
-        self.enabled = self.settings.value(self.KEY, True, type=bool)
+        self.enabled = self.settings.value(self.KEY, False, type=bool)
 
     def set_enabled(self, enabled):
         enabled = bool(enabled)

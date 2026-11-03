@@ -9,7 +9,7 @@ RECIPE_NAMES = ('SFO3.1', 'SFO3.10', 'SFO3.10-HAR (시험)', 'SFO3.11')
 # objects so callers can still locate an existing user copy with findData().
 SAVED_RECIPE_KEYS = dict(zip(RECIPE_NAMES[:2], (SAVED_PRESET_KEY, SAVED_PRESET_KEY_310)))
 SAVED_RECIPE_KEYS.update({name: ('saved', name) for name in RECIPE_NAMES[2:]})
-STRUCTURE_NAMES = (STRUCTURE_NAME, '사진 구조 CD365 H1839', '깊은 Trench CD230 H5000')
+STRUCTURE_NAMES = (STRUCTURE_NAME, '사진 구조 CD365 H1839', '테이퍼 Trench CD264 H5000')
 
 
 def recipe_config(name):
@@ -19,14 +19,17 @@ def recipe_config(name):
     values = normalized_values(asdict(cfg))
     if name==RECIPE_NAMES[2]: values['empirical_response']['har_enabled']=True
     if name=='SFO3.11':
-        # Frozen width/length candidate (2026-10-31). Empirical response only;
+        # CD264 taper / 55nm field calibration (2026-11-01). Empirical response;
         # no target contour and no post-closure filling. Geometry stays separate.
         values['empirical_response'].update(
-            har_enabled=True, har_growth_floor=9.93533549067577,
+            har_enabled=True, har_growth_floor=1.673,
             har_depth_power=.7, closure_enabled=False,
-            upper_gain=0., relief_gain=0., deep_early_gain=0., deep_middle_gain=0.)
+            har_upper_center_cd=.69, har_upper_halfwidth_cd=.3, har_upper_gain=.4,
+            upper_gain=0., relief_center_cd=1.1, relief_halfwidth_cd=.6, relief_gain=.4,
+            deep_early_gain=0., deep_middle_gain=0.)
         values['deposition_post_closure_fill_pct_hole']=0.
         values['deposition_post_closure_fill_pct_line']=0.
+        values['cycles']=982  # 0.56 A/cycle -> 549.92 A reference-plane growth.
         values['reparam_ds_a']=50.  # Optional numerical default from the HAR replay.
     return replace(cfg, **values)
 
@@ -46,8 +49,11 @@ def structure_config(name):
         points=((-3650.,0.),*left,*[(-x,y) for x,y in reversed(left)],(3650.,0.))
         return replace(base, points=points, initial_voids=(), deposition_feature_width_a=3650., deposition_feature_depth_a=18390., deposition_feature_length_a=None)
     if name==STRUCTURE_NAMES[2]:
-        width,depth,field=2300.,50000.,6900.
-        points=((-field,0.),(-width/2,0.),(-width/2,-depth),(width/2,-depth),(width/2,0.),(field,0.))
+        width,depth,field=2640.,50000.,7920.
+        # Measured full CD at each depth, both in nm; mirror about x=0.
+        dimensions=((0.,264.),(205.,243.),(504.,231.),(3880.,151.),(5000.,86.))
+        left=[(-cd*5.,-z*10.) for z,cd in dimensions]
+        points=((-field,0.),*left,*[(-x,y) for x,y in reversed(left)],(field,0.))
         return replace(base, points=points, initial_voids=(), deposition_feature_width_a=width, deposition_feature_depth_a=depth, deposition_feature_length_a=None)
     raise KeyError(name)
 

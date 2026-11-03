@@ -52,6 +52,7 @@ def test_secondary_actions_and_presets_remain_in_process(window):
         fold.setChecked(True)
     assert window.current_config() == before
     assert window.process_presets_fold.isAncestorOf(window.parameter_preset_group)
+    assert window.process_actions_fold.isAncestorOf(window.process_parameter_panel.conformal_button)
     assert not hasattr(window,'preset_tabs')
     assert not hasattr(window,'incident_preset_group')
     assert window.btn_save_parameter_preset.isEnabled()
@@ -60,10 +61,9 @@ def test_secondary_actions_and_presets_remain_in_process(window):
 def test_hidden_long_pages_do_not_create_blank_scroll_space(window):
     window.cmb_recipe_model.setCurrentIndex(window.cmb_recipe_model.findData('legacy_calibrated_v1'))
     p = window.process_parameter_panel
-    p.select(0)
+    p.select(5)
     QApplication.processEvents()
-    assert p.stack.sizeHint().height() == p.pages[0].sizeHint().height()
-    assert window.process_geometry_fold.y() < window.progress_scroll_area.viewport().height()
+    assert p.stack.sizeHint().height() == p.pages[5].sizeHint().height()
     p.select(1)
     window.chk_typical_cvd.setChecked(True)
     QApplication.processEvents()

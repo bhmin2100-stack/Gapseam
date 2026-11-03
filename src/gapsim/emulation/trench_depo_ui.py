@@ -6023,12 +6023,42 @@ class TrenchDepoWindow(QMainWindow):
     def _sync_depth_feature_depth_from_geometry(self) -> None:
         if not hasattr(self, "spin_depth_feature_depth"):
             return
-        depth_a = self._geometry_depth_a(self._current_geometry_points())
-        if depth_a <= 0.0:
-            return
-        if abs(float(self.spin_depth_feature_depth.value()) - depth_a) <= 1e-6:
-            return
-        self.spin_depth_feature_depth.setValue(depth_a)
+        width_a, depth_a = self._geometry_reference_dimensions()
+        for spin, value in ((self.spin_depth_feature_width, width_a),
+                            (self.spin_depth_feature_depth, depth_a),
+                            (self.spin_depth_feature_length, 0.)):
+            blocked = spin.blockSignals(True)
+            try:
+                spin.setValue(value)
+            finally:
+                spin.blockSignals(blocked)
+        self.sync_depth_deposition_editor_from_spins()
+        self.sync_inhibition_profile_from_spins()
+
+    def _geometry_reference_dimensions(self) -> Tuple[float, float]:
+        # Reference dimensions belong to the input structure, not its optional
+        # numerical smoothing or the selected process preset.
+        points = tuple(self._structure_points or self._current_geometry_points())
+        cached = getattr(self, "_geometry_reference_cache", None)
+        if cached is not None and cached[0] == points:
+            return cached[1]
+        from gapsim.emulation.sfo31_verified import STRUCTURE_NAME, structure_metadata
+        metadata = structure_metadata(STRUCTURE_NAME, points)
+        if metadata:
+            # Rounded built-in geometry includes a prescribed nominal CD;
+            # the outer edge of its fillet is not that nominal opening.
+            dimensions = (float(metadata["deposition_feature_width_a"]),
+                          float(metadata["deposition_feature_depth_a"]))
+        else:
+            try:
+                dimensions = typical_cvd.reference_geometry(points)
+            except ValueError:
+                # Flat/open surfaces may have no enclosed trench opening.
+                xs = [float(x) for x, _ in points]
+                dimensions = (max(1., max(xs, default=0.)-min(xs, default=0.)),
+                              max(1., self._geometry_depth_a(points)))
+        self._geometry_reference_cache = (points, dimensions)
+        return dimensions
 
     def _current_geometry_source_name(self) -> str:
         if self._use_smoothed_geometry and len(self._smoothed_points) >= 2:
@@ -7270,7 +7300,7 @@ class TrenchDepoWindow(QMainWindow):
             return
         mode = self._current_depth_display_mode()
         feature_type = str(self.cmb_depth_feature_type.currentData() or "hole")
-        feature_length = float(self.spin_depth_feature_length.value())
+        feature_width, _ = self._geometry_reference_dimensions()
         text = _depth_deposition_formula_text(
             display_mode=mode,
             base_rate_a_per_cycle=float(self.spin_angstrom_per_cycle.value()),
@@ -7279,8 +7309,8 @@ class TrenchDepoWindow(QMainWindow):
             depth_decay_power=float(self.spin_depth_decay_power.value()),
             min_ratio_pct=float(self.spin_depth_min_ratio_pct.value()),
             feature_type=feature_type,
-            feature_width_a=float(self.spin_depth_feature_width.value()),
-            feature_length_a=None if feature_type != "line" or feature_length <= 0.0 else feature_length,
+            feature_width_a=feature_width,
+            feature_length_a=None,
         )
         self.lbl_depth_formula.setText(text)
         if mode == "attenuation":
@@ -7302,15 +7332,12 @@ class TrenchDepoWindow(QMainWindow):
             self.depth_deposition_editor.set_depo_rate_a_per_cycle(float(self.spin_angstrom_per_cycle.value()))
             self.depth_deposition_editor.set_display_mode(self._current_depth_display_mode())
             feature_type = str(self.cmb_depth_feature_type.currentData() or "hole")
-            length_enabled = feature_type == "line"
-            self.lbl_depth_feature_length.setEnabled(length_enabled)
-            self.spin_depth_feature_length.setEnabled(length_enabled)
-            depth_feature_length = float(self.spin_depth_feature_length.value())
+            feature_width, feature_depth = self._geometry_reference_dimensions()
             self.depth_deposition_editor.set_feature_geometry(
                 feature_type,
-                float(self.spin_depth_feature_width.value()),
-                float(self.spin_depth_feature_depth.value()),
-                None if (not length_enabled or depth_feature_length <= 0.0) else depth_feature_length,
+                feature_width,
+                feature_depth,
+                None,
             )
             self.depth_deposition_editor.set_parameters(
                 float(self.spin_depth_decay_k.value()),
@@ -7340,15 +7367,12 @@ class TrenchDepoWindow(QMainWindow):
             self.depth_deposition_editor.set_depo_rate_a_per_cycle(float(self.spin_angstrom_per_cycle.value()))
             self.depth_deposition_editor.set_display_mode(self._current_depth_display_mode())
             feature_type = str(self.cmb_depth_feature_type.currentData() or "hole")
-            length_enabled = feature_type == "line"
-            self.lbl_depth_feature_length.setEnabled(length_enabled)
-            self.spin_depth_feature_length.setEnabled(length_enabled)
-            depth_feature_length = float(self.spin_depth_feature_length.value())
+            feature_width, feature_depth = self._geometry_reference_dimensions()
             self.depth_deposition_editor.set_feature_geometry(
                 feature_type,
-                float(self.spin_depth_feature_width.value()),
-                float(self.spin_depth_feature_depth.value()),
-                None if (not length_enabled or depth_feature_length <= 0.0) else depth_feature_length,
+                feature_width,
+                feature_depth,
+                None,
             )
             self.depth_deposition_editor.set_parameters(
                 float(self.spin_depth_decay_k.value()),
@@ -7365,7 +7389,7 @@ class TrenchDepoWindow(QMainWindow):
             return
         self._syncing_inhibition_curve = True
         try:
-            self.inhibition_profile_editor.set_feature_depth(float(self.spin_depth_feature_depth.value()))
+            self.inhibition_profile_editor.set_feature_depth(self._geometry_reference_dimensions()[1])
             self.inhibition_profile_editor.set_parameters(
                 float(self.spin_inhibition_strength.value()),
                 float(self.spin_inhibition_penetration.value()),
@@ -7396,7 +7420,7 @@ class TrenchDepoWindow(QMainWindow):
             self.spin_inhibition_min_growth.setValue(float(min_growth_pct))
             self.spin_inhibition_bottom_boost.setValue(float(bottom_boost_pct))
             self.spin_inhibition_recombination.setValue(float(recombination_pct))
-            self.inhibition_profile_editor.set_feature_depth(float(self.spin_depth_feature_depth.value()))
+            self.inhibition_profile_editor.set_feature_depth(self._geometry_reference_dimensions()[1])
             self.inhibition_profile_editor.set_parameters(
                 float(self.spin_inhibition_strength.value()),
                 float(self.spin_inhibition_penetration.value()),
@@ -8034,7 +8058,7 @@ class TrenchDepoWindow(QMainWindow):
         supports_closure_redepo = self._active_emulator_supports_closure_redepo()
         etch_enabled = bool(supports_sputter and self.chk_sputter.isChecked())
         depth_feature_type = str(self.cmb_depth_feature_type.currentData() or "hole")
-        depth_feature_length = float(self.spin_depth_feature_length.value())
+        feature_width, feature_depth = self._geometry_reference_dimensions()
         config = TrenchDepoConfig(
             points=self._current_geometry_points(),
             initial_voids=self._initial_voids,
@@ -8122,11 +8146,9 @@ class TrenchDepoWindow(QMainWindow):
                 supports_depth_deposition and self.chk_depth_deposition.isChecked()
             ),
             deposition_feature_type=depth_feature_type,
-            deposition_feature_width_a=float(self.spin_depth_feature_width.value()),
-            deposition_feature_depth_a=float(self.spin_depth_feature_depth.value()),
-            deposition_feature_length_a=(
-                None if depth_feature_type != "line" or depth_feature_length <= 0.0 else depth_feature_length
-            ),
+            deposition_feature_width_a=feature_width,
+            deposition_feature_depth_a=feature_depth,
+            deposition_feature_length_a=None,
             deposition_attenuation_model="exponential",
             deposition_depth_decay_k=float(self.spin_depth_decay_k.value()),
             deposition_depth_decay_power=float(self.spin_depth_decay_power.value()),

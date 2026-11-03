@@ -82,6 +82,7 @@ def window(tmp_path,monkeypatch):
     from PySide6.QtCore import QSettings
     from gapsim.emulation.help_preferences import HelpPreferences
     preferences = HelpPreferences(QSettings(str(tmp_path/'help.ini'), QSettings.IniFormat), parent=app)
+    preferences.set_enabled(True)  # Help interaction tests explicitly opt in.
     monkeypatch.setattr(app, '_gfe_help_preferences', preferences, raising=False)
     with mock.patch('gapsim.emulation.trench_depo_ui.QTimer.singleShot'):
         w=TrenchDepoWindow()
@@ -93,19 +94,29 @@ def window(tmp_path,monkeypatch):
     app.processEvents()
 
 
-def test_four_group_navigation_and_dependencies(window):
+def test_model_navigation_and_dependencies(window):
     p=window.process_parameter_panel
-    assert len(p.buttons)==6
-    for i,button in enumerate(p.buttons):
-        QTest.mouseClick(button,Qt.LeftButton)
-        assert p.stack.currentIndex()==i and button.isChecked()
+    assert [b.text() for b in p.buttons if b.isVisible()]==['성장·수송','식각·재부착','억제','보정 응답','계산 정확도']
+    before=window.current_config()
+    for i in (1,2,3,4,5):
+        QTest.mouseClick(p.buttons[i],Qt.LeftButton)
+        assert p.stack.currentIndex()==i and p.buttons[i].isChecked()
+    assert window.current_config()==before
+    window.cmb_recipe_model.setCurrentIndex(window.cmb_recipe_model.findData('legacy_calibrated_v1'))
+    for i in (1,2,3,4,5):
+        assert p.buttons[i].isVisible()
+        QTest.mouseClick(p.buttons[i],Qt.LeftButton)
+        assert p.stack.currentIndex()==i and p.buttons[i].isChecked()
     p.select(1)
     assert not window.cvd_spins['cvd_overhang_pct'].isEnabled()
     QTest.mouseClick(window.chk_typical_cvd,Qt.LeftButton,pos=QPoint(8,window.chk_typical_cvd.height()//2))
     assert window.cvd_spins['cvd_overhang_pct'].isEnabled()
     assert not window.chk_depth_deposition.isEnabled()
     window.process_geometry_fold.setChecked(True)
-    p.geometry_button.click()
+    assert not hasattr(p, 'geometry_button')
+    for name in ('width','depth','length'):
+        assert not getattr(window,'spin_depth_feature_'+name).isVisible()
+        assert not getattr(window,'lbl_depth_feature_'+name).isVisible()
     assert window.current_config().deposition_feature_width_a==500
     assert window.current_config().deposition_feature_depth_a==4000
     window.chk_sputter.setChecked(True)
@@ -116,6 +127,9 @@ def test_four_group_navigation_and_dependencies(window):
     p.conformal_only()
     c=window.current_config()
     assert not any((c.cvd_enabled,c.sputter_enabled,c.inhibition_enabled,c.deposition_depth_enabled))
+    assert p.stack.currentIndex()==1 and p.buttons[1].isChecked()
+    assert p.buttons[0].isHidden()
+    assert all(p.buttons[i].isVisible() for i in (1,2,3,4,5))
 
 
 def test_cvd_ui_preset_cache_and_replay_roundtrip(window,tmp_path):

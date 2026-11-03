@@ -45,11 +45,8 @@ def install_workflow_layout(w):
     # Shared presets and geometry stay INSIDE the process pane.
     w.process_presets_fold = p.fold('프리셋', w.parameter_preset_group)
     w.progress_panel_content.layout().insertWidget(0, w.process_presets_fold)
-    p.geometry_group = p.geometry_button.parentWidget()
-    p.geometry_group.setTitle('공유 기준 형상')
-    w.process_geometry_fold = p.fold('기준 형상 · CVD / 억제 공통', p.geometry_group)
+    w.process_geometry_fold = p.fold('형상', p.geometry_group)
     w.progress_panel_content.layout().insertWidget(2, w.process_geometry_fold)
-    p.geometry_group.layout().addWidget(p.geometry_label, 5, 0, 1, 2)
     w.process_notes_fold = p.fold('실행 메모', w.note_group)
     w.progress_panel_content.layout().insertWidget(3, w.process_notes_fold)
 

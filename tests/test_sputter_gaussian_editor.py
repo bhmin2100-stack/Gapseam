@@ -13,6 +13,10 @@ os.environ.setdefault(
     "GAPSIM_STRUCTURE_LIBRARY",
     str(Path(_STRUCTURE_LIBRARY_TMP.name) / "structures.xlsx"),
 )
+os.environ.setdefault(
+    "GAPSIM_PARAMETER_LIBRARY",
+    str(Path(_STRUCTURE_LIBRARY_TMP.name) / "parameter_presets.json"),
+)
 _ADDON_LIBRARY_TMP = tempfile.TemporaryDirectory()
 os.environ.setdefault("GAPSIM_ADDON_ROOT", str(Path(_ADDON_LIBRARY_TMP.name) / "addons"))
 os.environ.setdefault("GAPSIM_ADDON_STATE", str(Path(_ADDON_LIBRARY_TMP.name) / "addons_state.json"))
@@ -1265,10 +1269,10 @@ class SputterGaussianEditorTest(unittest.TestCase):
             line_idx = window.cmb_depth_feature_type.findData("line")
             window.cmb_depth_feature_type.setCurrentIndex(line_idx)
             window.spin_depth_feature_length.setValue(2500.0)
-            self.assertTrue(window.spin_depth_feature_length.isEnabled())
+            self.assertFalse(window.spin_depth_feature_length.isVisible())
             config = window.current_config()
             self.assertEqual(config.deposition_feature_type, "line")
-            self.assertAlmostEqual(config.deposition_feature_length_a, 2500.0, places=6)
+            self.assertIsNone(config.deposition_feature_length_a)
 
             window.spin_depth_decay_k.setValue(1.1)
             self.assertAlmostEqual(window.depth_deposition_editor.parameters()[0], 1.1, places=6)
@@ -1281,7 +1285,7 @@ class SputterGaussianEditorTest(unittest.TestCase):
             self.assertIn("Dep rate식", window.lbl_depth_formula.text())
             self.assertIn("D0=12.500 A/CYC", window.lbl_depth_formula.text())
             self.assertIn("K=0.45000", window.lbl_depth_formula.text())
-            self.assertIn("g(z)=z*(W+L)/(2*W*L)", window.lbl_depth_formula.text())
+            self.assertIn("g(z)=z/(2*W)", window.lbl_depth_formula.text())
             attenuation_idx = window.cmb_depth_display_mode.findData("attenuation")
             window.cmb_depth_display_mode.setCurrentIndex(attenuation_idx)
             self.assertEqual(window.depth_deposition_editor.display_mode(), "attenuation")

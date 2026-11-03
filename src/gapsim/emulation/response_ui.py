@@ -13,11 +13,11 @@ SECTIONS = (
         ('depth_reference','깊이 기준','현재 상면은 성장한 field, 최초 상면은 입력 구조의 상면입니다.'),
         ('upper_center_cd','상부 중심 (CD 배수)','현재 기준 폭에 대한 깊이 비율입니다.'),
         ('upper_halfwidth_cd','상부 반폭 (CD 배수)','중심에서 이 거리까지 보정이 부드럽게 0으로 줄어듭니다.'),
-        ('upper_gain','상부 성장 증가','낮은 종횡비에서 상부 성장률에 더하는 배율입니다.'),
+        ('upper_gain','상부 성장 증가','높은 종횡비에서 상부 성장률에 더하는 배율입니다. 기존 보정식의 종횡비 가중치를 따릅니다.'),
         ('relief_center_cd','완화 중심 (CD 배수)','성장률을 낮추는 깊이 구간의 중심입니다.'),
         ('relief_halfwidth_cd','완화 반폭 (CD 배수)','성장 완화가 적용되는 깊이 범위입니다.'),
         ('relief_gain','성장 완화량','성장 배율에서 빼는 값입니다. 최종 배율은 0 아래로 내려가지 않습니다.'),
-        ('deep_center_cd','심부 중심 (CD 배수)','높은 종횡비에서 적용할 깊이 구간의 중심입니다.'),
+        ('deep_center_cd','심부 중심 (CD 배수)','깊이 구간 보정의 중심입니다. 기존 보정식에서는 낮은 종횡비일수록 이 구간의 비중이 커집니다.'),
         ('deep_halfwidth_cd','심부 반폭 (CD 배수)','심부 성장 응답의 공간 범위입니다.'),
         ('deep_early_gain','초기 심부 변화','초기 증착량 구간의 성장 배율 변화입니다. 음수는 감소입니다.'),
         ('deep_middle_gain','중기 심부 변화','초기 전환 이후, 종료 전환 이전의 배율 변화입니다.'),
@@ -163,6 +163,8 @@ def install_response_layout(w):
         ('path','Trench 공급 보정',w.spin_depth_line_open_path),
         ('decay','잔류 충전 감쇠 길이 (Å)',w.spin_depth_residual_decay),
         ('distribution','충전 분포',w.cmb_residual_distribution)])
+    w.response_model_note=p.note('성장 모델에서 ‘보정 응답 · ALD’를 선택하면 추가 응답을 조절할 수 있습니다.')
+    p.layouts[4].insertWidget(0,w.response_model_note)
     w.common_growth_boost_group=move_rows('바닥 성장 보강 · 경험식',1,[
         ('bottom','바닥 성장 증가 (%)',w.spin_inhibition_bottom_boost),
         ('radical','재결합 보정 (%)',w.spin_inhibition_recombination)])
@@ -193,6 +195,7 @@ def install_response_layout(w):
 def sync_response_layout(w):
     enabled = w.cmb_recipe_model.currentData()==MODEL and w.cmb_process_type.currentData()=='ald'
     calibrated = w.cmb_recipe_model.currentData() in (MODEL,'legacy_calibrated_v1','sfo310_calibrated_v1')
+    w.response_model_note.setVisible(not enabled)
     w.common_fill_group.setEnabled(calibrated and w.chk_depth_deposition.isChecked())
     w.common_ion_growth_group.setVisible(calibrated and w.cmb_process_type.currentData()=='ald')
     w.common_smoothing_group.setVisible(calibrated)

@@ -127,3 +127,41 @@ def test_sfo311_apply_keeps_geometry_duration_and_blocks_post_fill(window):
     p=load_parameters(cfg.empirical_response)
     assert aspect_extension_weight(replace(cfg,deposition_feature_width_a=2420.,deposition_feature_depth_a=7020.),p)==0.
     assert aspect_extension_weight(replace(cfg,deposition_feature_width_a=2300.,deposition_feature_depth_a=50000.),p)==1.
+
+
+def test_deep_taper_preset_matches_supplied_dimensions_and_symmetry():
+    cfg=structure_config(STRUCTURE_NAMES[-1])
+    assert cfg.deposition_feature_width_a==2640.
+    assert cfg.deposition_feature_depth_a==50000.
+    pts=cfg.points
+    assert tuple((-x,y) for x,y in reversed(pts))==pts
+    for depth,cd in ((0,264),(205,243),(504,231),(3880,151),(5000,86)):
+        assert (-cd*5.,-depth*10.) in pts
+        assert (cd*5.,-depth*10.) in pts
+
+
+@pytest.mark.parametrize('name', STRUCTURE_NAMES)
+def test_dimensions_follow_structure_and_ignore_hidden_overrides(window, name):
+    window.cmb_structure_library.setCurrentIndex(window.cmb_structure_library.findData(name))
+    window.load_selected_structure_from_library()
+    expected=structure_config(name)
+    window.spin_depth_feature_width.setValue(123.)
+    window.spin_depth_feature_depth.setValue(456.)
+    window.spin_depth_feature_length.setValue(789.)
+    cfg=window.current_config()
+    assert cfg.deposition_feature_width_a==expected.deposition_feature_width_a
+    assert cfg.deposition_feature_depth_a==expected.deposition_feature_depth_a
+    assert cfg.deposition_feature_length_a is None
+
+
+def test_dimensions_follow_structure_edits_and_remain_after_recipe_apply(window):
+    points=((-2000.,100.),(-800.,100.),(-500.,-1900.),(500.,-1900.),(800.,100.),(2000.,100.))
+    window._set_structure_points(points,fit=False,preserve_on_emulator_switch=True)
+    window.cmb_parameter_preset.setCurrentIndex(window.cmb_parameter_preset.findData('SFO3.11'))
+    window.btn_apply_parameter_preset.click()
+    cfg=window.current_config()
+    assert cfg.points==points
+    assert (cfg.deposition_feature_width_a,cfg.deposition_feature_depth_a)==(1600.,2000.)
+    window._set_structure_points(tuple((x*2,y*3) for x,y in points),fit=False)
+    cfg=window.current_config()
+    assert (cfg.deposition_feature_width_a,cfg.deposition_feature_depth_a)==(3200.,6000.)
