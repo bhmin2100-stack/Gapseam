@@ -8485,6 +8485,7 @@ class TrenchDepoWindow(QMainWindow):
 
     def _preview_cache_key(self, config: TrenchDepoConfig) -> tuple[object, ...]:
         return (
+            json.dumps(config.depth_formula, sort_keys=True),
             tuple(getattr(config, key) for key in RECIPE_WIDGETS),
             tuple(typical_cvd.config_values(config).values()),
             tuple((float(x), float(y)) for x, y in config.points),
@@ -8768,6 +8769,8 @@ class TrenchDepoWindow(QMainWindow):
         self._emulation_worker = None
 
     def _choose_run_resolution(self, config, *, automatic=False, split=False):
+        from gapsim.emulation.depth_formula import validate_config
+        validate_config(config)
         estimate = estimate_resolution(config.points)
         if estimate.points_at(config.reparam_ds_a) <= POINT_WARNING_THRESHOLD:
             return config

@@ -244,6 +244,9 @@ def payload_to_trench_run(payload: Dict[str, Any]) -> Tuple[TrenchDepoConfig, Tr
         elif name == "empirical_response":
             from .calibrated_response import load_parameters
             values[name] = None if value is None else asdict(load_parameters(value))
+        elif name == "depth_formula":
+            from .depth_formula import load_parameters
+            values[name] = None if value is None else asdict(load_parameters(value))
         elif isinstance(default, bool):
             if not isinstance(value, (bool, int)) or value not in (False, True, 0, 1):
                 raise ValueError(f"Invalid replay payload: {name} must be a boolean.")

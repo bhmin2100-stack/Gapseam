@@ -153,7 +153,10 @@ class TrenchAnimation(QWidget):
         p.fillRect(self.rect(), QColor('#f1f6fa'))
         p.scale(self.width()/520, self.height()/340)
         font = p.font(); font.setPixelSize(12); p.setFont(font)
-        if self.movie:
+        if self.kind == 'depth_formula':
+            from .depth_formula_help import draw
+            draw(self, p)
+        elif self.movie:
             {'shape': self.draw_shapes, 'zoom': self.draw_zoom, 'meaning': self.draw_meaning}[self.stage()](p)
         else:
             self.draw_setting(p)

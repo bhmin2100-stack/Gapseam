@@ -90,6 +90,9 @@ def bind_grid_labels(root,manager):
 
 def install_extended_help(owner,manager=None):
     manager=manager or ParameterHelp(owner)
+    if hasattr(owner, 'depth_formula_controls'):
+        from .depth_formula_help import install
+        install(owner, manager)
     navigation = getattr(owner, 'result_navigation', None)
     if navigation is not None:
         manager.bind(navigation.interval, spec(

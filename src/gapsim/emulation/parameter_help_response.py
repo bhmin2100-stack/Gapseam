@@ -153,7 +153,7 @@ def application_note(key, c):
     if key == 'spin_numerical_step':
         return '계산 정확도 설정 · 실제 공정 cycle/시간과 별개' if not legacy else '현재 미적용: 기존 보정 모델은 저장된 계산 순서 유지'
     if key == 'spin_transport_rays':
-        active = model == 'physical_transport_v1' or model == 'ideal_conformal_v1' and (c.inhibition_enabled or etch and c.redepo_enabled)
+        active = model == 'physical_transport_v1' or model in ('ideal_conformal_v1','depth_formula_v1') and (c.inhibition_enabled or etch and c.redepo_enabled)
         return '현재 적용: 방향 적분 정확도' if active else '현재 미적용: 중성 수송·억제 또는 재부착 수송 경로 없음'
     if not legacy:
         if key.startswith(('cvd_', 'spin_inhibition_', 'spin_depth_', 'cmb_depth_', 'spin_ion_', 'slider_ion_')) or key in ('chk_typical_cvd', 'chk_depth_deposition', 'chk_ion_transmission', 'spin_sputter_smoothing', 'spin_sputter_peak_pct', 'spin_redepo_emit_power', 'spin_redepo_distance_power', 'spin_redepo_max_distance', 'spin_redepo_soft_los'):

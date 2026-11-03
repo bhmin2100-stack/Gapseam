@@ -11,6 +11,7 @@ from dataclasses import asdict, replace
 import math
 
 import numpy as np
+from . import depth_formula
 
 from gapsim.engine.deposition_pipeline import (
     OffsetBoolean, SimulationCanceled, TopologyCleanup, VertexNormalPropagator,
@@ -22,7 +23,7 @@ from gapsim.engine.surface_kinetics import (
     adsorption_coverage, build_neutral_kernel, sputtered_redeposition,
 )
 
-RECIPE_MODELS = ('legacy_calibrated_v1', 'sfo310_calibrated_v1', 'calibrated_response_v1', 'ideal_conformal_v1', 'physical_transport_v1')
+RECIPE_MODELS = ('legacy_calibrated_v1', 'sfo310_calibrated_v1', 'calibrated_response_v1', 'ideal_conformal_v1', 'physical_transport_v1', depth_formula.MODEL)
 
 
 def apply_initial_voids(state,voids):
@@ -208,6 +209,8 @@ def _advance_surface(state,deltas,ds):
 
 def run_physical_recipe(config,*,progress_cb=None,detail_cb=None,cancel_check=None):
     from .trench_depo import TrenchDepoResult, _compact_redepo_overlay_samples
+    formula = depth_formula.validate_config(config)
+    formula_origin = max(float(y) for x,y in config.points) if formula else 0.
     dose=recipe_nominal_dose(config)
     ds=_finite(config.reparam_ds_a,'surface spacing',positive=True)
     numerical_step=_finite(config.numerical_step_a,'numerical step',positive=True)
@@ -251,7 +254,8 @@ def run_physical_recipe(config,*,progress_cb=None,detail_cb=None,cancel_check=No
         ratios,last_audit=_growth_ratios(reference,config,cancel_check=cancel_check)
         arc=_arc_fraction(reference)
         ion_max=float(max(_ion_ratio(reference,config)[0])) if etch_rate else 0.
-        bound=max(gross_rate*float(max(ratios)),etch_rate*ion_max)
+        bound_ratios = ratios*depth_formula.ratios_at_points(reference,formula,formula_origin) if formula else ratios
+        bound=max(gross_rate*float(max(bound_ratios)),etch_rate*ion_max)
         local_limit=min(numerical_step,.4*ds)
         substeps=max(1,math.ceil(outer_dt*bound/local_limit))
         proposed_increment=outer_dt/substeps
@@ -266,6 +270,10 @@ def run_physical_recipe(config,*,progress_cb=None,detail_cb=None,cancel_check=No
             local=np.interp(_arc_fraction(points),arc,ratios)
             if not is_ald and substep:
                 local,last_audit=_growth_ratios(points,config,cancel_check=cancel_check)
+            if formula:
+                # An empirical spatial rate is reevaluated on the moving surface;
+                # ALD inhibitor site coverage remains frozen per physical cycle.
+                local = local*depth_formula.ratios_at_points(points,formula,formula_origin)
             growth=gross_rate*increment*local
             removed=np.zeros(len(points));redeposited=np.zeros(len(points))
             if etch_rate:
@@ -324,7 +332,7 @@ def run_physical_recipe(config,*,progress_cb=None,detail_cb=None,cancel_check=No
         numerical_steps=numerical_steps,numerical_step_a=numerical_step,reparam_ds_a=ds,
         max_local_step_a=max_local_step,transport_last=last_audit,
         ald_planar_coverage=-math.expm1(-config.ald_exposure) if is_ald and config.recipe_model=='physical_transport_v1' else None,
-        ald_coverage_reset_count=outer_count if is_ald else 0,
+        ald_coverage_reset_count=outer_count if is_ald and (not formula or config.inhibition_enabled) else 0,
         precursor_reemission_model='neutral_diffuse_site_balance' if config.recipe_model=='physical_transport_v1' else 'off',
         sputter_enabled=config.sputter_enabled,sputter_active=bool(etch_rate),
         sputter_model='planar_calibrated_gaussian_yield_geometric_visibility' if etch_rate else 'off',
@@ -347,5 +355,12 @@ def run_physical_recipe(config,*,progress_cb=None,detail_cb=None,cancel_check=No
         limitations=['2D collisionless effective model','ALD co-reactant conversion assumed complete',
                      'ALD geometry frozen for adsorption within one cycle','no gas phase chemistry or ion energy solver',
                      'inhibitor coverage is effective per-cycle/quasi-steady, no desorption history'])
+    if formula:
+        metadata.update(depth_formula=asdict(formula),depth_formula_origin_a=formula_origin,
+            depth_formula_normalization='f(depth)/f(0)',depth_formula_evaluation='every_internal_step')
+        metadata['limitations'] = ['Empirical spatial growth rate, not an ALD adsorption or reactor model',
+            'Depth units and fit validity range require process calibration',
+            'GPC and D/R scale normalized rates; original y units are not inferred',
+            'No growth is supplied to sealed void surfaces']
     return TrenchDepoResult(frame_steps=steps,frame_profiles=profiles,frame_voids=voids,
                            final_profile=list(state.surface.points),meta=metadata)

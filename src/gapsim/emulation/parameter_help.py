@@ -141,7 +141,11 @@ SHORT_NAMES = {
 def effective_help(key, entry, config):
     """Resolve units and mechanism descriptions from the actual selected model."""
     process = getattr(config, 'process_type', 'ald')
-    physical = getattr(config, 'recipe_model', 'legacy_calibrated_v1') in ('physical_transport_v1', 'ideal_conformal_v1')
+    physical = getattr(config, 'recipe_model', 'legacy_calibrated_v1') in ('physical_transport_v1', 'ideal_conformal_v1', 'depth_formula_v1')
+    if key == 'spin_angstrom_per_cycle' and getattr(config, 'recipe_model', '') == 'depth_formula_v1':
+        return spec('GPC · Å/cycle', '평탄부 기준의 한 ALD cycle 성장량입니다. 깊이별로 정규화한 경험식 r=f(z)/f(0)을 곱합니다.',
+                    '같은 cycle 수에서 기준 증착량 감소', '같은 cycle 수에서 기준 증착량 증가', 'ald_gpc',
+                    '원식의 y나 D를 GPC로 추정하지 않습니다. 측정한 평탄부 GPC를 입력하세요. 식각·재부착·억제를 더하면 국소 두께도 변합니다.')
     if key == 'spin_angstrom_per_cycle' and getattr(config, 'recipe_model', '') == 'ideal_conformal_v1':
         return spec('GPC · Å/cycle', '한 ALD cycle의 기준 법선 성장 두께입니다. Conformal에서 추가 효과가 없으면 노출면 전체가 이 두께만큼 자랍니다.',
                     '같은 cycle 수에서 더 얇게 성장', '같은 cycle 수에서 더 두껍게 성장', 'ald_gpc',
@@ -425,10 +429,13 @@ class ParameterHelp(QObject):
             status=(status+'\n' if status else '')+'예시 단면 자료를 읽을 수 없습니다: '+str(error)
         b.caution.setText((status+'\n' if status else '')+entry.caution)
         b.animation.configure(movie,key,entry.kind,getattr(self.owner,'_result',None))
+        b.animation.formula_config = config if entry.kind == 'depth_formula' else None
         b.animation.set_view('auto')
         b.view_buttons['auto'].setChecked(True)
         b.views.setVisible(movie is not None)
         b.plot_note.setText(recipe_note(movie) if movie else '설정의 공간적 의미를 보여주는 설명용 이미지입니다. 물리적 막 형상 변화로 해석하지 마세요.')
+        if entry.kind == 'depth_formula':
+            b.plot_note.setText('현재 구조의 깊이 구간에서 경험식의 성장률을 직접 계산한 그래프입니다. 현재 단면의 시뮬레이션 결과가 아닙니다.')
         screen=anchor.screen().availableGeometry()
         b.resize(min(568,screen.width()-16),min(760,screen.height()-24))
         pos=anchor.mapToGlobal(QPoint(0,0))

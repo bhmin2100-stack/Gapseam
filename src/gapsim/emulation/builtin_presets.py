@@ -3,8 +3,9 @@ from dataclasses import asdict, replace
 from .sfo31_verified import verified_sfo31_config, sfo310_config, STRUCTURE_NAME
 from .sfo31_verified import SAVED_PRESET_KEY, SAVED_PRESET_KEY_310
 from .response_ui import normalized_values
+from .depth_formula import MODEL as DEPTH_MODEL, PRESET_LAWS, Parameters
 
-RECIPE_NAMES = ('SFO3.1', 'SFO3.10', 'SFO3.10-HAR (시험)', 'SFO3.11')
+RECIPE_NAMES = ('SFO3.1', 'SFO3.10', 'SFO3.10-HAR (시험)', 'SFO3.11', *PRESET_LAWS)
 # Qt stores these tuple keys as Python objects. Preserve the exported legacy
 # objects so callers can still locate an existing user copy with findData().
 SAVED_RECIPE_KEYS = dict(zip(RECIPE_NAMES[:2], (SAVED_PRESET_KEY, SAVED_PRESET_KEY_310)))
@@ -15,6 +16,13 @@ STRUCTURE_NAMES = (STRUCTURE_NAME, '사진 구조 CD365 H1839', '테이퍼 Trenc
 def recipe_config(name):
     if name not in RECIPE_NAMES:
         raise KeyError(name)
+    if name in PRESET_LAWS:
+        from .trench_depo import TrenchDepoConfig
+        return TrenchDepoConfig(recipe_model=DEPTH_MODEL,
+            depth_formula=asdict(Parameters(law=PRESET_LAWS[name])),
+            process_type='ald', growth_basis='gross', angstrom_per_cycle=1., cycles=550,
+            reparam_ds_a=20., numerical_step_a=5.,
+            deposition_post_closure_fill_pct_hole=0., deposition_post_closure_fill_pct_line=0.)
     cfg = verified_sfo31_config() if name=='SFO3.1' else sfo310_config()
     values = normalized_values(asdict(cfg))
     if name==RECIPE_NAMES[2]: values['empirical_response']['har_enabled']=True

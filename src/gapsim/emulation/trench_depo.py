@@ -191,6 +191,8 @@ class TrenchDepoConfig:
     ion_growth_fraction: float = 0.0
     # Explicit generic calibration settings; None preserves old saved recipes.
     empirical_response: Optional[Dict[str, Any] | ResponseParameters] = None
+    # Normalized depth law. None leaves every existing recipe unchanged.
+    depth_formula: Optional[Dict[str, Any]] = None
 
 
 @dataclass(frozen=True)

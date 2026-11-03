@@ -8,6 +8,7 @@ from __future__ import annotations
 from PySide6.QtCore import QSignalBlocker
 from PySide6.QtWidgets import QCheckBox, QComboBox, QDoubleSpinBox, QGridLayout, QGroupBox, QLabel, QPushButton, QSpinBox, QWidget
 from .calibrated_response import MODEL
+from . import depth_formula, depth_formula_ui
 from .response_ui import (init_response_controls, response_values, apply_response_values,
                           normalized_values, install_response_layout, sync_response_layout)
 
@@ -33,6 +34,7 @@ RECIPE_WIDGETS = {
 
 def init_recipe_controls(w):
     init_response_controls(w)
+    depth_formula_ui.init_controls(w)
     def combo(name, items):
         control = QComboBox()
         control.setObjectName(name)
@@ -53,7 +55,7 @@ def init_recipe_controls(w):
 
     combo("cmb_process_type", [("ALD", "ald"), ("CVD", "cvd")])
     combo("cmb_recipe_model", [("Conformal · 균일 증착", "ideal_conformal_v1"),
-        ("수송·표면 반응", "physical_transport_v1"), ("보정 응답 · ALD", MODEL),
+        ("수송·표면 반응", "physical_transport_v1"), ("깊이별 성장식 · 경험식", depth_formula.MODEL), ("보정 응답 · ALD", MODEL),
         ("이전 CVD 보정 · 호환", "legacy_calibrated_v1")])
     combo("cmb_growth_basis", [("기준면 순성장량", "net_planar"), ("식각 전 증착량", "gross")])
     combo("cmb_front_scheme", [("기본 이동", "legacy"), ("각도 응답 · 동일 반복", "angular_godunov_v1")])
@@ -92,6 +94,7 @@ def recipe_values(w):
         values["front_scheme"] = "legacy"
         values["ion_growth_fraction"] = 0.
     values['empirical_response'] = response_values(w) if values.get('recipe_model')==MODEL else None
+    values['depth_formula'] = depth_formula_ui.values(w) if values.get('recipe_model')==depth_formula.MODEL else None
     values['deposition_residual_fill_distribution'] = w.cmb_residual_distribution.currentData()
     return values
 
@@ -99,6 +102,7 @@ def recipe_values(w):
 def apply_recipe_values(w, values):
     values = normalized_values(values)
     apply_response_values(w, values)
+    depth_formula_ui.apply_values(w, values.get('depth_formula'))
     distribution = values.get('deposition_residual_fill_distribution', 'exponential_from_closure')
     w.cmb_residual_distribution.setCurrentIndex(w.cmb_residual_distribution.findData(distribution))
     # Missing fields mean an older calibrated run, never the current UI mode.
@@ -202,6 +206,7 @@ def install_recipe_layout(w):
         ("exposure", "ALD 노출량", w.spin_ald_exposure),
     ])
     p.layouts[1].insertWidget(1, w.transport_group)
+    depth_formula_ui.install_layout(w)
     w.recipe_numerical_group, _ = _group("성장 · 수송 해상도", [
         ("rays", "중성입자 방향 수", w.spin_transport_rays),
         ("step", "최대 성장 간격", w.spin_numerical_step),
@@ -293,7 +298,9 @@ def sync_recipe_layout(w):
     w.redepo_distance_group.setVisible(legacy)
     w.inhibition_law_group.setVisible(legacy)
     transport = model == "physical_transport_v1"
+    depth_formula_ui.sync_layout(w)
     w.growth_model_note.setText(
+        "깊이별 성장률을 계산합니다. 식 2·3은 z≤0이며, 계수의 깊이 단위를 확인하세요." if model==depth_formula.MODEL else
         "입자 도달과 표면 반응을 조절합니다." if transport else
         "깊이별 성장과 형상 보정 계수를 조절합니다." if legacy else
         "Conformal은 추가 성장·수송 계수 없이 균일 증착합니다. 수송 효과는 위 성장 모델에서 ‘수송·표면 반응’을 선택하세요.")
@@ -367,6 +374,7 @@ def recipe_result_summary(config, result=None):
     ald = config.process_type == "ald"
     amount = config.cycles*config.angstrom_per_cycle if ald else config.cvd_rate_a_per_s*config.cvd_duration_s
     model_name = {"ideal_conformal_v1":"Conformal · 균일 증착", "physical_transport_v1":"수송·표면 반응",
+                  depth_formula.MODEL:"깊이별 성장식 · 경험식",
                   "legacy_calibrated_v1":"기존 보정 모델", "sfo310_calibrated_v1":"SFO3.10 보정 모델", MODEL:"공통 보정 응답"}.get(config.recipe_model, config.recipe_model)
     basis_name = "기준면 순성장량" if config.growth_basis == "net_planar" else "식각 전 증착량"
     lines = [f"공정: {'ALD' if ald else 'CVD'}", f"성장 모델: {model_name}",
@@ -374,12 +382,18 @@ def recipe_result_summary(config, result=None):
              f"증착속도 D/R {config.cvd_rate_a_per_s:g} Å/s × {config.cvd_duration_s:g} s",
              f"기준 증착량: {amount:g} Å", f"증착량 기준: {basis_name}"]
     if config.recipe_model not in ("legacy_calibrated_v1", "sfo310_calibrated_v1", MODEL):
-        lines += [f"표면 반응확률: {config.precursor_sticking:g}" if config.recipe_model == "physical_transport_v1" else "열린 표면 균일 성장",
+        lines += [f"표면 반응확률: {config.precursor_sticking:g}" if config.recipe_model == "physical_transport_v1" else
+                  "정규화된 깊이 성장률 × GPC/D/R" if config.recipe_model == depth_formula.MODEL else "열린 표면 균일 성장",
                   f"식각: {'ON' if config.sputter_enabled else 'OFF'} · 재부착: {'ON' if config.redepo_enabled else 'OFF'} · 억제: {'ON' if config.inhibition_enabled else 'OFF'}",
                   f"계산 간격: 최대 {config.numerical_step_a:g} Å / 표면 점 {config.reparam_ds_a:g} Å",
                   "2D 단면 유효 모델 · 재료별 계수 보정 필요"]
         if config.recipe_model == "physical_transport_v1" and ald:
             lines.append(f"ALD 노출량: {config.ald_exposure:g} (무차원)")
+        if config.recipe_model == depth_formula.MODEL:
+            p = depth_formula.Parameters(**(config.depth_formula or {}))
+            lines += [depth_formula.description(p),
+                      f"깊이 단위: {'nm (고정)' if p.law=='exponential' else p.depth_unit} · 기준: {'실행 시작 상면' if p.reference=='initial_top' else '현재 상면'}",
+                      "경험식 시험 조건 · 원식 y 단위 미확정 · 실제 공정 계수 보정 필요"]
         if config.sputter_enabled:
             lines += [f"기준면 식각: {config.sputter_strength_a_per_cycle:g} " + ("Å/cycle" if ald else "Å/s"),
                       f"최대 식각 각도: {config.sputter_peak_angle_deg:g}° · 각도 폭: {config.sputter_width_deg:g}°",
