@@ -19,7 +19,9 @@ def recipe_config(name):
     if name in PRESET_LAWS:
         from .trench_depo import TrenchDepoConfig
         return TrenchDepoConfig(recipe_model=DEPTH_MODEL,
-            depth_formula=asdict(Parameters(law=PRESET_LAWS[name])),
+            # Revised source-equation unit. Keep Parameters' legacy nm fallback
+            # so saved configurations are never silently reinterpreted.
+            depth_formula=asdict(Parameters(law=PRESET_LAWS[name], depth_unit='A')),
             process_type='ald', growth_basis='gross', angstrom_per_cycle=1., cycles=550,
             reparam_ds_a=20., numerical_step_a=5.,
             deposition_post_closure_fill_pct_hole=0., deposition_post_closure_fill_pct_line=0.)

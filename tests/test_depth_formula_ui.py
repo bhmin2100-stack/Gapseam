@@ -19,10 +19,22 @@ def test_preset_exposes_equation_controls_and_preserves_structure(window,name):
     window.process_parameter_panel.select(1)
     c=window.current_config()
     assert c.recipe_model==MODEL and c.depth_formula['law']==PRESET_LAWS[name]
+    assert c.depth_formula['depth_unit']=='A'
     assert c.points==before and c.cycles==73
     assert window.depth_formula_group.isVisible()
     assert not window.transport_group.isVisible()
     assert not c.sputter_enabled and not c.redepo_enabled and not c.inhibition_enabled
+
+
+def test_depth_unit_explanation_tracks_loaded_and_edited_unit(window):
+    apply(window,'깊이 3차식 (시험)')
+    control=window.depth_formula_controls['depth_unit']
+    assert '음수 깊이 (Å)' in window.depth_formula_note.text()
+    control.setCurrentIndex(control.findData('nm'))
+    assert '음수 깊이 (nm)' in window.depth_formula_note.text()
+    assert window.current_config().depth_formula['depth_unit']=='nm'
+    apply(window,'깊이 지수식 (시험)')
+    assert 'exp(−0.0000829 × d_Å)' in window.depth_formula_note.text()
 
 
 def test_equation_coefficient_edit_save_reload_and_cache_invalidation(window):

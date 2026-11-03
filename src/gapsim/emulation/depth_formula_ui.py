@@ -92,7 +92,7 @@ def install_layout(w):
         layout.addRow(text, w.depth_formula_controls[key])
     w.depth_formula_equation = QLabel()
     w.depth_formula_equation.setWordWrap(True)
-    w.depth_formula_note = QLabel('r=f(z)/f(0) · GPC/D/R은 평탄부 값으로 별도 지정합니다. 시험 프리셋의 z 단위는 nm 가정입니다.')
+    w.depth_formula_note = QLabel()
     w.depth_formula_note.setWordWrap(True)
     layout.addRow(w.depth_formula_equation)
     layout.addRow(w.depth_formula_note)
@@ -111,3 +111,7 @@ def sync_layout(w):
     for c in (w.depth_formula_labels['depth_unit'],w.depth_formula_controls['depth_unit']):
         c.setVisible(p.law != 'exponential')
     w.depth_formula_equation.setText(description(p))
+    unit_note = ('지수식은 d_nm을 사용하며 exp(−0.0000829 × d_Å)와 같습니다.'
+                 if p.law == 'exponential' else
+                 f'z는 음수 깊이 ({"Å" if p.depth_unit == "A" else "nm"})입니다. 단위를 바꿔도 계수는 자동 변환하지 않습니다.')
+    w.depth_formula_note.setText('r=f(z)/f(0) · GPC/D/R은 평탄부 값으로 별도 지정합니다. ' + unit_note)

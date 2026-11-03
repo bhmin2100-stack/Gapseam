@@ -112,3 +112,29 @@ def test_existing_sealed_void_is_not_filled_by_depth_law():
     c=config('cubic',points=[(-100.,0.),(100.,0.)],initial_voids=[cavity],reparam_ds_a=2.)
     r=run_trench_depo(c)
     assert r.frame_voids[0]==r.frame_voids[-1]
+
+
+@pytest.mark.parametrize('name', PRESET_LAWS)
+def test_shipped_presets_use_angstrom_without_reinterpreting_saved_nm(name):
+    new = recipe_config(name)
+    assert new.depth_formula['depth_unit'] == 'A'
+    old = replace(new, points=POINTS, cycles=4,
+                  depth_formula=asdict(Parameters(law=PRESET_LAWS[name], depth_unit='nm')))
+    result = run_trench_depo(old)
+    restored, replay, _ = payload_to_trench_run(result_to_payload(old, result, request_note='unit preservation'))
+    assert restored.depth_formula['depth_unit'] == 'nm'
+    assert asdict(restored) == asdict(old)
+    assert replay.final_profile == result.final_profile
+    # Legacy dictionaries that omitted a unit retain the previous interpretation.
+    assert load_parameters({'law': PRESET_LAWS[name]}).depth_unit == 'nm'
+
+
+def test_angstrom_formula_range_is_not_silently_clamped():
+    linear = recipe_config('깊이 선형·지수식 (시험)')
+    assert growth_ratios([2000.], load_parameters(linear.depth_formula))[0] == pytest.approx(.0554635812111555)
+    with pytest.raises(ValueError, match='음수'):
+        validate_config(replace(linear, points=[(-100.,0.),(0.,-4000.),(100.,0.)]))
+    cubic = load_parameters(recipe_config('깊이 3차식 (시험)').depth_formula)
+    assert growth_ratios([4000.], cubic)[0] == pytest.approx(30.023/.423)
+    with pytest.raises(ValueError, match='1000배'):
+        growth_ratios([10000.], cubic)
