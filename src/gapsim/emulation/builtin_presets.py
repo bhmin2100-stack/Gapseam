@@ -5,7 +5,8 @@ from .sfo31_verified import SAVED_PRESET_KEY, SAVED_PRESET_KEY_310
 from .response_ui import normalized_values
 from .depth_formula import MODEL as DEPTH_MODEL, PRESET_LAWS, Parameters
 
-RECIPE_NAMES = ('SFO3.1', 'SFO3.10', 'SFO3.10-HAR (시험)', 'SFO3.11', *PRESET_LAWS)
+BOTTOM_UP_PRESET = '하부 우선 ALD (시험)'
+RECIPE_NAMES = ('SFO3.1', 'SFO3.10', 'SFO3.10-HAR (시험)', 'SFO3.11', *PRESET_LAWS, BOTTOM_UP_PRESET)
 # Qt stores these tuple keys as Python objects. Preserve the exported legacy
 # objects so callers can still locate an existing user copy with findData().
 SAVED_RECIPE_KEYS = dict(zip(RECIPE_NAMES[:2], (SAVED_PRESET_KEY, SAVED_PRESET_KEY_310)))
@@ -16,6 +17,16 @@ STRUCTURE_NAMES = (STRUCTURE_NAME, '사진 구조 CD365 H1839', '테이퍼 Trenc
 def recipe_config(name):
     if name not in RECIPE_NAMES:
         raise KeyError(name)
+    if name == BOTTOM_UP_PRESET:
+        from .trench_depo import TrenchDepoConfig
+        # The same inhibitor + precursor sequence repeats each cycle. Existing
+        # Langmuir/transport solver, no depth-polynomial clipping or cavity fill.
+        return TrenchDepoConfig(recipe_model='physical_transport_v1',
+            process_type='ald', growth_basis='net_planar', angstrom_per_cycle=1., cycles=200,
+            precursor_sticking=.01, ald_exposure=10., inhibition_enabled=True,
+            inhibitor_sticking=.7, inhibitor_exposure=2., transport_ray_count=32,
+            reparam_ds_a=20., numerical_step_a=5.,
+            deposition_post_closure_fill_pct_hole=0., deposition_post_closure_fill_pct_line=0.)
     if name in PRESET_LAWS:
         from .trench_depo import TrenchDepoConfig
         return TrenchDepoConfig(recipe_model=DEPTH_MODEL,

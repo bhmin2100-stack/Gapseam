@@ -8770,7 +8770,14 @@ class TrenchDepoWindow(QMainWindow):
 
     def _choose_run_resolution(self, config, *, automatic=False, split=False):
         from gapsim.emulation.depth_formula import validate_config
-        validate_config(config)
+        try:
+            validate_config(config)
+        except ValueError as exc:
+            if (isinstance(config.depth_formula, dict)
+                    and config.depth_formula.get('law') == 'linear_exp' and '음수' in str(exc)):
+                raise ValueError(str(exc) + '\n\n기본 선형·지수식은 아래로 갈수록 감소하는 식입니다. '
+                    '상부 성장을 억제하고 아래부터 채우려면 “하부 우선 ALD (시험)” 프리셋을 선택하세요.') from exc
+            raise
         estimate = estimate_resolution(config.points)
         if estimate.points_at(config.reparam_ds_a) <= POINT_WARNING_THRESHOLD:
             return config

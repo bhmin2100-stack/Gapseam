@@ -58,6 +58,7 @@ def test_invalid_depth_is_rejected_before_worker_or_resolution_dialog(window):
     with patch('gapsim.emulation.trench_depo_ui.QMessageBox.critical') as error, patch('gapsim.emulation.trench_depo_ui._EmulationRunWorker') as worker:
         window.run_emulation()
     assert error.called and '음수' in str(error.call_args)
+    assert '하부 우선 ALD' in str(error.call_args)
     assert not worker.called and window.btn_run.isEnabled()
 
 

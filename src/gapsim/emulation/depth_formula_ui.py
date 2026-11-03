@@ -115,3 +115,6 @@ def sync_layout(w):
                  if p.law == 'exponential' else
                  f'z는 음수 깊이 ({"Å" if p.depth_unit == "A" else "nm"})입니다. 단위를 바꿔도 계수는 자동 변환하지 않습니다.')
     w.depth_formula_note.setText('r=f(z)/f(0) · GPC/D/R은 평탄부 값으로 별도 지정합니다. ' + unit_note)
+    if p.law == 'linear_exp':
+        w.depth_formula_note.setText(w.depth_formula_note.text() +
+            ' 기본 계수는 깊어질수록 성장률이 감소합니다. 아래부터 채우려면 하부 우선 ALD 프리셋을 사용하세요.')
